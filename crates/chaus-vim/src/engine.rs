@@ -250,6 +250,35 @@ impl Engine {
         outcome
     }
 
+    /// Resolve an ambiguous mapping prefix after the timeout. Buffered keys are
+    /// replayed to the base interpreter (never back through the mapping
+    /// table), so a prefix that is also a native command such as `j` still
+    /// performs that command; a prefix with no native meaning reports it.
+    pub fn resolve_mapping_timeout(
+        &mut self,
+        document: &mut Document,
+        selection: &mut Selection,
+    ) -> Outcome {
+        let keys = std::mem::take(&mut self.mapping_prefix);
+        if keys.is_empty() {
+            return Outcome::Handled;
+        }
+        self.changed = false;
+        self.message = None;
+        let mut outcome = Outcome::Handled;
+        for key in keys {
+            let result = self.dispatch_direct(key, document, selection);
+            outcome = merge_outcome(outcome, result);
+        }
+        if self.changed {
+            return Outcome::Changed;
+        }
+        if let Some(message) = self.message.take() {
+            return Outcome::Message(message);
+        }
+        outcome
+    }
+
     pub(crate) fn dispatch_direct(
         &mut self,
         key: Key,

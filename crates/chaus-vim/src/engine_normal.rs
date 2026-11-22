@@ -298,15 +298,26 @@ impl Engine {
         let mut linewise = false;
         match motion_key {
             'h' => {
+                let start = document.line_start(document.line_of(caret));
                 for _ in 0..count {
+                    if target <= start {
+                        break;
+                    }
                     target = document.prev_grapheme_boundary(target);
                 }
             }
             'l' => {
+                let end = document.line_content_end(document.line_of(caret));
                 for _ in 0..count {
-                    target = document.next_grapheme_boundary(target);
+                    if target >= end {
+                        break;
+                    }
+                    let next = document.next_grapheme_boundary(target);
+                    target = next.min(end);
                 }
-                inclusive = true;
+                // `l` moves onto the next character, so the half-open range
+                // ending at `target` already covers exactly one character per
+                // count. Marking it inclusive would delete one extra.
             }
             'w' => {
                 for _ in 0..count {

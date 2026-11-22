@@ -84,12 +84,15 @@ impl Editor {
         cx.spawn(async move |editor, cx| {
             cx.background_executor().timer(MAPPING_TIMEOUT).await;
             editor
-                .update(cx, |editor, cx| {
+                .update_in(cx, |editor, window, cx| {
                     if editor.mapping_epoch != epoch || !editor.vim_engine.mapping_prefix_pending()
                     {
                         return;
                     }
-                    editor.vim_engine.cancel_prefix();
+                    let outcome = editor
+                        .vim_engine
+                        .resolve_mapping_timeout(&mut editor.document, &mut editor.selection);
+                    editor.apply_vim_outcome(outcome, window, cx);
                     cx.notify();
                 })
                 .ok();
