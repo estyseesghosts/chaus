@@ -142,6 +142,12 @@ impl Editor {
         self.start_save(path.clone(), path, had_utf8_bom, None, close_after, cx);
     }
 
+    /// Save the current document through the normal conflict-checked path.
+    /// Returns `true` when a background write was started.
+    pub fn save_now(&mut self, cx: &mut Context<Self>) -> bool {
+        self.save_inner(false, cx)
+    }
+
     /// Save the document, or overwrite a known external change on the second
     /// attempt. Returns `true` when a background write was started.
     pub(crate) fn save_inner(&mut self, close_after: bool, cx: &mut Context<Self>) -> bool {
@@ -228,6 +234,7 @@ impl Editor {
             Ok(meta) => {
                 self.file = Some(FileState { meta });
                 self.force_next_save = false;
+                self.conflict_prompt = None;
                 self.document.mark_saved_at(state);
                 if close_after && !self.document.is_dirty() {
                     window.remove_window();
@@ -240,8 +247,8 @@ impl Editor {
                 }
             }
             Err(SaveError::Conflict(conflict)) => {
-                self.force_next_save = true;
-                self.set_status(format!("{conflict}. Save again to overwrite."));
+                self.show_conflict_prompt(conflict, window, cx);
+                self.set_status(format!("{conflict}"));
             }
             Err(error) => self.set_status(format!("Save failed: {error}")),
         }

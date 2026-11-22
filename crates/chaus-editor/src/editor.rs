@@ -17,6 +17,7 @@ use gpui::{
 use silvestris::ActiveTheme;
 
 use crate::editor_close::ClosePromptFocus;
+use crate::editor_conflict::ConflictPromptFocus;
 use crate::editor_element::EditorElement;
 use crate::editor_file::FileState;
 use crate::editor_find::FindBar;
@@ -52,6 +53,8 @@ pub struct Editor {
     pub(crate) find_bar: Option<FindBar>,
     pub(crate) close_prompt: bool,
     pub(crate) close_focus: ClosePromptFocus,
+    pub(crate) conflict_prompt: Option<chaus_io::SaveConflict>,
+    pub(crate) conflict_focus: ConflictPromptFocus,
     pub(crate) force_next_save: bool,
     pub(crate) vim: bool,
     pub(crate) vim_engine: Engine,
@@ -85,6 +88,7 @@ impl Editor {
             eprintln!("chaus: {diagnostic}");
         }
         let close_focus = ClosePromptFocus::new(cx);
+        let conflict_focus = ConflictPromptFocus::new(cx);
         let mut editor = Self {
             document,
             file,
@@ -107,6 +111,8 @@ impl Editor {
             find_bar: None,
             close_prompt: false,
             close_focus,
+            conflict_prompt: None,
+            conflict_focus,
             force_next_save: false,
             vim,
             vim_engine: Engine::new(mappings),
@@ -315,6 +321,10 @@ impl Render for Editor {
         let status = self.status.clone();
         let find_bar = self.find_bar.is_some().then(|| self.render_find_bar(cx));
         let close_prompt = self.close_prompt.then(|| self.render_close_prompt(cx));
+        let conflict_prompt = self
+            .conflict_prompt
+            .is_some()
+            .then(|| self.render_conflict_prompt(cx));
         let vim_label = self.vim_mode_label();
         let content = div()
             .id("chaus-editor")
@@ -512,7 +522,8 @@ impl Render for Editor {
                 )
             })
             .when_some(find_bar, |element, bar| element.child(bar))
-            .when_some(close_prompt, |element, sheet| element.child(sheet));
+            .when_some(close_prompt, |element, sheet| element.child(sheet))
+            .when_some(conflict_prompt, |element, sheet| element.child(sheet));
         silvestris::chrome::WindowFrame::new(title).child(content)
     }
 }

@@ -816,6 +816,7 @@ dependencies = [
  "chaus-vim",
  "gpui",
  "silvestris",
+ "tempfile",
 ]
 
 [[package]]

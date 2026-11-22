@@ -66,9 +66,9 @@ app-owned. Bundled fonts come from Silvestris; do not add a second copy.
   command reports that no picker is available, so pass paths on the command
   line and use `Ctrl+S` for an already-open file. The Linux helper path has not
   been smoke-tested in this Windows environment.
-- Save conflict handling reports a message and lets the next Save (including
-  `:w`/`:wq`) overwrite; the full Reload / Save As / Overwrite / Cancel sheet is
-  not implemented.
+- Save conflicts show a document-modal Reload / Save As / Overwrite / Cancel
+  sheet. Overwrite is an explicit destructive choice and is never armed by a
+  previous failed save.
 - Closing a dirty window shows a document-modal Save / Discard / Cancel sheet.
   Save starts the normal save path (including Save As for an untitled document);
   a failed or cancelled save leaves the window open.

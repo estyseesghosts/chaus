@@ -10,6 +10,7 @@ description = "GPUI editor view, input bridge and file session for chaus."
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 silvestris = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }
 
 [dependencies]
 chaus-core = { workspace = true }
