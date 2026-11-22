@@ -54,6 +54,7 @@ pub struct Editor {
     pub(crate) caret_visible: bool,
     pub(crate) blink_epoch: u64,
     pub(crate) blink_key: Option<(Selection, bool)>,
+    pub(crate) mapping_epoch: u64,
 }
 
 impl Editor {
@@ -103,6 +104,7 @@ impl Editor {
             caret_visible: true,
             blink_epoch: 0,
             blink_key: None,
+            mapping_epoch: 0,
         };
         editor.rebuild_rows();
         editor

@@ -5,11 +5,17 @@
 //! Normal mode is active, and it prevents Normal-mode letters from leaking into
 //! the platform text-input service.
 
+use std::time::Duration;
+
 use chaus_core::position::Selection;
 use chaus_vim::{Key as VimKey, Mode, Outcome};
 use gpui::{Context, KeyDownEvent, Keystroke, Window};
 
 use crate::editor::Editor;
+
+/// Ambiguous user-mapping prefixes wait this long for another key. The timeout
+/// applies only to mappings, not to an operator waiting for its motion.
+const MAPPING_TIMEOUT: Duration = Duration::from_millis(500);
 
 impl Editor {
     /// Feed a key event to the modal engine. Returns `true` when the event was
@@ -60,7 +66,31 @@ impl Editor {
             .handle_key(key, &mut self.document, &mut self.selection);
         let consumed = !matches!(outcome, Outcome::Unhandled);
         self.apply_vim_outcome(outcome, window, cx);
+        self.arm_mapping_timeout(cx);
         consumed
+    }
+
+    fn arm_mapping_timeout(&mut self, cx: &mut Context<Self>) {
+        if !self.vim_engine.mapping_prefix_pending() {
+            return;
+        }
+        self.mapping_epoch = self.mapping_epoch.wrapping_add(1);
+        let epoch = self.mapping_epoch;
+        cx.spawn(async move |editor, cx| {
+            cx.background_executor().timer(MAPPING_TIMEOUT).await;
+            editor
+                .update(cx, |editor, cx| {
+                    if editor.mapping_epoch != epoch
+                        || !editor.vim_engine.mapping_prefix_pending()
+                    {
+                        return;
+                    }
+                    editor.vim_engine.cancel_prefix();
+                    cx.notify();
+                })
+                .ok();
+        })
+        .detach();
     }
 
     /// Cancel a pending modal sequence from the Escape action.
@@ -127,10 +157,11 @@ impl Editor {
     }
 
     fn run_ex_command(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let mut words = command.split_whitespace();
-        let Some(name) = words.next() else {
-            return;
-        };
+        let name_end = command
+            .find(char::is_whitespace)
+            .unwrap_or(command.len());
+        let name = &command[..name_end];
+        let rest = command[name_end..].trim();
         match name {
             "w" => {
                 self.save_inner(cx);
@@ -148,19 +179,74 @@ impl Editor {
                     window.remove_window();
                 }
             }
-            "e" => {
-                self.set_status(":e {path} is not implemented yet; use Ctrl+O to open a file");
-                cx.notify();
+            "e" | "e!" => {
+                if rest.is_empty() {
+                    self.set_status("usage: :e {path}");
+                    cx.notify();
+                } else {
+                    self.open_path(std::path::Path::new(rest), name == "e!", cx);
+                }
             }
-            "set" => {
-                self.set_status("Change settings in _chausrc");
-                cx.notify();
-            }
+            "set" => self.run_set_command(rest, cx),
             _ => {
                 self.set_status(format!("unknown Ex command ':{name}'"));
                 cx.notify();
             }
         }
+    }
+
+    fn run_set_command(&mut self, arguments: &str, cx: &mut Context<Self>) {
+        if arguments.is_empty() {
+            self.set_status("usage: :set wrap|nowrap|expandtab|noexpandtab|tabstop=N");
+            cx.notify();
+            return;
+        }
+        let mut settings = self.settings.clone();
+        let mut changed = false;
+        for argument in arguments.split_whitespace() {
+            match argument {
+                "wrap" => {
+                    settings.wrap = true;
+                    changed = true;
+                }
+                "nowrap" => {
+                    settings.wrap = false;
+                    changed = true;
+                }
+                "expandtab" => {
+                    settings.expand_tabs = true;
+                    changed = true;
+                }
+                "noexpandtab" => {
+                    settings.expand_tabs = false;
+                    changed = true;
+                }
+                _ => {
+                    if let Some(value) = argument.strip_prefix("tabstop=") {
+                        match value.parse::<usize>() {
+                            Ok(tab_stop) if (1..=16).contains(&tab_stop) => {
+                                settings.tab_stop = tab_stop;
+                                changed = true;
+                            }
+                            _ => {
+                                self.set_status("tabstop must be between 1 and 16");
+                                cx.notify();
+                                return;
+                            }
+                        }
+                    } else {
+                        self.set_status(format!("unsupported setting '{argument}'"));
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.set_settings(settings);
+            self.set_status("Settings updated for this window");
+        }
+        cx.notify();
     }
 }
 

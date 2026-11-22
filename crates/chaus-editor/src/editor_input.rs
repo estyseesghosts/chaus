@@ -160,6 +160,18 @@ impl EntityInputHandler for Editor {
         ))
     }
 
+    fn selection_bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Bounds<Pixels>> {
+        self.bounds_for_range(range_utf16, element_bounds, window, cx)
+            .into_iter()
+            .collect()
+    }
+
     fn character_index_for_point(
         &mut self,
         point: Point<Pixels>,

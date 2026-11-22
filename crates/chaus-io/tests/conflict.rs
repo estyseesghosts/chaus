@@ -51,3 +51,29 @@ fn save_refuses_when_the_target_cannot_be_read() {
     assert!(matches!(&error, SaveError::Io { .. }), "got {error:?}");
     assert!(path.is_dir(), "the unreadable target must be left in place");
 }
+
+#[test]
+fn save_refuses_to_break_additional_hard_links() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("target.txt");
+    let other_link = directory.path().join("other-link.txt");
+    fs::write(&path, b"original").expect("write fixture");
+    fs::hard_link(&path, &other_link).expect("hard link");
+
+    let error = save(SaveRequest::new(
+        &path,
+        &path,
+        b"replacement",
+        false,
+        Eol::Lf,
+        None,
+    ))
+    .expect_err("a multiply-linked target must not be replaced silently");
+
+    match &error {
+        SaveError::MultipleLinks { links, .. } => assert_eq!(*links, 2),
+        other => panic!("expected a hard-link refusal, got {other:?}"),
+    }
+    assert_eq!(fs::read(&path).expect("read target"), b"original");
+    assert_eq!(fs::read(&other_link).expect("read link"), b"original");
+}

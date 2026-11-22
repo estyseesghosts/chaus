@@ -72,7 +72,7 @@ impl Engine {
                 }
                 Outcome::Handled
             }
-            'i' => self.enter_insert(selection, selection.head, 'i'),
+            'i' => self.enter_insert(document, selection, selection.head, 'i'),
             'a' => {
                 let head = selection.head;
                 let line = document.line_of(head);
@@ -82,17 +82,17 @@ impl Engine {
                 } else {
                     end
                 };
-                self.enter_insert(selection, target, 'a')
+                self.enter_insert(document, selection, target, 'a')
             }
             'I' => {
                 let line = document.line_of(selection.head);
                 let target = motion::first_non_space(document, line);
-                self.enter_insert(selection, target, 'I')
+                self.enter_insert(document, selection, target, 'I')
             }
             'A' => {
                 let line = document.line_of(selection.head);
                 let target = document.line_content_end(line);
-                self.enter_insert(selection, target, 'A')
+                self.enter_insert(document, selection, target, 'A')
             }
             'o' => self.open_line(document, selection, true),
             'O' => self.open_line(document, selection, false),
@@ -409,12 +409,17 @@ impl Engine {
         linewise: bool,
         keys: Option<Vec<Key>>,
     ) -> Outcome {
+        // A Change and everything typed into the resulting Insert session are
+        // one user operation, so one undo removes the whole change.
+        if operator == Operator::Change {
+            document.begin_user_operation();
+        }
         if range.is_empty() {
             if operator == Operator::Change {
                 let keys = keys.map(|keys| self.counted_keys(keys)).unwrap_or_default();
                 self.reset_count();
                 *selection = Selection::caret(range.start);
-                self.begin_insert(range.start, keys, true);
+                self.begin_insert(range.start, keys, true, 1);
                 self.set_mode(Mode::Insert);
                 return Outcome::Handled;
             }
@@ -456,12 +461,12 @@ impl Engine {
                 };
                 if let Some(keys) = keys {
                     if applied.enter_insert {
-                        self.begin_insert(applied.caret, keys, true);
+                        self.begin_insert(applied.caret, keys, true, 1);
                     } else {
                         self.record_change(keys, None);
                     }
                 } else if applied.enter_insert {
-                    self.begin_insert(applied.caret, Vec::new(), false);
+                    self.begin_insert(applied.caret, Vec::new(), false, 1);
                 }
                 if applied.enter_insert {
                     self.set_mode(Mode::Insert);
@@ -474,6 +479,9 @@ impl Engine {
                 }
             }
             None => {
+                if operator == Operator::Change {
+                    document.end_user_operation();
+                }
                 self.message("edit was rejected");
                 Outcome::Handled
             }
@@ -482,13 +490,17 @@ impl Engine {
 
     fn enter_insert(
         &mut self,
+        document: &mut Document,
         selection: &mut Selection,
         offset: CharOffset,
         command: char,
     ) -> Outcome {
+        let repeat = self.count();
+        let keys = self.counted_keys(vec![Key::Char(command)]);
+        document.begin_user_operation();
         *selection = Selection::caret(offset);
         self.set_mode(Mode::Insert);
-        self.begin_insert(offset, vec![Key::Char(command)], false);
+        self.begin_insert(offset, keys, false, repeat);
         self.set_visual_anchor(None);
         self.clear_pending();
         Outcome::Handled
@@ -523,6 +535,7 @@ impl Engine {
                 CharOffset(start.0 + indent_length),
             )
         };
+        document.begin_user_operation();
         let transaction = EditTransaction::new(
             EditCause::Vim,
             TextEdit::insertion(at, insert),
@@ -534,11 +547,12 @@ impl Engine {
                 *selection = Selection::caret(caret);
                 self.set_mode(Mode::Insert);
                 let command = if below { 'o' } else { 'O' };
-                self.begin_insert(caret, vec![Key::Char(command)], true);
+                self.begin_insert(caret, vec![Key::Char(command)], true, 1);
                 self.set_changed();
                 Outcome::Changed
             }
             Err(_) => {
+                document.end_user_operation();
                 self.message("could not open a line");
                 Outcome::Handled
             }
@@ -690,10 +704,16 @@ impl Engine {
             self.message("nothing to repeat");
             return Outcome::Handled;
         };
-        // A count before `.` would multiply an already-counted command. The
-        // recorded keys carry the original count, so discard the prefix.
+        // Vim replaces the original count when `.` has a count of its own;
+        // strip any recorded digits and prepend the requested count.
+        let override_count = (self.count > 0).then(|| self.count());
         self.reset_count();
         let LastChange { keys, inserted } = change;
+        let keys = if let Some(count) = override_count {
+            with_count_override(keys, count)
+        } else {
+            keys
+        };
         self.begin_replay();
         for key in keys {
             let outcome = self.dispatch_direct(key, document, selection);
@@ -724,13 +744,29 @@ impl Engine {
 
     pub(crate) fn finish_insert(&mut self, document: &mut Document, selection: &mut Selection) {
         let mut move_back = false;
-        if let Some((start, keys, always_record)) = self.take_insert_session() {
+        if let Some((start, keys, always_record, repeat)) = self.take_insert_session() {
             let inserted = if selection.head >= start {
                 document.slice(CharRange::new(start, selection.head))
             } else {
                 String::new()
             };
             let has_text = !inserted.is_empty();
+            if has_text && repeat > 1 {
+                let extra = inserted.repeat(repeat - 1);
+                let before = *selection;
+                let caret = CharOffset(selection.head.0 + extra.chars().count());
+                if document
+                    .apply(EditTransaction::new(
+                        EditCause::Vim,
+                        TextEdit::insertion(selection.head, extra),
+                        before,
+                        Selection::caret(caret),
+                    ))
+                    .is_ok()
+                {
+                    *selection = Selection::caret(caret);
+                }
+            }
             // `a`/`A` place the Insert caret after an existing character, so
             // leaving without typing still steps back onto that character.
             let entered_after = matches!(keys.first(), Some(Key::Char('a' | 'A')));
@@ -747,6 +783,7 @@ impl Engine {
                 *selection = Selection::caret(motion::clamp_normal(document, target));
             }
         }
+        document.end_user_operation();
         self.set_mode(Mode::Normal);
         self.clear_pending();
     }
@@ -826,4 +863,15 @@ impl Engine {
     pub(crate) fn set_pending(&mut self, pending: Option<Pending>) {
         *self.pending() = pending;
     }
+}
+
+/// Replace the leading count digits of a recorded command. Vim uses a count
+/// before `.` in place of the original command's count.
+fn with_count_override(keys: Vec<Key>, count: usize) -> Vec<Key> {
+    let rest = keys
+        .into_iter()
+        .skip_while(|key| matches!(key, Key::Char(character) if character.is_ascii_digit()));
+    let mut overridden: Vec<Key> = count.to_string().chars().map(Key::Char).collect();
+    overridden.extend(rest);
+    overridden
 }

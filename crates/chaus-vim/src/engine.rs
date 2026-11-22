@@ -71,6 +71,7 @@ pub struct Engine {
     insert_start: Option<CharOffset>,
     insert_keys: Option<Vec<Key>>,
     insert_always_records: bool,
+    insert_repeat: usize,
     changed: bool,
     message: Option<String>,
     replaying: bool,
@@ -111,6 +112,7 @@ impl Engine {
             insert_start: None,
             insert_keys: None,
             insert_always_records: false,
+            insert_repeat: 1,
             changed: false,
             message: None,
             replaying: false,
@@ -126,6 +128,12 @@ impl Engine {
     #[must_use]
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// Whether an ambiguous mapping prefix is waiting for another key.
+    #[must_use]
+    pub fn mapping_prefix_pending(&self) -> bool {
+        !self.mapping_prefix.is_empty()
     }
 
     /// Drop a partially typed command, count, mapping prefix, Visual selection
@@ -400,17 +408,27 @@ impl Engine {
     /// Start an Insert-mode session. `keys` are the Normal-mode keys that
     /// entered the mode, and `always_record` keeps an empty change (for
     /// operators and `o`/`O`) available to `.`.
-    pub(crate) fn begin_insert(&mut self, start: CharOffset, keys: Vec<Key>, always_record: bool) {
+    pub(crate) fn begin_insert(
+        &mut self,
+        start: CharOffset,
+        keys: Vec<Key>,
+        always_record: bool,
+        repeat: usize,
+    ) {
         self.insert_start = Some(start);
         self.insert_keys = Some(keys);
         self.insert_always_records = always_record;
+        self.insert_repeat = repeat.max(1);
     }
 
-    pub(crate) fn take_insert_session(&mut self) -> Option<(CharOffset, Vec<Key>, bool)> {
+    pub(crate) fn take_insert_session(
+        &mut self,
+    ) -> Option<(CharOffset, Vec<Key>, bool, usize)> {
         let start = self.insert_start.take()?;
         let keys = self.insert_keys.take().unwrap_or_default();
         let always_record = std::mem::take(&mut self.insert_always_records);
-        Some((start, keys, always_record))
+        let repeat = std::mem::replace(&mut self.insert_repeat, 1);
+        Some((start, keys, always_record, repeat))
     }
 }
 

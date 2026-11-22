@@ -148,7 +148,7 @@ impl Engine {
                 self.set_changed();
                 if applied.enter_insert {
                     self.set_mode(Mode::Insert);
-                    self.begin_insert(applied.caret, Vec::new(), false);
+                    self.begin_insert(applied.caret, Vec::new(), false, 1);
                 } else {
                     self.set_mode(Mode::Normal);
                 }

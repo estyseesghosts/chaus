@@ -247,6 +247,13 @@ fn multi_edit_transaction_invalidates_lines_shifted_by_a_lower_edit() {
 
     assert_eq!(document.text(), "\n\na\nb\nX");
     assert_eq!(document.len_lines(), 5);
+    assert_eq!(result.edits.len(), 2);
+    assert_eq!(document.slice(result.edits[0].new_range), "\n\n");
+    assert_eq!(
+        document.slice(result.edits[1].new_range),
+        "X",
+        "applied ranges must refer to the final document"
+    );
     assert_eq!(
         result.affected_lines.end,
         LineIndex(document.len_lines()),

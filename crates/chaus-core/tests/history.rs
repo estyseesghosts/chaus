@@ -155,3 +155,38 @@ fn a_transaction_with_several_disjoint_edits_undoes_as_one_step() {
     document.redo();
     assert_eq!(document.text(), "AbcdEf");
 }
+
+#[test]
+fn user_operation_groups_transactions_into_one_undo_step() {
+    let mut document = Document::new();
+    document.begin_user_operation();
+    type_char(&mut document, 0, "a");
+    type_char(&mut document, 1, "b");
+    type_char(&mut document, 2, "c");
+    document.end_user_operation();
+
+    assert_eq!(document.text(), "abc");
+    assert_eq!(document.undo_depth(), 1);
+    document.undo();
+    assert_eq!(document.text(), "");
+    assert!(!document.is_dirty());
+}
+
+#[test]
+fn saving_inside_a_group_does_not_make_later_grouped_text_clean() {
+    let mut document = Document::new();
+    type_char(&mut document, 0, "a");
+    document.mark_saved();
+
+    document.begin_user_operation();
+    type_char(&mut document, 1, "b");
+    document.mark_saved();
+    type_char(&mut document, 2, "c");
+    document.end_user_operation();
+
+    assert_eq!(document.text(), "abc");
+    assert!(document.is_dirty(), "text appended after the save is unsaved");
+    document.undo();
+    assert_eq!(document.text(), "ab");
+    assert!(!document.is_dirty(), "one undo returns to the saved branch");
+}

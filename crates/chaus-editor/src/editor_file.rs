@@ -1,7 +1,10 @@
 //! Per-window file session: save, save-as, dirty close policy.
 
+use std::path::Path;
+
+use chaus_core::position::{CharOffset, Selection};
 use chaus_io::FileMeta;
-use gpui::{Context, Window};
+use gpui::{px, Context, Window};
 
 use crate::editor::Editor;
 use crate::editor_keys::{Save, SaveAs};
@@ -14,6 +17,43 @@ pub struct FileState {
 }
 
 impl Editor {
+    /// Replace this window's document with a loaded file. Dirty documents are
+    /// refused unless `force` is set (the `:e!` form).
+    pub(crate) fn open_path(&mut self, path: &Path, force: bool, cx: &mut Context<Self>) -> bool {
+        if self.document.is_dirty() && !force {
+            self.set_status("No write since last change (add ! to override)");
+            cx.notify();
+            return false;
+        }
+        match chaus_io::load(path) {
+            Ok(loaded) => {
+                self.document
+                    .reset(loaded.text, loaded.eol, loaded.preferred_eol);
+                self.file = Some(FileState { meta: loaded.meta });
+                self.selection = Selection::caret(CharOffset::ZERO);
+                self.preferred_column = None;
+                self.scroll_row = 0.0;
+                self.scroll_x = px(0.);
+                self.marked = None;
+                self.preedit_start = None;
+                self.preedit_active = false;
+                self.close_confirmed = false;
+                self.force_next_save = false;
+                self.document.cancel_user_operation();
+                self.vim_engine.reset();
+                self.rebuild_rows();
+                self.set_status(format!("Opened {}", path.display()));
+                cx.notify();
+                true
+            }
+            Err(error) => {
+                self.set_status(format!("Open failed: {error}"));
+                cx.notify();
+                false
+            }
+        }
+    }
+
     pub(crate) fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
         if self.file.is_none() {
             self.save_as(&SaveAs, window, cx);

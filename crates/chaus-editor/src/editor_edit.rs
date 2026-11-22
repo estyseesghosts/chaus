@@ -235,6 +235,7 @@ impl Editor {
 
     pub(crate) fn toggle_vim(&mut self, _: &ToggleVim, _: &mut Window, cx: &mut Context<Self>) {
         self.vim = !self.vim;
+        self.document.cancel_user_operation();
         self.vim_engine.reset();
         if !self.vim {
             self.selection = Selection::caret(self.selection.head);

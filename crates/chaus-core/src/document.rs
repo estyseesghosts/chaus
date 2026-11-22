@@ -112,7 +112,9 @@ pub struct TextPoint {
     pub column_bytes: usize,
 }
 
-/// The effect of one applied edit, in pre-edit and post-edit coordinates.
+/// The effect of one applied edit, in pre-edit and final post-edit
+/// coordinates. Multiple edits in one transaction are rebased after all edits
+/// so every range refers to the final document.
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct AppliedEdit {
@@ -294,12 +296,18 @@ struct EolOp {
 
 #[derive(Debug)]
 struct HistoryEntry {
-    /// Steps in the order they were applied (descending char offsets).
+    /// Steps in the order they were applied (descending char offsets within
+    /// each transaction, transactions in chronological order).
     steps: Vec<UndoStep>,
     before_selection: Selection,
     after_selection: Selection,
     cause: EditCause,
     time: Instant,
+    /// Identity of the history state before and after this entry. State
+    /// identities are unique, unlike undo-stack depths, so branching and
+    /// coalescing cannot make a different state look saved.
+    before_state: u64,
+    after_state: u64,
 }
 
 impl HistoryEntry {
@@ -325,7 +333,11 @@ pub struct Document {
     preferred_eol: Eol,
     undo_stack: Vec<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
-    save_position: Option<usize>,
+    current_state: u64,
+    saved_state: u64,
+    next_state: u64,
+    group_depth: usize,
+    group_start_depth: usize,
     utf16: RefCell<Utf16Index>,
 }
 
@@ -364,7 +376,11 @@ impl Document {
             preferred_eol,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            save_position: Some(0),
+            current_state: 0,
+            saved_state: 0,
+            next_state: 1,
+            group_depth: 0,
+            group_start_depth: 0,
             utf16: RefCell::new(utf16),
         }
     }
@@ -587,15 +603,10 @@ impl Document {
             }
         }
 
-        // A saved state deeper than this point depends on entries that undo
-        // moved to the redo stack; the new edit discards that branch.
-        let history_depth = self.undo_stack.len();
         let was_contiguous_typing = self.can_coalesce(cause, &edits, before_selection);
+        let grouped = self.group_depth > 0 && self.undo_stack.len() > self.group_start_depth;
         let mut steps = Vec::with_capacity(edits.len());
         let mut applied = Vec::with_capacity(edits.len());
-        let mut affected_start = LineIndex(usize::MAX);
-        let mut affected_end = LineIndex::ZERO;
-
         // Descending application keeps all lower original offsets valid.
         for edit in edits.iter().rev() {
             let old_start_line = self.line_of(edit.range.start);
@@ -638,9 +649,6 @@ impl Document {
             let new_end_point = self.text_point(new_end_offset);
             self.patch_utf16_lines(old_start_line, old_end_line, new_start_line, new_end_line);
 
-            affected_start = affected_start.min(old_start_line);
-            affected_end = affected_end.max(LineIndex(new_end_line.0 + 1));
-
             steps.push(UndoStep {
                 edit: edit.clone(),
                 removed: removed.clone(),
@@ -666,44 +674,59 @@ impl Document {
         // `steps` stay in application order (descending offsets); undo walks
         // them backwards.
         applied.reverse();
+        // Ranges recorded while applying refer to intermediate documents when
+        // a transaction has several edits. Rebase them onto the final text in
+        // ascending offset order, accumulating each edit's length delta.
+        let mut shift: isize = 0;
+        let mut affected_start = LineIndex(usize::MAX);
+        let mut affected_end = LineIndex::ZERO;
+        for applied_edit in &mut applied {
+            let inserted = applied_edit.inserted_text.chars().count();
+            let removed = applied_edit.old_range.end.0 - applied_edit.old_range.start.0;
+            let start = CharOffset((applied_edit.old_range.start.0 as isize + shift) as usize);
+            let end = CharOffset(start.0 + inserted);
+            applied_edit.new_range = CharRange::new(start, end);
+            applied_edit.new_byte_range =
+                self.rope.char_to_byte(start.0)..self.rope.char_to_byte(end.0);
+            applied_edit.new_end_point = self.text_point(end);
+            affected_start = affected_start.min(self.line_of(start));
+            affected_end = affected_end.max(LineIndex(self.line_of(end).0 + 1));
+            shift += inserted as isize - removed as isize;
+        }
         self.revision = self.revision.next();
 
+        let after_state = self.fresh_state();
         let entry = HistoryEntry {
             steps,
             before_selection,
             after_selection,
             cause,
             time: Instant::now(),
+            before_state: self.current_state,
+            after_state,
         };
         self.redo_stack.clear();
-        if was_contiguous_typing {
+        let append_to_last = (grouped || was_contiguous_typing)
+            && self
+                .undo_stack
+                .last()
+                .is_some_and(|last| last.after_state != self.saved_state);
+        if append_to_last {
             if let Some(last) = self.undo_stack.last_mut() {
                 last.steps.extend(entry.steps);
                 last.after_selection = entry.after_selection;
                 last.time = entry.time;
+                last.after_state = after_state;
             }
         } else {
             self.undo_stack.push(entry);
         }
-        if self
-            .save_position
-            .is_some_and(|position| position > history_depth)
-        {
-            self.save_position = None;
-        }
+        self.current_state = after_state;
 
-        // Line numbers collected above are valid in the coordinate frame at
-        // the moment each edit was applied. A lower edit can shift an earlier
-        // edit's lines, so multiple edits conservatively invalidate the whole
-        // layout rather than under-reporting stale wrapped rows.
-        let affected_lines = if edits.len() > 1 {
-            LineRange::new(LineIndex::ZERO, LineIndex(self.len_lines()))
-        } else {
-            LineRange::new(
-                affected_start,
-                LineIndex(affected_end.0.max(affected_start.0 + 1)),
-            )
-        };
+        let affected_lines = LineRange::new(
+            affected_start,
+            LineIndex(affected_end.0.max(affected_start.0 + 1)),
+        );
         Ok(EditResult {
             revision: self.revision,
             edits: applied,
@@ -722,11 +745,8 @@ impl Document {
         let Some(last) = self.undo_stack.last() else {
             return false;
         };
-        // Never fold new text into the entry that represents the on-disk
-        // baseline: the length of the undo stack would not change, so
-        // `is_dirty` would wrongly report the document as saved.
-        self.save_position != Some(self.undo_stack.len())
-            && last.cause == EditCause::Typing
+        last.cause == EditCause::Typing
+            && last.after_state != self.saved_state
             && last.after_selection.is_empty()
             && last.after_selection.head == edit.range.start
             && last.after_selection == before
@@ -816,6 +836,7 @@ impl Document {
         entry.undo(self);
         self.revision = self.revision.next();
         let selection = entry.before_selection.clamp(self.len_chars());
+        self.current_state = entry.before_state;
         self.redo_stack.push(entry);
         Some(selection)
     }
@@ -825,18 +846,51 @@ impl Document {
         entry.redo(self);
         self.revision = self.revision.next();
         let selection = entry.after_selection.clamp(self.len_chars());
+        self.current_state = entry.after_state;
         self.undo_stack.push(entry);
         Some(selection)
     }
 
     #[must_use]
     pub fn is_dirty(&self) -> bool {
-        self.save_position != Some(self.undo_stack.len())
+        self.current_state != self.saved_state
     }
 
     /// Mark the current history position as the on-disk baseline.
     pub fn mark_saved(&mut self) {
-        self.save_position = Some(self.undo_stack.len());
+        self.saved_state = self.current_state;
+    }
+
+    fn fresh_state(&mut self) -> u64 {
+        let state = self.next_state;
+        self.next_state = self.next_state.wrapping_add(1);
+        state
+    }
+
+    /// Begin an explicit user operation. Transactions applied while a group is
+    /// open share one undo entry, so a Vim change and the text typed into the
+    /// resulting Insert session undo together. Groups nest.
+    pub fn begin_user_operation(&mut self) {
+        if self.group_depth == 0 {
+            self.group_start_depth = self.undo_stack.len();
+        }
+        self.group_depth += 1;
+    }
+
+    /// Close the innermost user operation. The outermost close returns history
+    /// to normal per-transaction grouping.
+    pub fn end_user_operation(&mut self) {
+        self.group_depth = self.group_depth.saturating_sub(1);
+        if self.group_depth == 0 {
+            self.group_start_depth = 0;
+        }
+    }
+
+    /// Abandon any open user operation without merging further transactions.
+    /// Used when Vim mode is disabled or the document is replaced.
+    pub fn cancel_user_operation(&mut self) {
+        self.group_depth = 0;
+        self.group_start_depth = 0;
     }
 
     /// Replace the whole document (file reload). Clears history and marks the
@@ -849,7 +903,11 @@ impl Document {
         self.utf16 = replacement.utf16;
         self.undo_stack.clear();
         self.redo_stack.clear();
-        self.save_position = Some(0);
+        let state = self.fresh_state();
+        self.current_state = state;
+        self.saved_state = state;
+        self.group_depth = 0;
+        self.group_start_depth = 0;
         self.revision = self.revision.next();
     }
 

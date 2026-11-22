@@ -258,3 +258,64 @@ fn literal_mappings_respect_the_key_cap() {
     assert!(mappings.is_empty());
     assert_eq!(diagnostics.len(), 1);
 }
+
+#[test]
+fn change_and_its_inserted_text_undo_as_one_step() {
+    let mut document = Document::from_source_text("one two");
+    let mut selection = Selection::caret(CharOffset::ZERO);
+    let mut engine = Engine::new(Vec::new());
+
+    press(&mut engine, &mut document, &mut selection, "ciw");
+    type_text(&mut document, &mut selection, "X");
+    press(&mut engine, &mut document, &mut selection, "\u{1b}");
+
+    assert_eq!(document.text(), "X two");
+    assert_eq!(document.undo_depth(), 1);
+    document.undo();
+    assert_eq!(document.text(), "one two");
+}
+
+#[test]
+fn an_insert_session_undoes_as_one_step_across_newlines() {
+    let mut document = Document::from_source_text("ab");
+    let mut selection = Selection::caret(CharOffset(1));
+    let mut engine = Engine::new(Vec::new());
+
+    press(&mut engine, &mut document, &mut selection, "i");
+    type_text(&mut document, &mut selection, "x\ny");
+    press(&mut engine, &mut document, &mut selection, "\u{1b}");
+
+    assert_eq!(document.text(), "ax\nyb");
+    assert_eq!(document.undo_depth(), 1);
+    document.undo();
+    assert_eq!(document.text(), "ab");
+}
+
+#[test]
+fn insert_count_repeats_the_typed_text() {
+    let mut document = Document::from_source_text("ab");
+    let mut selection = Selection::caret(CharOffset(1));
+    let mut engine = Engine::new(Vec::new());
+
+    press(&mut engine, &mut document, &mut selection, "3i");
+    type_text(&mut document, &mut selection, "x");
+    press(&mut engine, &mut document, &mut selection, "\u{1b}");
+
+    assert_eq!(document.text(), "axxxb");
+    assert_eq!(document.undo_depth(), 1);
+    document.undo();
+    assert_eq!(document.text(), "ab");
+}
+
+#[test]
+fn a_count_before_dot_replaces_the_recorded_count() {
+    let mut document = Document::from_source_text("a b c d e f");
+    let mut selection = Selection::caret(CharOffset::ZERO);
+    let mut engine = Engine::new(Vec::new());
+
+    press(&mut engine, &mut document, &mut selection, "2dw");
+    assert_eq!(document.text(), "c d e f");
+
+    press(&mut engine, &mut document, &mut selection, "3.");
+    assert_eq!(document.text(), "f");
+}

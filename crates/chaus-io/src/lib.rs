@@ -190,13 +190,13 @@ pub fn fingerprint(bytes: &[u8]) -> u64 {
 }
 
 fn file_identity(path: &Path) -> Option<FileIdentity> {
-    let metadata = fs::metadata(path).ok()?;
-    platform_identity(&metadata)
+    platform_identity(path)
 }
 
 #[cfg(unix)]
-fn platform_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
+fn platform_identity(path: &Path) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
+    let metadata = fs::metadata(path).ok()?;
     Some(FileIdentity {
         volume: metadata.dev(),
         index: metadata.ino(),
@@ -204,16 +204,31 @@ fn platform_identity(metadata: &fs::Metadata) -> Option<FileIdentity> {
 }
 
 #[cfg(windows)]
-fn platform_identity(_metadata: &fs::Metadata) -> Option<FileIdentity> {
-    // `MetadataExt::file_index` is still unstable on the pinned toolchain.
-    // Content hashing plus size/mtime guards saves on Windows; the volume/file
-    // index can be added through GetFileInformationByHandle later.
-    None
+fn platform_identity(path: &Path) -> Option<FileIdentity> {
+    windows_identity(path)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn platform_identity(_metadata: &fs::Metadata) -> Option<FileIdentity> {
+fn platform_identity(_path: &Path) -> Option<FileIdentity> {
     None
+}
+
+/// Number of hard links to `path`, where the platform can report it.
+fn hard_link_count(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(path).ok().map(|metadata| metadata.nlink())
+    }
+    #[cfg(windows)]
+    {
+        windows_link_count(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// Why a save may not proceed automatically.
@@ -284,11 +299,7 @@ pub fn check_conflict(meta: &FileMeta) -> Result<(), ConflictCheckError> {
             });
         }
     };
-    let current_meta = fs::metadata(&meta.canonical_target).ok();
-    let identity_changed = match (
-        meta.identity,
-        current_meta.as_ref().and_then(platform_identity),
-    ) {
+    let identity_changed = match (meta.identity, platform_identity(&meta.canonical_target)) {
         (Some(expected), Some(actual)) => expected != actual,
         _ => false,
     };
@@ -346,6 +357,10 @@ pub enum SaveError {
         path: PathBuf,
         source: std::io::Error,
     },
+    MultipleLinks {
+        path: PathBuf,
+        links: u64,
+    },
 }
 
 impl std::fmt::Display for SaveError {
@@ -360,6 +375,11 @@ impl std::fmt::Display for SaveError {
                     path.display()
                 )
             }
+            SaveError::MultipleLinks { path, links } => write!(
+                formatter,
+                "{}: file has {links} hard links; save as a new file or break the links first",
+                path.display()
+            ),
         }
     }
 }
@@ -368,7 +388,7 @@ impl std::error::Error for SaveError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             SaveError::Io { source, .. } | SaveError::ReplaceFailed { source, .. } => Some(source),
-            SaveError::Conflict(_) => None,
+            SaveError::Conflict(_) | SaveError::MultipleLinks { .. } => None,
         }
     }
 }
@@ -381,17 +401,28 @@ pub fn save(request: SaveRequest<'_>) -> Result<FileMeta, SaveError> {
     // Compare and commit against the same canonical spelling that `load`
     // recorded, otherwise Windows' `\\?\` prefix would defeat conflict checks.
     let target = canonical_spelling(request.target);
-    if let Some(baseline) = request.baseline {
-        if baseline.canonical_target == target {
-            match check_conflict(baseline) {
-                Ok(()) => {}
-                Err(ConflictCheckError::Conflict(conflict)) => {
-                    return Err(SaveError::Conflict(conflict));
-                }
-                Err(ConflictCheckError::Io { path, source }) => {
-                    return Err(SaveError::Io { path, source });
-                }
+    let check_baseline = |baseline: Option<&FileMeta>| -> Result<(), SaveError> {
+        let Some(baseline) = baseline else {
+            return Ok(());
+        };
+        if baseline.canonical_target != target {
+            return Ok(());
+        }
+        match check_conflict(baseline) {
+            Ok(()) => Ok(()),
+            Err(ConflictCheckError::Conflict(conflict)) => {
+                Err(SaveError::Conflict(conflict))
             }
+            Err(ConflictCheckError::Io { path, source }) => Err(SaveError::Io { path, source }),
+        }
+    };
+    check_baseline(request.baseline)?;
+    if let Some(links) = hard_link_count(&target) {
+        if links > 1 {
+            return Err(SaveError::MultipleLinks {
+                path: target.clone(),
+                links,
+            });
         }
     }
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
@@ -416,6 +447,10 @@ pub fn save(request: SaveRequest<'_>) -> Result<FileMeta, SaveError> {
     }
 
     let temporary_path = temporary.into_temp_path();
+    // Revalidate immediately before the commit. This cannot make the check
+    // atomic with the rename, but it narrows the window to the operation that
+    // follows rather than the whole temporary-file write.
+    check_baseline(request.baseline)?;
     commit(&temporary_path, &target)?;
 
     let size = request.bytes.len() as u64;
@@ -473,9 +508,12 @@ mod windows_replace {
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
 
+    use std::os::windows::io::AsRawHandle;
+
     use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
     use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, ReplaceFileW, MOVEFILE_REPLACE_EXISTING,
+        GetFileInformationByHandle, MoveFileExW, ReplaceFileW, BY_HANDLE_FILE_INFORMATION,
+        MOVEFILE_REPLACE_EXISTING,
     };
 
     fn wide(path: &Path) -> Vec<u16> {
@@ -483,6 +521,35 @@ mod windows_replace {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect()
+    }
+
+    fn information(path: &Path) -> Option<BY_HANDLE_FILE_INFORMATION> {
+        let file = std::fs::File::open(path).ok()?;
+        let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+        // SAFETY: the file handle is valid for the duration of the call, and
+        // the output pointer refers to writable storage for the structure.
+        let success =
+            unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, information.as_mut_ptr()) };
+        if success == 0 {
+            None
+        } else {
+            // SAFETY: GetFileInformationByHandle initialized the structure on
+            // success.
+            Some(unsafe { information.assume_init() })
+        }
+    }
+
+    pub(crate) fn identity(path: &Path) -> Option<super::FileIdentity> {
+        let information = information(path)?;
+        Some(super::FileIdentity {
+            volume: u64::from(information.dwVolumeSerialNumber),
+            index: (u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow),
+        })
+    }
+
+    pub(crate) fn link_count(path: &Path) -> Option<u64> {
+        Some(u64::from(information(path)?.nNumberOfLinks))
     }
 
     pub fn replace(temporary: &Path, target: &Path) -> std::io::Result<()> {
@@ -547,4 +614,14 @@ pub fn encode_for_save(text_with_eol: &str, had_utf8_bom: bool) -> Vec<u8> {
     }
     bytes.extend_from_slice(text_with_eol.as_bytes());
     bytes
+}
+
+#[cfg(windows)]
+fn windows_identity(path: &Path) -> Option<FileIdentity> {
+    windows_replace::identity(path)
+}
+
+#[cfg(windows)]
+fn windows_link_count(path: &Path) -> Option<u64> {
+    windows_replace::link_count(path)
 }
