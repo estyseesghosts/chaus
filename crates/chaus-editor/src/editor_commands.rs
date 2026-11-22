@@ -14,7 +14,7 @@ use silvestris::core::command::{CommandDescriptor, CommandId, MenuEntry, MenuMod
 use silvestris::menu::PopupMenu;
 
 use crate::editor::Editor;
-use crate::editor_keys::{Copy, Cut, Paste, Redo, ToggleVim, Undo};
+use crate::editor_keys::{Copy, Cut, Paste, Redo, Save, ToggleVim, Undo};
 
 fn language_command(language: LanguageId) -> String {
     format!("view.language.{}", language.as_str())
@@ -142,10 +142,10 @@ impl Editor {
             &commands,
             cx,
             CommandDescriptor::action("file.save", "Save").shortcut("secondary-s"),
-            move |_, _, cx| {
+            move |_, window, cx| {
                 editor
                     .update(cx, |editor, cx| {
-                        editor.save_inner(false, cx);
+                        editor.save(&Save, window, cx);
                     })
                     .ok();
             },

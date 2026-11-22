@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chaus_core::document::{Document, LineRange};
@@ -42,10 +42,17 @@ use crate::geometry::Geometry;
 /// Routine confirmations (`Saved`, `Copied`) disappear after this long.
 const TRANSIENT_STATUS: Duration = Duration::from_secs(4);
 
+/// Deterministic stand-in for the native Save As picker, installed by tests so
+/// a headless run never opens a modal OS dialog.
+pub type SavePicker = fn(Option<&Path>) -> Option<PathBuf>;
+
 /// One editor window.
 pub struct Editor {
     pub(crate) document: Document,
     pub(crate) file: Option<FileState>,
+    /// Test seam: when set, replaces the native Save As picker so a headless
+    /// run never opens a modal OS dialog. Production leaves this `None`.
+    pub(crate) save_picker: Option<SavePicker>,
     pub(crate) selection: Selection,
     /// Preferred horizontal offset within the current visual row, in display
     /// columns. Cleared by horizontal movement and edits that relocate the
@@ -160,6 +167,7 @@ impl Editor {
         let mut editor = Self {
             document,
             file,
+            save_picker: None,
             selection: Selection::caret(CharOffset::ZERO),
             preferred_column: None,
             scroll_row: 0.0,
@@ -281,6 +289,12 @@ impl Editor {
             self.rows_columns = None;
         }
         self.rebuild_rows();
+    }
+
+    /// Replace the native Save As picker with a deterministic stub. Tests use
+    /// this so a headless run never opens a modal OS dialog.
+    pub fn set_save_picker_for_test(&mut self, picker: SavePicker) {
+        self.save_picker = Some(picker);
     }
 
     /// Current soft-wrap mode for this window.

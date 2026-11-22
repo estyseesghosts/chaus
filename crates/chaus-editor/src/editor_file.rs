@@ -125,7 +125,7 @@ impl Editor {
             }
             return false;
         }
-        if !chaus_dialog::is_available() {
+        if self.save_picker.is_none() && !chaus_dialog::is_available() {
             self.set_status("Save As needs a native file picker, which is not available yet");
             if close_after {
                 self.restore_close_prompt(window, cx);
@@ -141,9 +141,15 @@ impl Editor {
             .file
             .as_ref()
             .map(|file| file.meta.user_requested_path.clone());
-        let Some(path) =
-            chaus_dialog::choose_file(chaus_dialog::Choice::Save, "Save As", suggested.as_deref())
-        else {
+        let picked = match self.save_picker {
+            Some(picker) => picker(suggested.as_deref()),
+            None => chaus_dialog::choose_file(
+                chaus_dialog::Choice::Save,
+                "Save As",
+                suggested.as_deref(),
+            ),
+        };
+        let Some(path) = picked else {
             self.set_status("Save cancelled");
             if close_after {
                 self.restore_close_prompt(window, cx);

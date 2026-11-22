@@ -8,6 +8,8 @@ use gpui::{
 };
 use silvestris::command::CommandRegistry;
 use silvestris::core::command::CommandId;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 
 struct Harness {
     editor: Entity<Editor>,
@@ -236,6 +238,127 @@ fn the_vim_shortcut_is_ignored_while_the_find_bar_owns_the_keyboard() {
         assert!(
             !cx.update(|_, cx| editor.read(cx).vim_enabled()),
             "Vim must not toggle behind the find bar"
+        );
+    });
+}
+
+/// Deterministic stand-in for the native Save As picker. A real dialog would
+/// block this headless test and pop a window on the developer's desktop.
+#[derive(Default)]
+struct PickerLog {
+    calls: usize,
+    suggested: Option<Option<PathBuf>>,
+    result: Option<PathBuf>,
+}
+
+thread_local! {
+    static PICKER: RefCell<PickerLog> = RefCell::new(PickerLog::default());
+}
+
+fn fake_picker(suggested: Option<&Path>) -> Option<PathBuf> {
+    PICKER.with(|log| {
+        let mut log = log.borrow_mut();
+        log.calls += 1;
+        log.suggested = Some(suggested.map(Path::to_path_buf));
+        log.result.clone()
+    })
+}
+
+fn arm_picker(result: PathBuf) {
+    PICKER.with(|log| {
+        *log.borrow_mut() = PickerLog {
+            calls: 0,
+            suggested: None,
+            result: Some(result),
+        };
+    });
+}
+
+fn picker_calls() -> (usize, Option<Option<PathBuf>>) {
+    PICKER.with(|log| {
+        let log = log.borrow();
+        (log.calls, log.suggested.clone())
+    })
+}
+
+/// Press Save on a fresh untitled window through `trigger`, then report the
+/// window title the save settled on.
+fn save_untitled_through(
+    target: &Path,
+    trigger: impl FnOnce(&Entity<Editor>, &mut VisualTestContext),
+) -> String {
+    let mut title = String::new();
+    run(false, |editor, cx| {
+        arm_picker(target.to_path_buf());
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, _| editor.set_save_picker_for_test(fake_picker));
+        });
+        trigger(&editor, cx);
+        draw(cx);
+
+        let (calls, suggested) = picker_calls();
+        assert_eq!(calls, 1, "Save must ask for a path instead of refusing");
+        assert_eq!(
+            suggested,
+            Some(None),
+            "an untitled document has no path to suggest"
+        );
+        let status = cx.update(|_, cx| editor.read(cx).status_text().map(str::to_owned));
+        assert_ne!(
+            status.as_deref(),
+            Some("Untitled document: use Save As"),
+            "Save must open Save As, not print a refusal"
+        );
+        title = cx.update(|_, cx| editor.read(cx).title());
+    });
+    title
+}
+
+#[test]
+fn menu_save_and_the_shortcut_both_route_untitled_documents_to_save_as() {
+    let menu_target = std::env::temp_dir().join("chaus-menu-save.txt");
+    let key_target = std::env::temp_dir().join("chaus-key-save.txt");
+
+    let menu_title = save_untitled_through(&menu_target, |editor, cx| {
+        invoke(editor, cx, "file.save");
+    });
+    assert_eq!(menu_title, "chaus-menu-save.txt");
+
+    let key_title = save_untitled_through(&key_target, |_editor, cx| {
+        cx.simulate_keystrokes("ctrl-s");
+    });
+    assert_eq!(key_title, "chaus-key-save.txt");
+
+    let _ = std::fs::remove_file(menu_target);
+    let _ = std::fs::remove_file(key_target);
+}
+
+#[test]
+fn cancelling_the_menu_save_as_leaves_the_untitled_document_alone() {
+    let target = std::env::temp_dir().join("chaus-cancelled-save.txt");
+    run(false, |editor, cx| {
+        arm_picker(target.clone());
+        PICKER.with(|log| log.borrow_mut().result = None);
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, _| editor.set_save_picker_for_test(fake_picker));
+        });
+        cx.simulate_input("draft");
+        draw(cx);
+
+        invoke(&editor, cx, "file.save");
+        draw(cx);
+
+        let (calls, _) = picker_calls();
+        assert_eq!(calls, 1, "cancelling still goes through the picker");
+        cx.update(|_, cx| {
+            let editor = editor.read(cx);
+            assert_eq!(editor.title(), "Untitled — Edited");
+            assert_eq!(editor.document().text(), "draft");
+            assert_eq!(editor.status_text(), Some("Save cancelled"));
+        });
+        assert!(
+            !target.exists(),
+            "a cancelled picker must not create the target file"
         );
     });
 }
