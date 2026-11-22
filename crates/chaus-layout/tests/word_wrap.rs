@@ -107,12 +107,12 @@ fn tabs_keep_their_stop_anchored_to_the_logical_line() {
 
 #[test]
 fn trailing_whitespace_does_not_create_a_blank_row() {
-    let segments = segments_with("abc      ", Some(3), 4, WrapPolicy::Word);
+    // One trailing space after a full row is absorbed instead of becoming a
+    // blank row. Longer runs are bounded (see trailing_whitespace.rs).
+    let segments = segments_with("abc ", Some(3), 4, WrapPolicy::Word);
     assert_eq!(segments.len(), 1);
-    assert_eq!(segments[0].char_end, 9);
-    assert!(segments
-        .iter()
-        .all(|segment| segment.display.contains("abc")));
+    assert_eq!(segments[0].char_end, 4);
+    assert!(segments[0].display.starts_with("abc"));
 }
 
 #[test]

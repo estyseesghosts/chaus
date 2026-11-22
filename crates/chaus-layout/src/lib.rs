@@ -305,6 +305,40 @@ impl<'a> Rows<'a> {
             && self.source.clone().all(|(_, text)| is_space(text))
     }
 
+    /// Width of the whitespace run after the first `from` buffered graphemes.
+    ///
+    /// Returns `None` when the run holds anything else, would exceed `limit`
+    /// columns, or is so long that absorbing it would stop being bounded.
+    fn whitespace_run_width(
+        &self,
+        from: usize,
+        start_column: usize,
+        limit: usize,
+    ) -> Option<usize> {
+        let mut column = start_column;
+        let mut width = 0usize;
+        let mut examined = 0usize;
+        let buffered = self.buffer.iter().skip(from).map(|grapheme| grapheme.text);
+        for text in buffered.chain(self.source.clone().map(|(_, text)| text)) {
+            if !text.chars().all(char::is_whitespace) {
+                return None;
+            }
+            let piece = piece_width(text, column, self.tab_stop);
+            column += piece;
+            width += piece;
+            if width > limit {
+                return None;
+            }
+            examined += 1;
+            // Zero-width whitespace never trips the column limit; cap the
+            // count so a pathological cluster run stays bounded too.
+            if examined > limit.saturating_add(64) {
+                return None;
+            }
+        }
+        Some(width)
+    }
+
     fn width_between(&self, start_column: usize, from: usize, to: usize) -> usize {
         let mut column = start_column;
         for grapheme in self.buffer.iter().take(to).skip(from) {
@@ -384,11 +418,22 @@ impl Iterator for Rows<'_> {
             end += 1;
         }
 
-        // Keep a trailing whitespace run on the final row instead of emitting
-        // a blank row for it. The row ranges still cover every character.
-        if self.policy == WrapPolicy::Word && end > 0 && self.rest_is_whitespace(end) {
-            self.fill_rest();
-            end = self.buffer.len();
+        // Keep a short trailing whitespace run on the final row instead of
+        // emitting a blank row for it, but never let an arbitrarily long run
+        // widen the row past the wrap width. A run that does not fit is
+        // wrapped normally; every character stays in a row range.
+        if self.policy == WrapPolicy::Word && end > 0 {
+            let used = self.width_between(start_column, 0, end);
+            let absorb = match self.max_columns {
+                Some(max) => self
+                    .whitespace_run_width(end, start_column + used, max)
+                    .is_some(),
+                None => self.rest_is_whitespace(end),
+            };
+            if absorb {
+                self.fill_rest();
+                end = self.buffer.len();
+            }
         }
         if end == 0 {
             // Defensive: a zero-width first grapheme must still make progress.
