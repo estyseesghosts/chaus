@@ -785,6 +785,7 @@ dependencies = [
  "gpui_windows",
  "silvestris",
  "tempfile",
+ "windows-sys",
 ]
 
 [[package]]
