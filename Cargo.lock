@@ -4413,6 +4413,7 @@ dependencies = [
 [[package]]
 name = "silvestris"
 version = "0.1.0"
+source = "git+https://github.com/estyseesghosts/silvestris?rev=d1db8f0c6cbe80e80fb1dfebbb5c78990d2b9265#d1db8f0c6cbe80e80fb1dfebbb5c78990d2b9265"
 dependencies = [
  "anyhow",
  "gpui",
@@ -4431,6 +4432,7 @@ dependencies = [
 [[package]]
 name = "silvestris-core"
 version = "0.1.0"
+source = "git+https://github.com/estyseesghosts/silvestris?rev=d1db8f0c6cbe80e80fb1dfebbb5c78990d2b9265#d1db8f0c6cbe80e80fb1dfebbb5c78990d2b9265"
 dependencies = [
  "serde",
  "serde_json",
@@ -4439,6 +4441,7 @@ dependencies = [
 [[package]]
 name = "silvestris-fonts"
 version = "0.1.0"
+source = "git+https://github.com/estyseesghosts/silvestris?rev=d1db8f0c6cbe80e80fb1dfebbb5c78990d2b9265#d1db8f0c6cbe80e80fb1dfebbb5c78990d2b9265"
 
 [[package]]
 name = "simd-adler32"

@@ -26,9 +26,9 @@ chaus-vim = { path = "crates/chaus-vim" }
 chaus-dialog = { path = "crates/chaus-dialog" }
 chaus-editor = { path = "crates/chaus-editor" }
 
-# Silvestris is consumed as a path dependency during development so that the
-# exact GPUI revision below is shared with the framework checkout.
-silvestris = { path = "../silvestris/crates/silvestris" }
+# Pinned to a pushed Silvestris revision so a fresh clone builds without a
+# sibling checkout. Bump the revision here and in Cargo.lock together.
+silvestris = { git = "https://github.com/estyseesghosts/silvestris", rev = "d1db8f0c6cbe80e80fb1dfebbb5c78990d2b9265" }
 
 # Pinned to the same Zed commit as Silvestris (config/pins.toml [gpui]).
 gpui = { git = "https://github.com/zed-industries/zed", rev = "6b720973027999bae402df23d469026f4cced988", default-features = false }

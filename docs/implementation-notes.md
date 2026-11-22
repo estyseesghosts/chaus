@@ -6,16 +6,16 @@ Recorded 2026-11-22 while building the first chaus increment.
 
 | Component | Revision / version |
 | --- | --- |
-| Silvestris checkout | `C:\Users\terezi\workdir\silvestris`, branch `source-list-shell` (worktree state, not a release tag) |
+| Silvestris | `d1db8f0c6cbe80e80fb1dfebbb5c78990d2b9265` on `estyseesghosts/silvestris`, branch `source-list-shell` (git dependency) |
 | GPUI | `6b720973027999bae402df23d469026f4cced988` (same pin as Silvestris `config/pins.toml`) |
-| Rust | `1.98.1-x86_64-pc-windows-gnu` (`rust-toolchain.toml`) |
+| Rust | `1.98.1` (`rust-toolchain.toml`); this machine builds with the GNU host `x86_64-pc-windows-gnu`, CI uses the default MSVC host |
 | Ropey | `1.6` |
 | Tree-sitter | not linked yet |
 | `windows-sys` | `0.61` |
 
-Silvestris is consumed as a path dependency during development. Before packaging,
-replace it with the exact upstream revision used for the release build and record
-that revision here.
+Silvestris is consumed from its pinned upstream revision, so a fresh clone
+builds without a sibling checkout. Bump that revision in `Cargo.toml`,
+`Cargo.lock` and the table above together.
 
 ## Windows build workaround
 

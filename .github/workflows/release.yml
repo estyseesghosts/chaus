@@ -1,0 +1,143 @@
+name: Release
+
+# Publishing runs from an annotated tag (`v*`). The manual trigger re-runs a
+# release that failed after the tag was pushed. verify.yml ignores tags, so
+# this workflow is the only gate a release build passes through.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to rebuild and publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  # A release must never expose an artifact that the source gate rejects on
+  # either platform whose binary it publishes.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake clang lld llvm \
+            libasound2-dev libfontconfig-dev libglib2.0-dev libssl-dev \
+            libva-dev libvulkan1 libwayland-dev libx11-xcb-dev \
+            libxkbcommon-x11-dev libzstd-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  verify-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  build:
+    needs: [verify, verify-windows]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            binary: chaus
+            asset: chaus-linux-x64
+          - os: windows-latest
+            binary: chaus.exe
+            asset: chaus-windows-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake clang lld llvm \
+            libasound2-dev libfontconfig-dev libglib2.0-dev libssl-dev \
+            libva-dev libvulkan1 libwayland-dev libx11-xcb-dev \
+            libxkbcommon-x11-dev libzstd-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release --locked -p chaus-app
+
+      - name: Stage the artifact outside the checkout
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          cp "target/release/${{ matrix.binary }}" "$RUNNER_TEMP/release/${{ matrix.asset }}"
+          cd "$RUNNER_TEMP/release"
+          sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+
+      - name: Smoke test from an unrelated directory
+        shell: bash
+        working-directory: ${{ runner.temp }}/release
+        run: |
+          ./"${{ matrix.asset }}" --version
+          ./"${{ matrix.asset }}" --help > /dev/null
+
+      - name: Report Linux dynamic dependencies
+        if: runner.os == 'Linux'
+        run: ldd "$RUNNER_TEMP/release/${{ matrix.asset }}" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify checksums before publishing
+        working-directory: release-assets
+        run: |
+          for file in *.sha256; do sha256sum --check "$file"; done
+          ls -l
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" release-assets/* \
+            --verify-tag \
+            --title "$TAG" \
+            --generate-notes
