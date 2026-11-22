@@ -58,12 +58,20 @@ impl Editor {
         let base_row = self.prefix_rows.get(line.0).copied().unwrap_or(0) + row_in_line;
         let total = self.total_rows();
         let target_row = (base_row as isize + delta).clamp(0, total as isize - 1) as usize;
+
+        // Preferred x is relative to the current visual row, not an absolute
+        // column in the hard line. Otherwise a wrapped row would land on the
+        // wrong segment once `offset_at` spans the whole logical line.
+        let (_, current_span) = self.row_span(base_row);
+        let x = self.preferred_column.unwrap_or_else(|| {
+            self.caret_column(self.selection.head)
+                .saturating_sub(current_span.start)
+        });
+        self.preferred_column = Some(x);
+
         let (target_line, span) = self.row_span(target_row);
-        let column = self
-            .preferred_column
-            .unwrap_or_else(|| self.caret_column(self.selection.head));
-        self.preferred_column = Some(column);
-        let offset = self.offset_at(target_line, column.min(span.end));
+        let column = span.start.saturating_add(x).min(span.end);
+        let offset = self.offset_at(target_line, column);
         self.selection = if extend {
             Selection::new(self.selection.anchor, offset)
         } else {
