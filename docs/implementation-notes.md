@@ -80,13 +80,14 @@ history; `None` restores horizontal scrolling.
 
 ## Known gaps in this increment
 
-- The titlebar carries File/Edit/View menus built from Silvestris's
-  `CommandRegistry` and `PopupMenu`. Each window owns its registry, so the
-  checked Vim Mode/Wrap items and disabled Undo/Redo/Cut/Copy come from that
-  window's state; the document canvas has no toolbar or tabs. `Ctrl+Shift+V`
-  toggles Vim in both modes and is inert while a sheet, find bar or menu owns
-  the keyboard. `Ctrl+,` opens a Preferences window for theme, font family,
-  font size, line height, wrap mode, tab stop, spaces-vs-tabs and the Vim
+- Right-clicking the titlebar opens the File/Edit/View commands built from
+  Silvestris's `CommandRegistry` and `PopupMenu`. There is no visible menu row
+  or toolbar: the window is the titlebar and the document. Each window owns its
+  registry, so the checked Vim Mode/Wrap items and disabled Undo/Redo/Cut/Copy
+  come from that window's state. `Ctrl+Shift+V` toggles Vim in both modes and is
+  inert while a sheet, find bar or menu owns the keyboard. `Ctrl+,` opens a
+  Preferences window for theme, font family, font size, line height, wrap mode,
+  tab stop, spaces-vs-tabs and the Vim
   default applied to new windows. Applying a value updates every open editor
   in place through `Editor::set_settings` (document, selection, undo, focus and
   file state are preserved), writes the same validated `Settings` value to the

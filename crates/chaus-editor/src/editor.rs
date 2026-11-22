@@ -22,6 +22,7 @@ use gpui::{
 use silvestris::ActiveTheme;
 
 use crate::editor_close::ClosePromptFocus;
+use crate::editor_commands::MenuKind;
 use crate::editor_conflict::ConflictPromptFocus;
 use crate::editor_element::EditorElement;
 use crate::editor_file::FileState;
@@ -102,7 +103,7 @@ pub struct Editor {
     /// the next text-input callback must be ignored to avoid inserting the
     /// command itself (`j`, `i`, `:`).
     pub(crate) suppress_text_input: bool,
-    /// Per-window command registry shared by menus and Silvestris controls.
+    /// Per-window command registry used by the titlebar context menu.
     pub(crate) commands: Entity<silvestris::command::CommandRegistry>,
     /// Popup menu overlay, created on the first render when a window exists.
     pub(crate) menu: Option<Entity<silvestris::menu::PopupMenu>>,
@@ -250,7 +251,8 @@ impl Editor {
     }
 
     /// This window's command registry. Application-level commands (New, Open,
-    /// Preferences) are registered on it by the app so the menu uses one tree.
+    /// Preferences) are registered on it by the app so the titlebar menu uses
+    /// one tree.
     #[must_use]
     pub fn commands(&self) -> &Entity<silvestris::command::CommandRegistry> {
         &self.commands
@@ -558,7 +560,6 @@ impl Render for Editor {
         self.sync_blink(cx);
         self.ensure_menu(window, cx);
         self.sync_command_state(cx);
-        let menu_bar = self.render_menu_bar(cx);
         let theme = cx.theme().clone();
         let title = self.title();
         window.set_window_title(&title);
@@ -815,10 +816,20 @@ impl Render for Editor {
             .when_some(close_prompt, |element, sheet| element.child(sheet))
             .when_some(conflict_prompt, |element, sheet| element.child(sheet))
             .when_some(recovery_prompt, |element, sheet| element.child(sheet));
-        let frame = silvestris::chrome::WindowFrame::new(title)
-            .toolbar(menu_bar, theme.metrics.toolbar_height)
-            .child(content);
-        let mut root = div().size_full().child(frame);
+        // No toolbar: the window is deliberately just the titlebar and the
+        // document. Right-clicking the titlebar band opens the same commands
+        // that used to sit in a visible row.
+        let titlebar_height = theme.metrics.titlebar_height;
+        let frame = silvestris::chrome::WindowFrame::new(title).child(content);
+        let mut root = div().size_full().child(frame).on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |editor, event: &MouseDownEvent, window, cx| {
+                if event.position.y <= px(titlebar_height) {
+                    cx.stop_propagation();
+                    editor.open_menu(MenuKind::Root, event.position, window, cx);
+                }
+            }),
+        );
         if let Some(menu) = self.menu.clone() {
             root = root.child(gpui::deferred(menu).priority(1));
         }

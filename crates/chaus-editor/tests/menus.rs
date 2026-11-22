@@ -3,8 +3,8 @@
 use chaus_core::settings::Settings;
 use chaus_editor::Editor;
 use gpui::{
-    AppContext as _, Context, Entity, Focusable as _, IntoElement, Modifiers, Render,
-    TestAppContext, VisualTestContext, Window,
+    point, px, AppContext as _, Context, Entity, Focusable as _, IntoElement, Modifiers,
+    MouseButton, Render, TestAppContext, VisualTestContext, Window,
 };
 use silvestris::command::CommandRegistry;
 use silvestris::core::command::CommandId;
@@ -167,20 +167,28 @@ fn the_documented_shortcut_leaves_vim_normal_mode() {
 }
 
 #[test]
-fn clicking_the_view_menu_and_vim_mode_routes_through_the_editor() {
+fn right_clicking_the_titlebar_opens_the_menus_without_a_toolbar() {
     run(false, |editor, cx| {
-        let view = cx
-            .debug_bounds("menu-view")
-            .expect("View menu button renders");
-        cx.simulate_click(view.center(), Modifiers::none());
+        assert!(
+            cx.debug_bounds("menu-file").is_none(),
+            "there must be no visible menu bar"
+        );
+
+        cx.simulate_mouse_down(point(px(4.), px(4.)), MouseButton::Right, Modifiers::none());
         draw(cx);
         assert!(
             cx.debug_bounds("menu-shield").is_some(),
-            "clicking the menu bar must open the popup"
+            "right-clicking the titlebar must open the popup"
         );
 
+        let view = cx
+            .debug_bounds("menu-item-0-2")
+            .expect("View is the third root submenu");
+        cx.simulate_click(view.center(), Modifiers::none());
+        draw(cx);
+
         let vim = cx
-            .debug_bounds("menu-item-0-0")
+            .debug_bounds("menu-item-1-0")
             .expect("Vim Mode is the first View item");
         cx.simulate_click(vim.center(), Modifiers::none());
         draw(cx);
@@ -194,6 +202,22 @@ fn clicking_the_view_menu_and_vim_mode_routes_through_the_editor() {
             "the menu item must toggle the focused window, not a global default"
         );
         assert!(descriptor(&editor, cx, "view.vim_mode").unwrap().checked);
+    });
+}
+
+#[test]
+fn right_clicking_the_document_does_not_open_the_menu() {
+    run(false, |_editor, cx| {
+        cx.simulate_mouse_down(
+            point(px(80.), px(200.)),
+            MouseButton::Right,
+            Modifiers::none(),
+        );
+        draw(cx);
+        assert!(
+            cx.debug_bounds("menu-shield").is_none(),
+            "the document canvas stays free of menus"
+        );
     });
 }
 

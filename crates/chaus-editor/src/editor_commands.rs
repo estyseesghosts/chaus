@@ -1,15 +1,15 @@
-//! Menu commands, checked state and the window's menu bar.
+//! Menu commands and checked state for the titlebar context menu.
 //!
 //! Every menu item routes through Silvestris's `CommandRegistry` and invokes
 //! the same editor methods as the keyboard actions. The registry is per window,
 //! so the checked Vim/Wrap items and disabled Undo/Redo follow the focused
-//! document instead of a global stale value.
+//! document instead of a global stale value. There is no toolbar: the menu
+//! opens from a right-click in the titlebar band.
 
 use chaus_core::settings::WrapMode;
 use chaus_highlight::LanguageId;
 use gpui::{point, px, App, AppContext as _, Context, Entity, WeakEntity, Window};
 use silvestris::command::CommandRegistry;
-use silvestris::controls::{Button, ButtonStyle};
 use silvestris::core::command::{CommandDescriptor, CommandId, MenuEntry, MenuModel};
 use silvestris::menu::PopupMenu;
 
@@ -42,27 +42,43 @@ fn register_command<F>(
         .expect("editor command ids are unique");
 }
 
-/// Menu shown by a top-level button.
+/// Menu shown by the titlebar context menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MenuKind {
+    Root,
     File,
     Edit,
     View,
 }
 
 impl MenuKind {
-    pub(crate) const ALL: [Self; 3] = [Self::File, Self::Edit, Self::View];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::File => "File",
-            Self::Edit => "Edit",
-            Self::View => "View",
+    pub(crate) fn model(self) -> MenuModel {
+        let entries = match self {
+            Self::Root => vec![
+                MenuEntry::Submenu {
+                    label: "File".to_string(),
+                    entries: Self::File.entries(),
+                },
+                MenuEntry::Submenu {
+                    label: "Edit".to_string(),
+                    entries: Self::Edit.entries(),
+                },
+                MenuEntry::Submenu {
+                    label: "View".to_string(),
+                    entries: Self::View.entries(),
+                },
+            ],
+            Self::File | Self::Edit | Self::View => self.entries(),
+        };
+        MenuModel {
+            label: "Window".into(),
+            entries,
         }
     }
 
-    pub(crate) fn model(self) -> MenuModel {
-        let entries = match self {
+    fn entries(self) -> Vec<MenuEntry> {
+        match self {
+            Self::Root => unreachable!("the root menu nests the other menus"),
             Self::File => vec![
                 MenuEntry::Command("file.new".into()),
                 MenuEntry::Command("file.open".into()),
@@ -107,10 +123,6 @@ impl MenuKind {
                         .collect(),
                 },
             ],
-        };
-        MenuModel {
-            label: self.label().into(),
-            entries,
         }
     }
 }
@@ -329,7 +341,7 @@ impl Editor {
         if self.menu.is_some() {
             return;
         }
-        let model = MenuKind::File.model();
+        let model = MenuKind::Root.model();
         let registry = self.commands.clone();
         let menu = cx.new(|cx| PopupMenu::new(model, registry, window, cx));
         self.menu = Some(menu);
@@ -434,25 +446,5 @@ impl Editor {
                 cx,
             );
         });
-    }
-
-    pub(crate) fn render_menu_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use gpui::{div, IntoElement as _, ParentElement as _, Styled as _};
-        let mut bar = div().flex().items_center().gap(px(2.0));
-        for kind in MenuKind::ALL {
-            bar = bar.child(
-                Button::new(
-                    format!("menu-{}", kind.label().to_ascii_lowercase()),
-                    kind.label(),
-                )
-                .style(ButtonStyle::Textured)
-                .on_click(cx.listener(
-                    move |editor, event: &gpui::ClickEvent, window, cx| {
-                        editor.open_menu(kind, event.position(), window, cx);
-                    },
-                )),
-            );
-        }
-        bar.into_any_element()
     }
 }
