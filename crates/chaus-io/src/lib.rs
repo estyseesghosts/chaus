@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+pub mod format;
 pub mod recovery;
 
 use chaus_core::eol::{Eol, EolMap};

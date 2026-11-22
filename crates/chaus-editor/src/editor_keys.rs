@@ -41,6 +41,10 @@ actions!(
         InsertNewline,
         InsertTab,
         Outdent,
+        TrimTrailingWhitespace,
+        ConvertIndentationToSpaces,
+        ConvertIndentationToTabs,
+        FormatDocument,
         Save,
         SaveAs,
         Find,
@@ -114,6 +118,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(primary!("shift-="), ZoomIn, context),
         KeyBinding::new(primary!("-"), ZoomOut, context),
         KeyBinding::new(primary!("0"), ZoomReset, context),
+        KeyBinding::new("ctrl-shift-t", TrimTrailingWhitespace, context),
+        KeyBinding::new("ctrl-alt-s", ConvertIndentationToSpaces, context),
+        KeyBinding::new("ctrl-alt-t", ConvertIndentationToTabs, context),
+        KeyBinding::new(primary!("shift-i"), FormatDocument, context),
     ];
     if !cfg!(target_os = "macos") {
         bindings.extend([

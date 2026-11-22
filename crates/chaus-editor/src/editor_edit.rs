@@ -1,13 +1,14 @@
 //! Editing operations and the actions that trigger them.
 
 use chaus_core::document::{EditCause, EditTransaction, LineRange, TextEdit};
-use chaus_core::position::{CharOffset, CharRange, Selection};
+use chaus_core::position::{CharOffset, Selection};
 use gpui::{ClipboardItem, Context, Window};
 
 use crate::editor::Editor;
 use crate::editor_keys::{
-    Backspace, Copy, Cut, Delete, DeleteWordLeft, DeleteWordRight, Escape, InsertNewline,
-    InsertTab, Outdent, Paste, Redo, SelectAll, ToggleVim, Undo,
+    Backspace, ConvertIndentationToSpaces, ConvertIndentationToTabs, Copy, Cut, Delete,
+    DeleteWordLeft, DeleteWordRight, Escape, InsertNewline, InsertTab, Outdent, Paste, Redo,
+    SelectAll, ToggleVim, TrimTrailingWhitespace, Undo,
 };
 
 impl Editor {
@@ -136,6 +137,13 @@ impl Editor {
     }
 
     pub(crate) fn insert_tab(&mut self, _: &InsertTab, _: &mut Window, cx: &mut Context<Self>) {
+        let range = self.selection.range();
+        let multiline = !range.is_empty()
+            && self.document.line_of(range.start) != self.document.line_of(range.end);
+        if multiline {
+            self.indent_selection(cx);
+            return;
+        }
         if self.settings.expand_tabs {
             let column = self.caret_column(self.selection.head);
             let tab_stop = self.settings.tab_stop.max(1);
@@ -147,34 +155,34 @@ impl Editor {
     }
 
     pub(crate) fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
-        let head = self.selection.head;
-        let line = self.document.line_of(head);
-        let start = self.document.line_start(line);
-        let text = self.document.line_text(line);
-        let remove = if text.starts_with('\t') {
-            1
-        } else {
-            text.chars()
-                .take(self.settings.tab_stop)
-                .take_while(|ch| *ch == ' ')
-                .count()
-        };
-        if remove == 0 {
-            return;
-        }
-        let range = CharRange::new(start, CharOffset(start.0 + remove));
-        let after = Selection::caret(CharOffset(head.0.saturating_sub(remove).max(start.0)));
-        let transaction = EditTransaction::new(
-            EditCause::Indent,
-            TextEdit::new(range, ""),
-            self.selection,
-            after,
-        );
-        if let Ok(result) = self.document.apply(transaction) {
-            self.selection = after;
-            self.after_change(result.affected_lines, cx);
-            cx.notify();
-        }
+        self.outdent_selection(cx);
+    }
+
+    pub(crate) fn trim_trailing_whitespace_action(
+        &mut self,
+        _: &TrimTrailingWhitespace,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.trim_trailing_whitespace(cx);
+    }
+
+    pub(crate) fn convert_indentation_to_spaces_action(
+        &mut self,
+        _: &ConvertIndentationToSpaces,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.convert_indentation_to_spaces(cx);
+    }
+
+    pub(crate) fn convert_indentation_to_tabs_action(
+        &mut self,
+        _: &ConvertIndentationToTabs,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.convert_indentation_to_tabs(cx);
     }
 
     pub(crate) fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {

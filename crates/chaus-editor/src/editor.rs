@@ -26,11 +26,12 @@ use crate::editor_element::EditorElement;
 use crate::editor_file::FileState;
 use crate::editor_find::FindBar;
 use crate::editor_keys::{
-    Backspace, Copy, Cut, Delete, DeleteWordLeft, DeleteWordRight, DocumentEnd, DocumentStart,
-    Down, End, Escape, Find, FindNext, FindPrevious, Home, InsertNewline, InsertTab, Left, Outdent,
-    Paste, Redo, Replace, Right, Save, SaveAs, SelectAll, SelectDocumentEnd, SelectDocumentStart,
-    SelectDown, SelectEnd, SelectHome, SelectLeft, SelectRight, SelectUp, SelectWordLeft,
-    SelectWordRight, ToggleVim, Undo, Up, WordLeft, WordRight, ZoomIn, ZoomOut, ZoomReset,
+    Backspace, ConvertIndentationToSpaces, ConvertIndentationToTabs, Copy, Cut, Delete,
+    DeleteWordLeft, DeleteWordRight, DocumentEnd, DocumentStart, Down, End, Escape, Find, FindNext,
+    FindPrevious, FormatDocument, Home, InsertNewline, InsertTab, Left, Outdent, Paste, Redo,
+    Replace, Right, Save, SaveAs, SelectAll, SelectDocumentEnd, SelectDocumentStart, SelectDown,
+    SelectEnd, SelectHome, SelectLeft, SelectRight, SelectUp, SelectWordLeft, SelectWordRight,
+    ToggleVim, TrimTrailingWhitespace, Undo, Up, WordLeft, WordRight, ZoomIn, ZoomOut, ZoomReset,
     KEY_CONTEXT,
 };
 use crate::editor_recovery::{new_recovery_id, RecoveryPromptFocus};
@@ -175,6 +176,16 @@ impl Editor {
     #[must_use]
     pub fn selection(&self) -> Selection {
         self.selection
+    }
+
+    /// Replace the selection and caret without changing the document.
+    ///
+    /// Keeps anchor/head direction, so callers can restore a reversed
+    /// selection or select a range from search and navigation code.
+    pub fn set_selection(&mut self, selection: Selection, cx: &mut Context<Self>) {
+        self.selection = selection.clamp(self.document.len_chars());
+        self.preferred_column = None;
+        cx.notify();
     }
 
     #[must_use]
@@ -596,6 +607,24 @@ impl Render for Editor {
             }))
             .on_action(cx.listener(|editor, action: &Outdent, window, cx| {
                 editor.outdent(action, window, cx);
+            }))
+            .on_action(
+                cx.listener(|editor, action: &TrimTrailingWhitespace, window, cx| {
+                    editor.trim_trailing_whitespace_action(action, window, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|editor, action: &ConvertIndentationToSpaces, window, cx| {
+                    editor.convert_indentation_to_spaces_action(action, window, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|editor, action: &ConvertIndentationToTabs, window, cx| {
+                    editor.convert_indentation_to_tabs_action(action, window, cx);
+                }),
+            )
+            .on_action(cx.listener(|editor, action: &FormatDocument, window, cx| {
+                editor.format_document_action(action, window, cx);
             }))
             .on_action(cx.listener(|editor, action: &Save, window, cx| {
                 editor.save(action, window, cx);

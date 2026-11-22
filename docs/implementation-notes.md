@@ -62,7 +62,11 @@ app-owned. Bundled fonts come from Silvestris; do not add a second copy.
   `_chausrc`.
 - Find and replace support literal search only; regular expressions are not
   implemented. Vim `/` and `?` remain separate.
-- Tree-sitter highlighting and external formatters are not linked.
+- Tree-sitter highlighting is not linked. External formatters are explicit and
+  opt-in: Format Document uses `rustfmt`, `clang-format`, `black` or `prettier`
+  when installed, runs with a 10-second deadline and bounded output, never
+  through a shell, and discards output if the document changed. Format-on-save
+  is off and no formatter runtime is bundled.
 - Open/save dialogs use the Win32 common dialogs on Windows. Linux uses the
   desktop's `zenity` or `kdialog` helper when one is installed; otherwise the
   command reports that no picker is available, so pass paths on the command
@@ -75,20 +79,24 @@ app-owned. Bundled fonts come from Silvestris; do not add a second copy.
   or `~/.local/state/chaus/recovery`). Launch offers Recover/Discard per
   snapshot, and saving or discarding removes it. Recovery is best-effort and
   does not replace a power-failure test.
-- A 2-second background watcher re-reads the open file and shows a
-  changed-on-disk banner. Review opens the Reload / Save As / Overwrite /
-  Cancel sheet. The watcher never reloads or overwrites the document
-  automatically. Its polling cost on very large files is not yet measured.
-- Open and save run on the background executor, but a save still expands the
-  document into one string and one byte buffer before writing. Initial row
-  layout after a load runs on the UI thread. Large files are not yet measured.
+- A 2-second background watcher checks identity, size and mtime first and only
+  hashes when one changed, with a forced hash every 30 seconds for coarse
+  timestamps. A check in flight suppresses the next tick. Review opens the
+  Reload / Save As / Overwrite / Cancel sheet. The watcher never reloads or
+  overwrites the document automatically.
+- Edits refresh only the hard lines reported by `Document`, and the row prefix
+  is adjusted by the delta instead of rebuilt. Shape caches per visible row are
+  still recreated each frame; large-file paint cost is not yet measured.
 - Save refuses a target with additional hard links instead of silently
   breaking them. Windows uses `ReplaceFileW` and keeps the target's ACLs and
   attributes. Conflict checks are repeated immediately before replacement, but
   the check and replacement are still not one atomic operation.
-- `selection_bounds_for_range` delegates to the existing range geometry.
-  Multi-row selections use the same start/end box as `bounds_for_range` rather
-  than per-row rectangles.
+- Ctrl+Plus/Minus/0 change only the current window's document font size
+  (9-48px, documented stops). The override is never written to `_chausrc`.
+- Tab and Shift+Tab indent or outdent every selected hard line as one undo
+  entry; `:trim`, `:retab` and the whitespace shortcuts act on the whole
+  document. Geist themes still map UI text to Inter because Silvestris bundles
+  no Geist Sans face and exposes no public typography override.
 - Word motions and line-boundary behaviour are tested against the in-memory
   engine, not compared command-for-command with real Vim.
 - Tests live in `crates/*/tests/`; the native GUI still needs a real-OS smoke

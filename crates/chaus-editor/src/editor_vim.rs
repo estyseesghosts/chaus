@@ -189,6 +189,9 @@ impl Editor {
                 }
             }
             "set" => self.run_set_command(rest, cx),
+            "format" => self.format_document(cx),
+            "trim" => self.trim_trailing_whitespace(cx),
+            "retab" => self.convert_indentation_to_spaces(cx),
             _ => {
                 self.set_status(format!("unknown Ex command ':{name}'"));
                 cx.notify();
