@@ -242,8 +242,11 @@ impl Editor {
                 self.disk_change = None;
                 self.disk_epoch = self.disk_epoch.wrapping_add(1);
                 self.document.mark_saved_at(state);
-                self.remove_recovery_snapshot();
-                self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
+                // A save only covers the captured revision. If the person
+                // typed while the write was in flight, keep the durable
+                // snapshot (and refresh it now) instead of deleting the only
+                // crash-recovery copy.
+                self.write_recovery_now(cx);
                 if close_after && !self.document.is_dirty() {
                     window.remove_window();
                     return;

@@ -70,7 +70,7 @@ impl Editor {
                         return None;
                     }
                     if !editor.document.is_dirty() {
-                        editor.remove_recovery_snapshot();
+                        editor.retire_recovery_snapshot(epoch);
                         return None;
                     }
                     Some(editor.recovery_record())
@@ -80,7 +80,7 @@ impl Editor {
             if let Some(record) = record {
                 cx.background_executor()
                     .spawn(async move {
-                        if let Err(error) = chaus_io::recovery::write(&record) {
+                        if let Err(error) = chaus_io::recovery::write_with_epoch(&record, epoch) {
                             eprintln!("chaus: could not write recovery snapshot: {error}");
                         }
                     })
@@ -88,6 +88,31 @@ impl Editor {
             }
         })
         .detach();
+    }
+
+    /// Snapshot the document immediately instead of waiting for the debounce.
+    /// Used when a background save completes while newer edits remain.
+    pub(crate) fn write_recovery_now(&mut self, cx: &mut Context<Self>) {
+        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
+        let epoch = self.recovery_epoch;
+        if !self.document.is_dirty() {
+            self.retire_recovery_snapshot(epoch);
+            return;
+        }
+        let record = self.recovery_record();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = chaus_io::recovery::write_with_epoch(&record, epoch) {
+                    eprintln!("chaus: could not write recovery snapshot: {error}");
+                }
+            })
+            .detach();
+    }
+
+    pub(crate) fn retire_recovery_snapshot(&self, epoch: u64) {
+        if let Err(error) = chaus_io::recovery::retire(self.recovery_key, epoch) {
+            eprintln!("chaus: could not retire recovery snapshot: {error}");
+        }
     }
 
     pub(crate) fn remove_recovery_snapshot(&self) {
@@ -99,15 +124,23 @@ impl Editor {
     pub(crate) fn reset_recovery_key(&mut self) {
         self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
         self.recovery_key = new_recovery_id();
+        self.recovery_original_path = None;
+        self.recovery_had_utf8_bom = false;
     }
 
     fn recovery_record(&self) -> RecoveryRecord {
-        let (original_path, had_utf8_bom) = self.file.as_ref().map_or((None, false), |file| {
+        let (original_path, had_utf8_bom) = self.file.as_ref().map_or(
             (
-                Some(file.meta.user_requested_path.clone()),
-                file.meta.had_utf8_bom,
-            )
-        });
+                self.recovery_original_path.clone(),
+                self.recovery_had_utf8_bom,
+            ),
+            |file| {
+                (
+                    Some(file.meta.user_requested_path.clone()),
+                    file.meta.had_utf8_bom,
+                )
+            },
+        );
         RecoveryRecord::new(
             self.recovery_key,
             original_path,
@@ -122,9 +155,14 @@ impl Editor {
         let Some(record) = self.recovery_queue.pop_front() else {
             return;
         };
-        if let Err(error) = chaus_io::recovery::remove(record.id) {
-            eprintln!("chaus: could not remove recovered snapshot: {error}");
-        }
+        // Keep the on-disk record. The recovered document adopts its id, so a
+        // later debounced snapshot replaces this record atomically; saving or
+        // discarding retires it. Deleting it here would lose the only durable
+        // copy if the process crashed before the next edit or save.
+        self.recovery_key = record.id;
+        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
+        self.recovery_original_path = record.original_path.clone();
+        self.recovery_had_utf8_bom = record.had_utf8_bom;
         let (text, eol) = EolMap::from_source(&record.text);
         self.document.reset(text, eol, record.preferred_eol);
         self.document.mark_unsaved();

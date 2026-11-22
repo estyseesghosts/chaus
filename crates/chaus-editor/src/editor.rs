@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::path::PathBuf;
 
 use chaus_core::document::{Document, LineRange};
 use chaus_core::eol::{Eol, EolMap};
@@ -62,6 +63,11 @@ pub struct Editor {
     pub(crate) recovery_focus: RecoveryPromptFocus,
     pub(crate) recovery_key: u64,
     pub(crate) recovery_epoch: u64,
+    /// Original path/bom retained by a recovered document until it is saved.
+    /// The document itself stays untitled so recovery never overwrites the
+    /// original file by accident.
+    pub(crate) recovery_original_path: Option<PathBuf>,
+    pub(crate) recovery_had_utf8_bom: bool,
     pub(crate) disk_change: Option<chaus_io::SaveConflict>,
     pub(crate) disk_epoch: u64,
     pub(crate) force_next_save: bool,
@@ -127,6 +133,8 @@ impl Editor {
             recovery_focus,
             recovery_key: new_recovery_id(),
             recovery_epoch: 0,
+            recovery_original_path: None,
+            recovery_had_utf8_bom: false,
             disk_change: None,
             disk_epoch: 0,
             force_next_save: false,

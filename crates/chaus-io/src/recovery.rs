@@ -7,14 +7,32 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chaus_core::eol::Eol;
+use tempfile::Builder;
 
 const MAGIC: &[u8; 8] = b"CHAUSR01";
 const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 const FILE_PREFIX: &str = "recovery-";
 const FILE_SUFFIX: &str = ".rec";
+
+/// Serializes writes and removals so a snapshot update is never interleaved
+/// with another snapshot update for the same window.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+/// Monotonic ordering for callers that do not supply an editor epoch.
+static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
+/// Highest writer epoch accepted per `(directory, id)`.
+static WATERMARKS: Mutex<Vec<Watermark>> = Mutex::new(Vec::new());
+
+struct Watermark {
+    directory: PathBuf,
+    id: u64,
+    epoch: u64,
+    revision: u64,
+}
 
 /// One unsaved document snapshot.
 #[non_exhaustive]
@@ -98,26 +116,51 @@ pub fn write(record: &RecoveryRecord) -> std::io::Result<PathBuf> {
     write_to(&directory, record)
 }
 
-/// Write a snapshot to an explicit directory. Existing snapshots with the same
-/// id are replaced.
-pub fn write_to(directory: &Path, record: &RecoveryRecord) -> std::io::Result<PathBuf> {
-    fs::create_dir_all(directory)?;
-    let target = directory.join(file_name(record.id));
-    let temporary = directory.join(format!(
-        ".{}.{}.tmp",
-        file_name(record.id),
-        std::process::id()
-    ));
-    let mut file = fs::File::create(&temporary)?;
-    file.write_all(&encode(record))?;
-    file.sync_all()?;
-    drop(file);
-    if target.exists() {
-        fs::remove_file(&target)?;
-    }
-    fs::rename(&temporary, &target).inspect_err(|_| {
-        let _ = fs::remove_file(&temporary);
+/// Write a snapshot using an explicit ordering epoch.
+///
+/// Only the highest epoch for a snapshot id is retained. A stale debounced
+/// write that finishes after a newer edit or after the record was retired is
+/// discarded instead of resurrecting older text.
+pub fn write_with_epoch(record: &RecoveryRecord, epoch: u64) -> std::io::Result<PathBuf> {
+    let directory = recovery_directory().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no platform state directory for recovery",
+        )
     })?;
+    write_to_with_epoch(&directory, record, epoch)
+}
+
+/// Write a snapshot to an explicit directory. Existing snapshots with the same
+/// id are replaced. Call order supplies the ordering epoch.
+pub fn write_to(directory: &Path, record: &RecoveryRecord) -> std::io::Result<PathBuf> {
+    let epoch = NEXT_EPOCH.fetch_add(1, Ordering::Relaxed);
+    write_to_with_epoch(directory, record, epoch)
+}
+
+/// Write a snapshot to an explicit directory with an explicit ordering epoch.
+pub fn write_to_with_epoch(
+    directory: &Path,
+    record: &RecoveryRecord,
+    epoch: u64,
+) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(directory)?;
+    let _guard = WRITE_LOCK.lock().map_err(|_| poisoned("recovery write"))?;
+    let target = directory.join(file_name(record.id));
+    if is_stale(directory, record.id, epoch, record.revision)? {
+        return Ok(target);
+    }
+
+    // Unique same-directory temporary: a crash before the replacement leaves
+    // the previous record intact, and concurrent writes cannot collide.
+    let mut temporary = Builder::new()
+        .prefix(".chaus-recovery-")
+        .tempfile_in(directory)?;
+    temporary.write_all(&encode(record))?;
+    temporary.as_file().sync_all()?;
+    let temporary_path = temporary.into_temp_path();
+    crate::replace_path(&temporary_path, &target)?;
+    record_watermark(directory, record.id, epoch, record.revision)?;
     Ok(target)
 }
 
@@ -169,7 +212,25 @@ pub fn list_in(directory: &Path) -> Vec<RecoveryRecord> {
     records
 }
 
-/// Remove a snapshot from the platform recovery directory.
+/// Retire a snapshot with an explicit ordering epoch.
+///
+/// Pending writes from older epochs for the same id are discarded. Later edits
+/// can still write again once their epoch advances.
+pub fn retire(id: u64, epoch: u64) -> std::io::Result<()> {
+    let Some(directory) = recovery_directory() else {
+        return Ok(());
+    };
+    retire_in(&directory, id, epoch)
+}
+
+/// Retire a snapshot in an explicit directory with an explicit epoch.
+pub fn retire_in(directory: &Path, id: u64, epoch: u64) -> std::io::Result<()> {
+    let _guard = WRITE_LOCK.lock().map_err(|_| poisoned("recovery retire"))?;
+    record_watermark(directory, id, epoch, u64::MAX)?;
+    remove_file(directory, id)
+}
+
+/// Remove a snapshot from the platform recovery directory permanently.
 pub fn remove(id: u64) -> std::io::Result<()> {
     let Some(directory) = recovery_directory() else {
         return Ok(());
@@ -179,11 +240,56 @@ pub fn remove(id: u64) -> std::io::Result<()> {
 
 /// Remove a snapshot from an explicit directory. Missing files are ignored.
 pub fn remove_in(directory: &Path, id: u64) -> std::io::Result<()> {
+    let _guard = WRITE_LOCK.lock().map_err(|_| poisoned("recovery remove"))?;
+    record_watermark(directory, id, u64::MAX, u64::MAX)?;
+    remove_file(directory, id)
+}
+
+fn remove_file(directory: &Path, id: u64) -> std::io::Result<()> {
     match fs::remove_file(directory.join(file_name(id))) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn poisoned(context: &str) -> std::io::Error {
+    std::io::Error::other(format!("{context} lock is poisoned"))
+}
+
+fn is_stale(directory: &Path, id: u64, epoch: u64, revision: u64) -> std::io::Result<bool> {
+    let marks = WATERMARKS
+        .lock()
+        .map_err(|_| poisoned("recovery watermark"))?;
+    Ok(marks
+        .iter()
+        .find(|mark| mark.id == id && mark.directory == directory)
+        .is_some_and(|mark| {
+            epoch < mark.epoch || (epoch == mark.epoch && revision <= mark.revision)
+        }))
+}
+
+fn record_watermark(directory: &Path, id: u64, epoch: u64, revision: u64) -> std::io::Result<()> {
+    let mut marks = WATERMARKS
+        .lock()
+        .map_err(|_| poisoned("recovery watermark"))?;
+    if let Some(mark) = marks
+        .iter_mut()
+        .find(|mark| mark.id == id && mark.directory == directory)
+    {
+        if epoch >= mark.epoch {
+            mark.epoch = epoch;
+            mark.revision = revision;
+        }
+        return Ok(());
+    }
+    marks.push(Watermark {
+        directory: directory.to_path_buf(),
+        id,
+        epoch,
+        revision,
+    });
+    Ok(())
 }
 
 fn file_name(id: u64) -> String {

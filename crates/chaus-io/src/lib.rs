@@ -481,26 +481,38 @@ fn canonical_spelling(path: &Path) -> PathBuf {
     }
 }
 
-#[cfg(unix)]
 fn commit(temporary: &Path, target: &Path) -> Result<(), SaveError> {
-    fs::rename(temporary, target).map_err(|source| SaveError::ReplaceFailed {
-        path: target.to_path_buf(),
-        source,
-    })?;
-    if let Some(parent) = target.parent() {
-        if let Ok(directory) = File::open(parent) {
-            let _ = directory.sync_all();
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn commit(temporary: &Path, target: &Path) -> Result<(), SaveError> {
-    windows_replace::replace(temporary, target).map_err(|source| SaveError::ReplaceFailed {
+    replace_path(temporary, target).map_err(|source| SaveError::ReplaceFailed {
         path: target.to_path_buf(),
         source,
     })
+}
+
+/// Replace `target` with `temporary` using OS-appropriate atomic semantics.
+///
+/// Shared by file saves and crash-recovery snapshots. The temporary file must
+/// live on the same filesystem as the target. On Unix the parent directory is
+/// synced after the rename; on Windows `ReplaceFileW` refuses to run when the
+/// target is missing, so that case falls back to a move-with-replace.
+pub(crate) fn replace_path(temporary: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::rename(temporary, target)?;
+        if let Some(parent) = target.parent() {
+            if let Ok(directory) = File::open(parent) {
+                let _ = directory.sync_all();
+            }
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        windows_replace::replace(temporary, target)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        fs::rename(temporary, target)
+    }
 }
 
 #[cfg(windows)]
