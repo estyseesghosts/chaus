@@ -1,5 +1,25 @@
 # Tree-sitter: incremental syntax highlighting without an IDE
 
+## Implemented subset (2026-11-22)
+
+`chaus-highlight` links `tree-sitter 0.25` and the grammar crates for Rust, C,
+C++, Python, JavaScript, TypeScript/TSX, JSON, TOML and shell. Captures map to
+a small token vocabulary (keyword, type, function, string, number, comment,
+constant, variable, property, operator, punctuation, attribute, tag) and the
+editor paints them with the active Silvestris semantic palette. View → Language
+offers Auto Detect, Plain Text and each bundled language; detection also maps
+`Cargo.toml`/`Cargo.lock` to TOML and rc files to shell. TypeScript reuses the
+JavaScript query plus the vendored TypeScript additions
+(`crates/chaus-highlight/queries/`). Markdown is deferred: its grammar needs two
+linked trees (block and inline), which is a separate pipeline.
+
+The editor debounces 30 ms, parses a Rope snapshot on the background executor,
+reuses the tree only for a single-edit transaction, and accepts spans only when
+generation, document revision and language still match. Files above 2 MiB and
+Plain Text are not parsed. `chaus-highlight` has no GPUI dependency and tests
+cover detection, capture mapping, all bundled grammars, Unicode byte→char
+offsets, incremental-vs-full equality and the oversized fallback.
+
 ## Scope
 
 Use [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) for **syntax colour only**. No LSP, semantic diagnostics, project index, autocomplete, fold tree, code navigation, or grammar downloads. Start with embedded languages: Rust, C, C++, Python, JavaScript, TypeScript, JSON, TOML, Bash/shell and Markdown. The specific grammar crate versions must be selected and pinned as a **mutually compatible** set with the chosen `tree-sitter` runtime ABI. Check each grammar's license and API at lock time.

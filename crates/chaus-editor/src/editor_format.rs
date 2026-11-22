@@ -114,7 +114,7 @@ impl Editor {
         );
         if let Ok(applied) = self.document.apply(transaction) {
             self.selection = after;
-            self.after_change(applied.affected_lines, cx);
+            self.after_change(&applied, cx);
             cx.notify();
             true
         } else {

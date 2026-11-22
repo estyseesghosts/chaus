@@ -6,6 +6,7 @@
 //! document instead of a global stale value.
 
 use chaus_core::settings::WrapMode;
+use chaus_highlight::LanguageId;
 use gpui::{point, px, App, AppContext as _, Context, Entity, WeakEntity, Window};
 use silvestris::command::CommandRegistry;
 use silvestris::controls::{Button, ButtonStyle};
@@ -14,6 +15,10 @@ use silvestris::menu::PopupMenu;
 
 use crate::editor::Editor;
 use crate::editor_keys::{Copy, Cut, Paste, Redo, ToggleVim, Undo};
+
+fn language_command(language: LanguageId) -> String {
+    format!("view.language.{}", language.as_str())
+}
 
 /// View → Wrap radio items, in menu order.
 const WRAP_COMMANDS: [(&str, &str, WrapMode); 3] = [
@@ -92,6 +97,14 @@ impl MenuKind {
                         MenuEntry::Command("view.wrap_char".into()),
                         MenuEntry::Command("view.wrap_none".into()),
                     ],
+                },
+                MenuEntry::Submenu {
+                    label: "Language".to_string(),
+                    entries: std::iter::once(MenuEntry::Command("view.language.auto".into()))
+                        .chain(LanguageId::ALL.into_iter().map(|language| {
+                            MenuEntry::Command(CommandId::new(language_command(language)))
+                        }))
+                        .collect(),
                 },
             ],
         };
@@ -279,6 +292,36 @@ impl Editor {
                 },
             );
         }
+
+        let editor = weak.clone();
+        register_command(
+            &commands,
+            cx,
+            CommandDescriptor::radio("view.language.auto", "Auto Detect", "language", true),
+            move |_, _, cx| {
+                editor
+                    .update(cx, |editor, cx| editor.clear_language_override(cx))
+                    .ok();
+            },
+        );
+        for language in LanguageId::ALL {
+            let editor = weak.clone();
+            register_command(
+                &commands,
+                cx,
+                CommandDescriptor::radio(
+                    &language_command(language),
+                    language.label(),
+                    "language",
+                    language == LanguageId::PlainText,
+                ),
+                move |_, _, cx| {
+                    editor
+                        .update(cx, |editor, cx| editor.set_language(language, cx))
+                        .ok();
+                },
+            );
+        }
     }
 
     /// Create the popup menu on first render, when a window is available.
@@ -314,6 +357,8 @@ impl Editor {
         let commands = self.commands.clone();
         let vim = self.vim;
         let wrap = self.settings.wrap;
+        let language_override = self.language_override;
+        let current_language = self.language;
         let can_undo = self.document.can_undo();
         let can_redo = self.document.can_redo();
         let has_selection = !self.selection.is_empty();
@@ -330,6 +375,26 @@ impl Editor {
             for (id, label, mode) in WRAP_COMMANDS {
                 let _ = registry.publish(
                     CommandDescriptor::radio(id, label, "wrap", wrap == mode),
+                    cx,
+                );
+            }
+            let _ = registry.publish(
+                CommandDescriptor::radio(
+                    "view.language.auto",
+                    "Auto Detect",
+                    "language",
+                    !language_override,
+                ),
+                cx,
+            );
+            for language in LanguageId::ALL {
+                let _ = registry.publish(
+                    CommandDescriptor::radio(
+                        &language_command(language),
+                        language.label(),
+                        "language",
+                        language_override && language == current_language,
+                    ),
                     cx,
                 );
             }

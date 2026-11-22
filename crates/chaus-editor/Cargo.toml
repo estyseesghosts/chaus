@@ -14,9 +14,11 @@ tempfile = { workspace = true }
 
 [dependencies]
 chaus-core = { workspace = true }
+chaus-highlight = { workspace = true }
 chaus-dialog = { workspace = true }
 chaus-io = { workspace = true }
 chaus-layout = { workspace = true }
 chaus-vim = { workspace = true }
 gpui = { workspace = true }
 silvestris = { workspace = true }
+unicode-width = { workspace = true }

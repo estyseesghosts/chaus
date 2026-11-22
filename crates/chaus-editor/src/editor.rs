@@ -9,6 +9,7 @@ use chaus_core::document::{Document, LineRange};
 use chaus_core::eol::{Eol, EolMap};
 use chaus_core::position::{CharOffset, CharRange, LineIndex, Selection};
 use chaus_core::settings::{Settings, WrapMode};
+use chaus_highlight::{LanguageId, Span};
 use chaus_io::recovery::RecoveryRecord;
 use chaus_io::LoadedFile;
 use chaus_vim::Engine;
@@ -105,6 +106,15 @@ pub struct Editor {
     pub(crate) commands: Entity<silvestris::command::CommandRegistry>,
     /// Popup menu overlay, created on the first render when a window exists.
     pub(crate) menu: Option<Entity<silvestris::menu::PopupMenu>>,
+    /// Detected or explicitly chosen syntax language.
+    pub(crate) language: LanguageId,
+    /// True when the person chose a language instead of extension detection.
+    pub(crate) language_override: bool,
+    /// Spans for `highlights_revision`; never painted for another revision.
+    pub(crate) highlights: std::sync::Arc<Vec<Span>>,
+    pub(crate) highlights_revision: Option<chaus_core::position::DocumentRevision>,
+    pub(crate) highlight_tree: Option<chaus_highlight::Tree>,
+    pub(crate) highlight_generation: u64,
 }
 
 impl Editor {
@@ -122,6 +132,10 @@ impl Editor {
                 None,
             ),
         };
+        let language = file
+            .as_ref()
+            .map(|file| LanguageId::from_path(&file.meta.user_requested_path))
+            .unwrap_or(LanguageId::PlainText);
         let vim = settings.vim;
         let (mappings, diagnostics) =
             chaus_vim::parse_mappings(&settings.normal_mappings, settings.mapleader);
@@ -180,9 +194,16 @@ impl Editor {
             suppress_text_input: false,
             commands,
             menu: None,
+            language,
+            language_override: false,
+            highlights: std::sync::Arc::new(Vec::new()),
+            highlights_revision: None,
+            highlight_tree: None,
+            highlight_generation: 0,
         };
         let weak = cx.weak_entity();
         editor.register_editor_commands(weak, cx);
+        editor.schedule_highlight(None, cx);
         editor.rebuild_rows();
         editor.start_disk_watch(cx);
         editor

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/chaus-core",
     "crates/chaus-layout",
+    "crates/chaus-highlight",
     "crates/chaus-io",
     "crates/chaus-cli",
     "crates/chaus-vim",
@@ -20,6 +21,7 @@ authors = ["terezi <jules@foxtails.me>"]
 [workspace.dependencies]
 chaus-core = { path = "crates/chaus-core" }
 chaus-layout = { path = "crates/chaus-layout" }
+chaus-highlight = { path = "crates/chaus-highlight" }
 chaus-io = { path = "crates/chaus-io" }
 chaus-cli = { path = "crates/chaus-cli" }
 chaus-vim = { path = "crates/chaus-vim" }

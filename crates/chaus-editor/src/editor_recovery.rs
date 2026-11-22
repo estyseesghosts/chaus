@@ -175,6 +175,7 @@ impl Editor {
         self.preedit_active = false;
         self.force_next_save = false;
         self.file = None;
+        self.reset_highlight(cx);
         self.document.cancel_user_operation();
         self.vim_engine.reset();
         self.rebuild_rows();

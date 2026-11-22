@@ -1,9 +1,11 @@
 //! Row layout and paint preparation.
 
 use chaus_core::position::{CharOffset, LineIndex};
+use chaus_highlight::TokenKind;
 use gpui::{fill, point, px, size, Bounds, PaintQuad, Pixels, SharedString, TextRun, Window};
 use silvestris::convert::hsla;
 use silvestris::core::tokens::Theme;
+use unicode_width::UnicodeWidthChar as _;
 
 use crate::editor::Editor;
 use crate::geometry::PADDING;
@@ -139,15 +141,12 @@ impl Editor {
                     }
                 }
 
-                let run = TextRun {
-                    len: segment.display.len(),
-                    color: text_run.color,
-                    ..text_run.clone()
-                };
+                let runs =
+                    self.highlighted_runs(&line_text, line_start.0, &segment, &text_run, theme);
                 let shaped = window.text_system().shape_line(
                     SharedString::new(segment.display),
                     font_size,
-                    std::slice::from_ref(&run),
+                    &runs,
                     None,
                 );
                 rows.push(PaintRow {
@@ -170,6 +169,83 @@ impl Editor {
             selection_quads,
             theme,
         )
+    }
+
+    /// Split one visual row into GPUI runs by the current highlight spans.
+    ///
+    /// Runs are counted in bytes of `segment.display`, where a tab became
+    /// `width` spaces. Spans are in document char offsets and are only read
+    /// when they belong to the current document revision.
+    fn highlighted_runs(
+        &self,
+        line: &str,
+        line_start: usize,
+        segment: &chaus_layout::Segment,
+        base: &TextRun,
+        theme: &Theme,
+    ) -> Vec<TextRun> {
+        let spans = self.highlight_spans();
+        if spans.is_empty() || segment.display.is_empty() {
+            return vec![TextRun {
+                len: segment.display.len(),
+                color: base.color,
+                ..base.clone()
+            }];
+        }
+        let segment_start = line_start + segment.char_start;
+        let mut span_index = spans.partition_point(|span| span.range.end <= segment_start);
+        let mut column = segment.start_column;
+        let mut display_bytes = 0usize;
+        let mut run_start = 0usize;
+        let mut run_kind: Option<TokenKind> = None;
+        let mut runs = Vec::new();
+        for (index, character) in line
+            .chars()
+            .skip(segment.char_start)
+            .take(segment.char_end.saturating_sub(segment.char_start))
+            .enumerate()
+        {
+            let offset = segment_start + index;
+            while span_index < spans.len() && spans[span_index].range.end <= offset {
+                span_index += 1;
+            }
+            let kind = spans
+                .get(span_index)
+                .filter(|span| span.range.contains(&offset))
+                .map(|span| span.kind);
+            if run_kind.is_none() && index == 0 {
+                run_kind = kind;
+            } else if kind != run_kind {
+                if display_bytes > run_start {
+                    runs.push(run(display_bytes - run_start, run_kind, base, theme));
+                }
+                run_start = display_bytes;
+                run_kind = kind;
+            }
+            let width = if character == '\t' {
+                let stop = self.settings.tab_stop.max(1);
+                stop - (column % stop)
+            } else {
+                character.width().unwrap_or(0)
+            };
+            display_bytes += if character == '\t' {
+                width
+            } else {
+                character.len_utf8()
+            };
+            column += width;
+        }
+        if display_bytes > run_start {
+            runs.push(run(display_bytes - run_start, run_kind, base, theme));
+        }
+        if runs.is_empty() {
+            runs.push(TextRun {
+                len: segment.display.len(),
+                color: base.color,
+                ..base.clone()
+            });
+        }
+        runs
     }
 
     fn finish_frame(
@@ -228,6 +304,35 @@ impl Editor {
             hsla(theme.colors.text),
         ))
     }
+}
+
+fn run(len: usize, kind: Option<TokenKind>, base: &TextRun, theme: &Theme) -> TextRun {
+    TextRun {
+        len,
+        color: kind.map_or(base.color, |kind| token_color(kind, theme)),
+        ..base.clone()
+    }
+}
+
+/// Theme-derived syntax colours. Chaus keeps the small semantic token set and
+/// borrows the active Silvestris palette, so Aqua and Geist both stay legible.
+fn token_color(kind: TokenKind, theme: &Theme) -> gpui::Hsla {
+    let colors = &theme.colors;
+    hsla(match kind {
+        TokenKind::Keyword => colors.accent,
+        TokenKind::Type => colors.info,
+        TokenKind::Function | TokenKind::Tag => colors.link,
+        TokenKind::String => colors.success,
+        TokenKind::Number => colors.warning,
+        TokenKind::Comment => colors.text_secondary,
+        TokenKind::Constant => colors.error,
+        TokenKind::Attribute => colors.warning,
+        TokenKind::Variable
+        | TokenKind::Property
+        | TokenKind::Operator
+        | TokenKind::Punctuation => colors.text,
+        _ => colors.text,
+    })
 }
 
 /// Average advance of a monospace sample, in logical pixels.

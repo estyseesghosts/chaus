@@ -10,6 +10,7 @@ The currently inspected [Silvestris README](https://github.com/estyseesghosts/si
 
 - Install the Rust toolchain matching `rust-toolchain.toml`; for GNU builds also install the matching MinGW/GCC linker/C compiler and native tool dependencies. For MSVC builds use Visual Studio C++ Build Tools and Windows SDK; see [Rust Windows MSVC targets](https://doc.rust-lang.org/stable/rustc/platform-support/windows-msvc.html) and [Microsoft's setup guide](https://learn.microsoft.com/en-us/windows/dev-environment/rust/setup).
 - Keep GPUI and Silvestris pinned to the **same revision graph** and compile Silvestris gallery/explorer before implementing application code. Confirm linker/search path requirements of C-based Tree-sitter parsers and any shader resource embedding.
+- `chaus-highlight` compiles Tree-sitter and grammar C sources. MSVC builds find `cl.exe` automatically; GNU builds need a real `x86_64-w64-mingw32-gcc` that can compile C. Rustup's self-contained `x86_64-w64-mingw32-gcc.exe` is a linker shim only (`GCC-WARNING.txt`) and will fail on `-c`. On the devkitPro/MSYS2 setup used here, export `CC_x86_64_pc_windows_gnu` to a working cross compiler (or a small wrapper) before building. The parsers are linked into the executable; no grammar DLL or query file is loaded at runtime.
 - Build native release executable with `--locked` and explicit target. Example for the environment already used by Silvestris:
 
 ```powershell

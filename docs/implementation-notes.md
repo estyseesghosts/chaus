@@ -96,11 +96,22 @@ history; `None` restores horizontal scrolling.
   View → Vim Mode remain per-window.
 - Find and replace support literal search only; regular expressions are not
   implemented. Vim `/` and `?` remain separate.
-- Tree-sitter highlighting is not linked. External formatters are explicit and
-  opt-in: Format Document uses `rustfmt`, `clang-format`, `black` or `prettier`
-  when installed, runs with a 10-second deadline and bounded output, never
-  through a shell, and discards output if the document changed. Format-on-save
-  is off and no formatter runtime is bundled.
+- Syntax highlighting is linked through `chaus-highlight`: Rust, C, C++,
+  Python, JavaScript, TypeScript, TSX, JSON, TOML and shell, selected by
+  extension or known name with a View → Language override (including Plain
+  Text and Auto Detect). Parsers and highlight queries are compiled into the
+  executable. Parsing runs on the background executor after a 30 ms debounce;
+  single-edit transactions reuse the previous tree, while multi-edit
+  transactions and undo/redo reparse. Results are tagged with the document
+  revision and discarded if the document, language or generation changed, so a
+  stale tree is never painted. Files above 2 MiB stay plain text and report a
+  status; a grammar/query failure disables colour for that window without
+  affecting editing. Markdown is not in this subset yet because its block and
+  inline trees need a two-grammar pipeline. External formatters remain separate
+  and explicit: Format Document uses `rustfmt`, `clang-format`, `black` or
+  `prettier` when installed, runs with a 10-second deadline and bounded output,
+  never through a shell, and discards output if the document changed.
+  Format-on-save is off and no formatter runtime is bundled.
 - Open/save dialogs use the Win32 common dialogs on Windows. Linux uses the
   desktop's `zenity` or `kdialog` helper when one is installed; otherwise the
   command reports that no picker is available, so pass paths on the command

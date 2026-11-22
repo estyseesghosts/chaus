@@ -1,6 +1,6 @@
 //! Editing operations and the actions that trigger them.
 
-use chaus_core::document::{EditCause, EditTransaction, LineRange, TextEdit};
+use chaus_core::document::{EditCause, EditResult, EditTransaction, TextEdit};
 use chaus_core::position::{CharOffset, Selection};
 use gpui::{ClipboardItem, Context, Window};
 
@@ -15,9 +15,10 @@ impl Editor {
     /// Invalidate layout after a document change. Any change invalidates a
     /// conflict-overwrite decision because the next save now contains
     /// different content.
-    pub(crate) fn after_change(&mut self, affected: LineRange, cx: &mut Context<Self>) {
+    pub(crate) fn after_change(&mut self, result: &EditResult, cx: &mut Context<Self>) {
         self.force_next_save = false;
-        self.refresh_rows(affected);
+        self.refresh_rows(result.affected_lines);
+        self.after_highlight_edit(result, cx);
         self.marked = None;
         self.scroll_to_caret();
         self.schedule_recovery(cx);
@@ -39,7 +40,7 @@ impl Editor {
             EditTransaction::new(cause, TextEdit::new(range, text), self.selection, after);
         if let Ok(result) = self.document.apply(transaction) {
             self.selection = after.clamp(self.document.len_chars());
-            self.after_change(result.affected_lines, cx);
+            self.after_change(&result, cx);
             cx.notify();
         }
     }
@@ -219,6 +220,7 @@ impl Editor {
         if let Some(selection) = self.document.undo() {
             self.selection = selection;
             self.refresh_rows(self.document.last_changed_lines());
+            self.schedule_highlight(None, cx);
             self.scroll_to_caret();
             self.preferred_column = None;
             self.marked = None;
@@ -231,6 +233,7 @@ impl Editor {
         if let Some(selection) = self.document.redo() {
             self.selection = selection;
             self.refresh_rows(self.document.last_changed_lines());
+            self.schedule_highlight(None, cx);
             self.scroll_to_caret();
             self.preferred_column = None;
             self.marked = None;

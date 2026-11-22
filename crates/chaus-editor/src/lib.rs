@@ -15,6 +15,7 @@ mod editor_element;
 mod editor_file;
 mod editor_find;
 mod editor_format;
+mod editor_highlight;
 mod editor_indent;
 mod editor_input;
 mod editor_keys;

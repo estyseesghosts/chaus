@@ -70,6 +70,7 @@ impl Editor {
                 self.document
                     .reset(loaded.text, loaded.eol, loaded.preferred_eol);
                 self.file = Some(FileState { meta: loaded.meta });
+                self.reset_highlight(cx);
                 self.selection = Selection::caret(CharOffset::ZERO);
                 self.preferred_column = None;
                 self.scroll_row = 0.0;
@@ -249,6 +250,7 @@ impl Editor {
         match result {
             Ok(meta) => {
                 self.file = Some(FileState { meta });
+                self.refresh_language(cx);
                 self.force_next_save = false;
                 self.conflict_prompt = None;
                 self.disk_change = None;

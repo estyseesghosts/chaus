@@ -168,7 +168,7 @@ impl Editor {
         };
         if let Ok(result) = self.document.apply(transaction) {
             self.selection = after.clamp(self.document.len_chars());
-            self.after_change(result.affected_lines, cx);
+            self.after_change(&result, cx);
             cx.notify();
         }
     }

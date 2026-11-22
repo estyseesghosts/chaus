@@ -146,7 +146,7 @@ impl Editor {
         match self.document.apply(transaction) {
             Ok(result) => {
                 self.selection = after.clamp(self.document.len_chars());
-                self.after_change(result.affected_lines, cx);
+                self.after_change(&result, cx);
                 self.find_next(true, cx);
                 let offset = self.describe_offset(start);
                 self.flash_status(format!("Replaced match at {offset}"), cx);
@@ -204,7 +204,7 @@ impl Editor {
         match self.document.apply(transaction) {
             Ok(result) => {
                 self.selection = after.clamp(self.document.len_chars());
-                self.after_change(result.affected_lines, cx);
+                self.after_change(&result, cx);
                 cx.notify();
                 ranges.len()
             }
