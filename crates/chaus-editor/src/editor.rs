@@ -32,7 +32,7 @@ use crate::editor_keys::{
     Replace, Right, Save, SaveAs, SelectAll, SelectDocumentEnd, SelectDocumentStart, SelectDown,
     SelectEnd, SelectHome, SelectLeft, SelectRight, SelectUp, SelectWordLeft, SelectWordRight,
     ToggleVim, TrimTrailingWhitespace, Undo, Up, WordLeft, WordRight, ZoomIn, ZoomOut, ZoomReset,
-    KEY_CONTEXT,
+    KEY_CONTEXT, VIM_OWNED_KEY_CONTEXT,
 };
 use crate::editor_recovery::{new_recovery_id, RecoveryPromptFocus};
 use crate::geometry::Geometry;
@@ -92,6 +92,11 @@ pub struct Editor {
     pub(crate) mapping_epoch: u64,
     pub(crate) saving: bool,
     pub(crate) opening: bool,
+    /// Set when a key-down was consumed by the modal engine. Windows delivers
+    /// the printable character in a separate WM_CHAR message afterwards, so
+    /// the next text-input callback must be ignored to avoid inserting the
+    /// command itself (`j`, `i`, `:`).
+    pub(crate) suppress_text_input: bool,
 }
 
 impl Editor {
@@ -162,6 +167,7 @@ impl Editor {
             mapping_epoch: 0,
             saving: false,
             opening: false,
+            suppress_text_input: false,
         };
         editor.rebuild_rows();
         editor.start_disk_watch(cx);
@@ -470,13 +476,19 @@ impl Render for Editor {
         let recovery_prompt =
             (!self.recovery_queue.is_empty()).then(|| self.render_recovery_prompt(cx));
         let vim_label = self.vim_mode_label();
+        let vim_owns_keys = self.vim && !self.vim_engine.mode().accepts_text();
+        let key_context = if vim_owns_keys {
+            VIM_OWNED_KEY_CONTEXT
+        } else {
+            KEY_CONTEXT
+        };
         let content = div()
             .id("chaus-editor")
             .track_focus(&self.focus)
             // The focus handle must be tracked by an element in the rendered
             // tree, otherwise GPUI never adds `ChausEditor` to the key-dispatch
             // path and every action binding silently does nothing.
-            .key_context(KEY_CONTEXT)
+            .key_context(key_context)
             .size_full()
             .relative()
             .bg(background)

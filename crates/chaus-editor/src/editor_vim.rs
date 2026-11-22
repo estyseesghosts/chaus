@@ -26,6 +26,9 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // A new key-down starts a new platform message; whatever the previous
+        // key suppressed can no longer arrive.
+        self.suppress_text_input = false;
         if !self.vim
             || self.find_bar.is_some()
             || self.close_prompt
@@ -63,15 +66,34 @@ impl Editor {
             self.cancel_vim_prefix(cx);
             return false;
         }
-        let Some(key) = translate(keystroke, control_redo) else {
+        let Some(mut key) = translate(keystroke, control_redo) else {
             return false;
         };
+        let mode = self.vim_engine.mode();
+        if mode == Mode::CommandLine
+            && matches!(
+                keystroke.key.as_str(),
+                "left" | "right" | "up" | "down" | "home" | "end" | "delete"
+            )
+        {
+            // Arrow/navigation names must not turn into `h`, `l`, `0`, `$`
+            // inside an Ex command line.
+            return false;
+        }
+        if matches!(mode, Mode::Normal | Mode::VisualChar | Mode::VisualLine) {
+            key = match key {
+                VimKey::Enter => VimKey::Char('j'),
+                VimKey::Backspace => VimKey::Char('h'),
+                other => other,
+            };
+        }
         let outcome = self
             .vim_engine
             .handle_key(key, &mut self.document, &mut self.selection);
         let consumed = !matches!(outcome, Outcome::Unhandled);
         self.apply_vim_outcome(outcome, window, cx);
         self.arm_mapping_timeout(cx);
+        self.suppress_text_input = consumed;
         consumed
     }
 
@@ -263,11 +285,22 @@ fn translate(keystroke: &Keystroke, control_redo: bool) -> Option<VimKey> {
         "enter" => Some(VimKey::Enter),
         "backspace" => Some(VimKey::Backspace),
         "tab" => Some(VimKey::Tab),
-        _ => {
+        "left" => Some(VimKey::Char('h')),
+        "right" => Some(VimKey::Char('l')),
+        "up" => Some(VimKey::Char('k')),
+        "down" => Some(VimKey::Char('j')),
+        "home" => Some(VimKey::Char('0')),
+        "end" => Some(VimKey::Char('$')),
+        "delete" => Some(VimKey::Char('x')),
+        "space" => Some(VimKey::Char(' ')),
+        "pageup" | "pagedown" | "insert" => None,
+        key => {
             if let Some(text) = &keystroke.key_char {
                 return text.chars().next().map(VimKey::Char);
             }
-            let mut characters = keystroke.key.chars();
+            // Never turn a multi-character key name such as "f5" into its
+            // first letter.
+            let mut characters = key.chars();
             let character = characters.next()?;
             if characters.next().is_some() {
                 return None;

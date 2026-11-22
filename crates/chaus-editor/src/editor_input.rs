@@ -80,6 +80,19 @@ impl EntityInputHandler for Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Windows sends WM_CHAR for printable keys even when the key-down was
+        // consumed by the modal engine. In Normal/Visual/Command modes the
+        // engine owns those keys; letting the character through would insert
+        // `j`, `d`, `:` and so on as literal text.
+        if self.suppress_text_input {
+            // The OS delivered WM_CHAR for a key the modal engine already
+            // consumed. Drop exactly this character message.
+            self.suppress_text_input = false;
+            return;
+        }
+        if !self.accepts_text_input(window, cx) {
+            return;
+        }
         let text = normalize_newlines(new_text);
         let range = match range_utf16 {
             Some(range) => self.document.utf16_range_to_char(range),
@@ -112,6 +125,13 @@ impl EntityInputHandler for Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.suppress_text_input {
+            self.suppress_text_input = false;
+            return;
+        }
+        if !self.accepts_text_input(window, cx) {
+            return;
+        }
         if self.preedit_active && self.document.undo().is_some() {
             self.refresh_rows(self.document.last_changed_lines());
         }

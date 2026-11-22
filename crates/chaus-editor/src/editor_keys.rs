@@ -4,6 +4,13 @@ use gpui::{actions, App, KeyBinding};
 
 /// Key context for editor-scoped bindings.
 pub const KEY_CONTEXT: &str = "ChausEditor";
+/// Key context while Vim owns text keys (Normal, Visual and Command modes).
+/// Editing bindings are excluded so Enter, Backspace, arrows and Delete reach
+/// the modal engine instead of inserting or deleting text.
+pub const VIM_OWNED_KEY_CONTEXT: &str = "ChausEditor ChausVimNormal";
+/// Context predicate for bindings that only apply outside Vim's text-owning
+/// modes, including Insert mode.
+const EDIT_CONTEXT: &str = "ChausEditor && !ChausVimNormal";
 
 actions!(
     chaus_editor,
@@ -71,24 +78,35 @@ pub fn bind_keys(cx: &mut App) {
         };
     }
     let context = Some(KEY_CONTEXT);
+    let edit = Some(EDIT_CONTEXT);
     let mut bindings = vec![
-        KeyBinding::new("backspace", Backspace, context),
-        KeyBinding::new("delete", Delete, context),
-        KeyBinding::new("left", Left, context),
-        KeyBinding::new("right", Right, context),
-        KeyBinding::new("up", Up, context),
-        KeyBinding::new("down", Down, context),
-        KeyBinding::new("shift-left", SelectLeft, context),
-        KeyBinding::new("shift-right", SelectRight, context),
-        KeyBinding::new("shift-up", SelectUp, context),
-        KeyBinding::new("shift-down", SelectDown, context),
-        KeyBinding::new("home", Home, context),
-        KeyBinding::new("end", End, context),
-        KeyBinding::new("shift-home", SelectHome, context),
-        KeyBinding::new("shift-end", SelectEnd, context),
-        KeyBinding::new("enter", InsertNewline, context),
-        KeyBinding::new("tab", InsertTab, context),
-        KeyBinding::new("shift-tab", Outdent, context),
+        KeyBinding::new("backspace", Backspace, edit),
+        KeyBinding::new("delete", Delete, edit),
+        KeyBinding::new("left", Left, edit),
+        KeyBinding::new("right", Right, edit),
+        KeyBinding::new("up", Up, edit),
+        KeyBinding::new("down", Down, edit),
+        KeyBinding::new("shift-left", SelectLeft, edit),
+        KeyBinding::new("shift-right", SelectRight, edit),
+        KeyBinding::new("shift-up", SelectUp, edit),
+        KeyBinding::new("shift-down", SelectDown, edit),
+        KeyBinding::new("home", Home, edit),
+        KeyBinding::new("end", End, edit),
+        KeyBinding::new("shift-home", SelectHome, edit),
+        KeyBinding::new("shift-end", SelectEnd, edit),
+        KeyBinding::new("enter", InsertNewline, edit),
+        KeyBinding::new("tab", InsertTab, edit),
+        KeyBinding::new("shift-tab", Outdent, edit),
+        KeyBinding::new(primary!("backspace"), DeleteWordLeft, edit),
+        KeyBinding::new(primary!("delete"), DeleteWordRight, edit),
+        KeyBinding::new(primary!("left"), WordLeft, edit),
+        KeyBinding::new(primary!("right"), WordRight, edit),
+        KeyBinding::new(primary!("shift-left"), SelectWordLeft, edit),
+        KeyBinding::new(primary!("shift-right"), SelectWordRight, edit),
+        KeyBinding::new(primary!("home"), DocumentStart, edit),
+        KeyBinding::new(primary!("end"), DocumentEnd, edit),
+        KeyBinding::new(primary!("shift-home"), SelectDocumentStart, edit),
+        KeyBinding::new(primary!("shift-end"), SelectDocumentEnd, edit),
         KeyBinding::new("escape", Escape, context),
         KeyBinding::new(primary!("a"), SelectAll, context),
         KeyBinding::new(primary!("c"), Copy, context),
@@ -103,16 +121,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(primary!("h"), Replace, context),
         KeyBinding::new("f3", FindNext, context),
         KeyBinding::new("shift-f3", FindPrevious, context),
-        KeyBinding::new(primary!("backspace"), DeleteWordLeft, context),
-        KeyBinding::new(primary!("delete"), DeleteWordRight, context),
-        KeyBinding::new(primary!("left"), WordLeft, context),
-        KeyBinding::new(primary!("right"), WordRight, context),
-        KeyBinding::new(primary!("shift-left"), SelectWordLeft, context),
-        KeyBinding::new(primary!("shift-right"), SelectWordRight, context),
-        KeyBinding::new(primary!("home"), DocumentStart, context),
-        KeyBinding::new(primary!("end"), DocumentEnd, context),
-        KeyBinding::new(primary!("shift-home"), SelectDocumentStart, context),
-        KeyBinding::new(primary!("shift-end"), SelectDocumentEnd, context),
         KeyBinding::new("ctrl-shift-v", ToggleVim, context),
         KeyBinding::new(primary!("="), ZoomIn, context),
         KeyBinding::new(primary!("shift-="), ZoomIn, context),
