@@ -13,7 +13,7 @@ use chaus_app::app;
 fn attach_parent_console() {
     use std::ptr;
     use windows_sys::Win32::Foundation::{
-        HANDLE, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+        GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
