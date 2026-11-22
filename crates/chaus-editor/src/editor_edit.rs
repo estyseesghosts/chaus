@@ -247,6 +247,10 @@ impl Editor {
     }
 
     pub(crate) fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_bar.is_some() {
+            self.close_find(window, cx);
+            return;
+        }
         let had_composition = self.marked.is_some() || self.preedit_active;
         let handled = self.handle_vim_escape(window, cx);
         self.clear_composition_state();

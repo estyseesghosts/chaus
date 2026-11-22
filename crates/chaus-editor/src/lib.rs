@@ -11,6 +11,7 @@ mod editor_cursor;
 mod editor_edit;
 mod editor_element;
 mod editor_file;
+mod editor_find;
 mod editor_input;
 mod editor_keys;
 mod editor_paint;

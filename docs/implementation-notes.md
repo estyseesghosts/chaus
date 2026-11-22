@@ -57,7 +57,9 @@ app-owned. Bundled fonts come from Silvestris; do not add a second copy.
 
 - No native menu bar or preferences window yet. Theme and Vim defaults come from
   `_chausrc`; theme switching at runtime is not exposed in the UI.
-- Find and replace have no in-window UI. Vim `/` and `?` search exist.
+- Find and replace use literal search with Previous/Next, a match-case toggle,
+  and one-transaction Replace One/Replace All. Regular expressions are not
+  supported; Vim `/` and `?` remain separate.
 - Tree-sitter highlighting and external formatters are not linked.
 - Open/save dialogs use the Win32 common dialogs on Windows. Linux uses the
   desktop's `zenity` or `kdialog` helper when one is installed; otherwise the

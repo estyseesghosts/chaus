@@ -467,6 +467,112 @@ impl Document {
         self.rope.slice(start..end).to_string()
     }
 
+    /// Find a literal string from `from`, wrapping at the document edge.
+    ///
+    /// Forward search includes a match starting at `from`; backward search
+    /// requires the match to start before it. Callers advancing past the
+    /// current match pass the end (forward) or start (backward) of that match.
+    #[must_use]
+    pub fn find_literal(
+        &self,
+        needle: &str,
+        from: CharOffset,
+        forward: bool,
+        case_sensitive: bool,
+    ) -> Option<CharOffset> {
+        if needle.is_empty() {
+            return None;
+        }
+        let text = self.text();
+        let from_byte = self.char_to_byte(from).0.min(text.len());
+        if case_sensitive {
+            let found = if forward {
+                text[from_byte..]
+                    .find(needle)
+                    .map(|offset| from_byte + offset)
+                    .or_else(|| text.find(needle))
+            } else {
+                text[..from_byte]
+                    .rfind(needle)
+                    .or_else(|| text.rfind(needle))
+            };
+            return found.map(|byte| CharOffset(self.rope().byte_to_char(byte)));
+        }
+
+        let needle_chars: Vec<char> = needle.chars().collect();
+        let matches_at = |byte: usize| {
+            let mut candidates = text[byte..].chars();
+            needle_chars.iter().all(|needle| {
+                candidates
+                    .next()
+                    .is_some_and(|candidate| candidate.to_lowercase().eq(needle.to_lowercase()))
+            })
+        };
+        let found = if forward {
+            text[from_byte..]
+                .char_indices()
+                .find(|(offset, _)| matches_at(from_byte + offset))
+                .map(|(offset, _)| from_byte + offset)
+                .or_else(|| {
+                    text.char_indices()
+                        .find(|(offset, _)| matches_at(*offset))
+                        .map(|(offset, _)| offset)
+                })
+        } else {
+            text[..from_byte]
+                .char_indices()
+                .rev()
+                .find(|(offset, _)| matches_at(*offset))
+                .map(|(offset, _)| offset)
+                .or_else(|| {
+                    text.char_indices()
+                        .rev()
+                        .find(|(offset, _)| matches_at(*offset))
+                        .map(|(offset, _)| offset)
+                })
+        };
+        found.map(|byte| CharOffset(self.rope().byte_to_char(byte)))
+    }
+
+    /// Every non-overlapping literal match in document order.
+    #[must_use]
+    pub fn literal_ranges(&self, needle: &str, case_sensitive: bool) -> Vec<CharRange> {
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let text = self.text();
+        let needle_chars: Vec<char> = needle.chars().collect();
+        let matches_at = |byte: usize| {
+            let mut candidates = text[byte..].chars();
+            needle_chars.iter().all(|needle| {
+                if case_sensitive {
+                    candidates.next() == Some(*needle)
+                } else {
+                    candidates
+                        .next()
+                        .is_some_and(|candidate| candidate.to_lowercase().eq(needle.to_lowercase()))
+                }
+            })
+        };
+        let mut ranges = Vec::new();
+        let mut offset = 0;
+        while offset < text.len() {
+            if matches_at(offset) {
+                let start = CharOffset(self.rope().byte_to_char(offset));
+                let end = CharOffset(start.0 + needle_chars.len());
+                ranges.push(CharRange::new(start, end));
+                offset += text[offset..]
+                    .chars()
+                    .take(needle_chars.len())
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+            } else {
+                offset += text[offset..].chars().next().map_or(1, char::len_utf8);
+            }
+        }
+        ranges
+    }
+
     /// Text of a line, excluding its trailing hard break.
     #[must_use]
     pub fn line_text(&self, line: LineIndex) -> String {

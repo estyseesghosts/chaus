@@ -26,7 +26,7 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.vim {
+        if !self.vim || self.find_bar.is_some() || self.close_prompt {
             return false;
         }
         if event.prefer_character_input {

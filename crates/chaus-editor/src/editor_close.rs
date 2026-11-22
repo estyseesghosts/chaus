@@ -42,6 +42,7 @@ impl Editor {
             return true;
         }
         self.close_prompt = true;
+        self.vim_engine.cancel_prefix();
         window.focus(&self.close_focus.save, cx);
         cx.notify();
         false

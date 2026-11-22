@@ -19,12 +19,13 @@ use silvestris::ActiveTheme;
 use crate::editor_close::ClosePromptFocus;
 use crate::editor_element::EditorElement;
 use crate::editor_file::FileState;
+use crate::editor_find::FindBar;
 use crate::editor_keys::{
     Backspace, Copy, Cut, Delete, DeleteWordLeft, DeleteWordRight, DocumentEnd, DocumentStart,
-    Down, End, Escape, Home, InsertNewline, InsertTab, Left, Outdent, Paste, Redo, Right, Save,
-    SaveAs, SelectAll, SelectDocumentEnd, SelectDocumentStart, SelectDown, SelectEnd, SelectHome,
-    SelectLeft, SelectRight, SelectUp, SelectWordLeft, SelectWordRight, ToggleVim, Undo, Up,
-    WordLeft, WordRight, KEY_CONTEXT,
+    Down, End, Escape, Find, FindNext, FindPrevious, Home, InsertNewline, InsertTab, Left, Outdent,
+    Paste, Redo, Replace, Right, Save, SaveAs, SelectAll, SelectDocumentEnd, SelectDocumentStart,
+    SelectDown, SelectEnd, SelectHome, SelectLeft, SelectRight, SelectUp, SelectWordLeft,
+    SelectWordRight, ToggleVim, Undo, Up, WordLeft, WordRight, KEY_CONTEXT,
 };
 use crate::geometry::Geometry;
 
@@ -48,6 +49,7 @@ pub struct Editor {
     pub(crate) rows_columns: Option<usize>,
     pub(crate) settings: Settings,
     pub(crate) status: Option<String>,
+    pub(crate) find_bar: Option<FindBar>,
     pub(crate) close_prompt: bool,
     pub(crate) close_focus: ClosePromptFocus,
     pub(crate) force_next_save: bool,
@@ -102,6 +104,7 @@ impl Editor {
             rows_columns: None,
             settings,
             status: None,
+            find_bar: None,
             close_prompt: false,
             close_focus,
             force_next_save: false,
@@ -121,6 +124,11 @@ impl Editor {
     #[must_use]
     pub fn document(&self) -> &Document {
         &self.document
+    }
+
+    #[must_use]
+    pub fn selection(&self) -> Selection {
+        self.selection
     }
 
     #[must_use]
@@ -305,6 +313,7 @@ impl Render for Editor {
         window.set_window_title(&title);
         let background = silvestris::convert::hsla(theme.colors.content);
         let status = self.status.clone();
+        let find_bar = self.find_bar.is_some().then(|| self.render_find_bar(cx));
         let close_prompt = self.close_prompt.then(|| self.render_close_prompt(cx));
         let vim_label = self.vim_mode_label();
         let content = div()
@@ -449,6 +458,18 @@ impl Render for Editor {
             .on_action(cx.listener(|editor, action: &SaveAs, window, cx| {
                 editor.save_as(action, window, cx);
             }))
+            .on_action(cx.listener(|editor, _: &Find, window, cx| {
+                editor.open_find(false, window, cx);
+            }))
+            .on_action(cx.listener(|editor, _: &Replace, window, cx| {
+                editor.open_find(true, window, cx);
+            }))
+            .on_action(cx.listener(|editor, _: &FindNext, _, cx| {
+                editor.find_next(true, cx);
+            }))
+            .on_action(cx.listener(|editor, _: &FindPrevious, _, cx| {
+                editor.find_next(false, cx);
+            }))
             .on_action(cx.listener(|editor, action: &ToggleVim, window, cx| {
                 editor.toggle_vim(action, window, cx);
             }))
@@ -490,6 +511,7 @@ impl Render for Editor {
                         .child(message),
                 )
             })
+            .when_some(find_bar, |element, bar| element.child(bar))
             .when_some(close_prompt, |element, sheet| element.child(sheet));
         silvestris::chrome::WindowFrame::new(title).child(content)
     }
