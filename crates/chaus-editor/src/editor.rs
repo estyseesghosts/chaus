@@ -1,12 +1,18 @@
 //! The `Editor` entity: document, caret, scroll and per-window settings.
 
-use chaus_core::document::Document;
+use std::ops::Range;
+
+use chaus_core::document::{Document, LineRange};
 use chaus_core::eol::{Eol, EolMap};
 use chaus_core::position::{CharOffset, CharRange, LineIndex, Selection};
 use chaus_core::settings::Settings;
 use chaus_io::LoadedFile;
+use chaus_vim::Engine;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, prelude::*, px, App, Context, CursorStyle, FocusHandle, Focusable, Pixels, Window,
+    div, px, App, Context, CursorStyle, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Pixels, Render, ScrollEvent, Styled as _, Window,
 };
 use silvestris::ActiveTheme;
 
@@ -42,8 +48,9 @@ pub struct Editor {
     pub(crate) settings: Settings,
     pub(crate) status: Option<String>,
     pub(crate) close_confirmed: bool,
+    pub(crate) force_next_save: bool,
     pub(crate) vim: bool,
-    pub(crate) vim_engine: chaus_vim::Engine,
+    pub(crate) vim_engine: Engine,
     pub(crate) caret_visible: bool,
     pub(crate) blink_epoch: u64,
     pub(crate) blink_key: Option<(Selection, bool)>,
@@ -51,20 +58,12 @@ pub struct Editor {
 
 impl Editor {
     /// Build an editor for a loaded file or an untitled document.
-    pub fn new(
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        loaded: Option<LoadedFile>,
-        settings: Settings,
-    ) -> Self {
+    pub fn new(cx: &mut Context<Self>, loaded: Option<LoadedFile>, settings: Settings) -> Self {
         let (document, file) = match loaded {
             Some(loaded) => {
                 let document =
                     Document::from_normalized_text(loaded.text, loaded.eol, loaded.preferred_eol);
-                let state = FileState {
-                    had_utf8_bom: loaded.had_utf8_bom,
-                    meta: loaded.meta,
-                };
+                let state = FileState { meta: loaded.meta };
                 (document, Some(state))
             }
             None => (
@@ -98,14 +97,14 @@ impl Editor {
             settings,
             status: None,
             close_confirmed: false,
+            force_next_save: false,
             vim,
-            vim_engine: chaus_vim::Engine::new(mappings),
+            vim_engine: Engine::new(mappings),
             caret_visible: true,
             blink_epoch: 0,
             blink_key: None,
         };
         editor.rebuild_rows();
-        let _ = window;
         editor
     }
 
@@ -175,7 +174,7 @@ impl Editor {
         self.prefix_valid = false;
     }
 
-    pub(crate) fn refresh_rows(&mut self, affected: chaus_core::document::LineRange) {
+    pub(crate) fn refresh_rows(&mut self, affected: LineRange) {
         if self.line_rows.len() != self.document.len_lines() {
             self.rebuild_rows();
             return;
@@ -240,6 +239,19 @@ impl Editor {
         (line, row)
     }
 
+    /// Resolve a document-wide visual row to its hard line and the visual
+    /// columns covered by that row.
+    pub(crate) fn row_span(&mut self, row: usize) -> (LineIndex, Range<usize>) {
+        let line = self.line_at_row(row);
+        let local_row = row.saturating_sub(self.prefix_rows.get(line.0).copied().unwrap_or(0));
+        let segments = self.segments_for(line);
+        let span = segments
+            .get(local_row)
+            .or_else(|| segments.last())
+            .map_or(0..0, |segment| segment.start_column..segment.end_column());
+        (line, span)
+    }
+
     pub(crate) fn caret_column(&self, offset: CharOffset) -> usize {
         let line = self.document.line_of(offset);
         let start = self.document.line_start(line);
@@ -295,34 +307,28 @@ impl Render for Editor {
             .text_size(px(self.settings.font_size))
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|editor, event: &gpui::MouseDownEvent, window, cx| {
+                MouseButton::Left,
+                cx.listener(|editor, event: &MouseDownEvent, window, cx| {
                     editor.on_mouse_down(event, window, cx);
                 }),
             )
-            .on_mouse_move(
-                cx.listener(|editor, event: &gpui::MouseMoveEvent, window, cx| {
-                    editor.on_mouse_move(event, window, cx);
-                }),
-            )
+            .on_mouse_move(cx.listener(|editor, event: &MouseMoveEvent, window, cx| {
+                editor.on_mouse_move(event, window, cx);
+            }))
             .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(|editor, event: &gpui::MouseUpEvent, window, cx| {
+                MouseButton::Left,
+                cx.listener(|editor, event: &MouseUpEvent, window, cx| {
                     editor.on_mouse_up(event, window, cx);
                 }),
             )
-            .on_scroll(
-                cx.listener(|editor, event: &gpui::ScrollEvent, window, cx| {
-                    editor.on_scroll(event, window, cx);
-                }),
-            )
-            .on_key_down(
-                cx.listener(|editor, event: &gpui::KeyDownEvent, window, cx| {
-                    if editor.handle_vim_key(event, window, cx) {
-                        cx.stop_propagation();
-                    }
-                }),
-            )
+            .on_scroll(cx.listener(|editor, event: &ScrollEvent, window, cx| {
+                editor.on_scroll(event, window, cx);
+            }))
+            .on_key_down(cx.listener(|editor, event: &KeyDownEvent, window, cx| {
+                if editor.handle_vim_key(event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|editor, action: &Backspace, window, cx| {
                 editor.backspace(action, window, cx);
             }))

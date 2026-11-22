@@ -147,7 +147,10 @@ pub struct LineRange {
 impl LineRange {
     #[must_use]
     pub fn new(start: LineIndex, end: LineIndex) -> Self {
-        Self { start, end }
+        Self {
+            start: start.min(end),
+            end: start.max(end),
+        }
     }
 
     #[must_use]
@@ -159,7 +162,7 @@ impl LineRange {
 /// Reasons a transaction may be rejected. The document is left untouched on
 /// every error.
 #[non_exhaustive]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditError {
     OutOfBounds { offset: CharOffset, length: usize },
     OverlappingEdits { first: CharRange, second: CharRange },
@@ -180,15 +183,17 @@ impl std::fmt::Display for EditError {
                 "edits overlap: {}..{} and {}..{}",
                 first.start, first.end, second.start, second.end
             ),
-            EditError::EmptyTransaction => write!(formatter, "transaction contains no edits"),
+            EditError::EmptyTransaction => {
+                write!(formatter, "transaction contains no text changes")
+            }
         }
     }
 }
 
 impl std::error::Error for EditError {}
 
-fn utf16_len(text: &str) -> usize {
-    text.chars().map(char::len_utf16).sum()
+fn utf16_len(characters: impl Iterator<Item = char>) -> usize {
+    characters.map(char::len_utf16).sum()
 }
 
 /// Per-line UTF-16 lengths with a lazily rebuilt prefix sum. Edits patch only
@@ -205,7 +210,7 @@ impl Utf16Index {
     fn rebuild(&mut self, rope: &Rope) {
         self.line_lengths.clear();
         for line in rope.lines() {
-            self.line_lengths.push(utf16_len(&line.to_string()));
+            self.line_lengths.push(utf16_len(line.chars()));
         }
         self.prefix_valid = false;
     }
@@ -245,10 +250,15 @@ impl Utf16Index {
         if length == 0 {
             return CharOffset::ZERO;
         }
-        let line = match self.prefix.binary_search(&target) {
-            Ok(index) => index.min(length - 1),
-            Err(index) => index.saturating_sub(1).min(length - 1),
-        };
+        // Several lines can start at the same UTF-16 offset when blank lines
+        // precede the target. Pick the *first* matching line; otherwise a
+        // lookup at offset zero would land after the leading newline.
+        let first_at_or_after = self.prefix.partition_point(|start| *start < target);
+        let line = match self.prefix.get(first_at_or_after) {
+            Some(start) if *start == target => first_at_or_after,
+            _ => first_at_or_after.saturating_sub(1),
+        }
+        .min(length - 1);
         let line_start = rope.line_to_char(line);
         let mut units = self.prefix.get(line).copied().unwrap_or(0);
         let mut chars = 0;
@@ -408,9 +418,12 @@ impl Document {
     }
 
     /// Text with the original newline kinds reconstructed, for save.
+    ///
+    /// This expands directly from the rope chunks so saving does not first
+    /// build and then copy a second full-document string.
     #[must_use]
     pub fn text_with_eol(&self) -> String {
-        self.eol.apply_to(&self.text(), self.preferred_eol)
+        self.eol.expand(self.rope.chars(), self.preferred_eol)
     }
 
     #[must_use]
@@ -453,20 +466,24 @@ impl Document {
         ByteOffset(self.rope.char_to_byte(offset.0.min(self.len_chars())))
     }
 
+    #[must_use]
     pub fn char_to_utf16(&self, offset: CharOffset) -> Utf16Offset {
         self.utf16.borrow_mut().char_to_utf16(&self.rope, offset)
     }
 
+    #[must_use]
     pub fn utf16_to_char(&self, offset: Utf16Offset) -> CharOffset {
         self.utf16.borrow_mut().utf16_to_char(&self.rope, offset)
     }
 
+    #[must_use]
     pub fn char_range_to_utf16(&self, range: CharRange) -> Range<usize> {
         let start = self.char_to_utf16(range.start).0;
         let end = self.char_to_utf16(range.end).0;
         start..end
     }
 
+    #[must_use]
     pub fn utf16_range_to_char(&self, range: Range<usize>) -> CharRange {
         let start = self.utf16_to_char(Utf16Offset(range.start));
         let end = self.utf16_to_char(Utf16Offset(range.end));
@@ -548,6 +565,7 @@ impl Document {
             after_selection,
             cause,
         } = transaction;
+        edits.retain(|edit| !(edit.range.is_empty() && edit.insert.is_empty()));
         if edits.is_empty() {
             return Err(EditError::EmptyTransaction);
         }
@@ -569,6 +587,9 @@ impl Document {
             }
         }
 
+        // A saved state deeper than this point depends on entries that undo
+        // moved to the redo stack; the new edit discards that branch.
+        let history_depth = self.undo_stack.len();
         let was_contiguous_typing = self.can_coalesce(cause, &edits, before_selection);
         let mut steps = Vec::with_capacity(edits.len());
         let mut applied = Vec::with_capacity(edits.len());
@@ -664,19 +685,29 @@ impl Document {
         } else {
             self.undo_stack.push(entry);
         }
-        if let Some(save_position) = self.save_position {
-            if save_position > self.undo_stack.len() {
-                self.save_position = None;
-            }
+        if self
+            .save_position
+            .is_some_and(|position| position > history_depth)
+        {
+            self.save_position = None;
         }
 
+        // Line numbers collected above are valid in the coordinate frame at
+        // the moment each edit was applied. A lower edit can shift an earlier
+        // edit's lines, so multiple edits conservatively invalidate the whole
+        // layout rather than under-reporting stale wrapped rows.
+        let affected_lines = if edits.len() > 1 {
+            LineRange::new(LineIndex::ZERO, LineIndex(self.len_lines()))
+        } else {
+            LineRange::new(
+                affected_start,
+                LineIndex(affected_end.0.max(affected_start.0 + 1)),
+            )
+        };
         Ok(EditResult {
             revision: self.revision,
             edits: applied,
-            affected_lines: LineRange::new(
-                affected_start,
-                LineIndex(affected_end.0.max(affected_start.0 + 1)),
-            ),
+            affected_lines,
         })
     }
 
@@ -691,7 +722,11 @@ impl Document {
         let Some(last) = self.undo_stack.last() else {
             return false;
         };
-        last.cause == EditCause::Typing
+        // Never fold new text into the entry that represents the on-disk
+        // baseline: the length of the undo stack would not change, so
+        // `is_dirty` would wrongly report the document as saved.
+        self.save_position != Some(self.undo_stack.len())
+            && last.cause == EditCause::Typing
             && last.after_selection.is_empty()
             && last.after_selection.head == edit.range.start
             && last.after_selection == before
@@ -709,7 +744,7 @@ impl Document {
         let new_line_count = self.rope.len_lines();
         let last_new = new_end_line.0.min(new_line_count.saturating_sub(1));
         let new_lengths: Vec<usize> = (new_start_line.0..=last_new)
-            .map(|line| utf16_len(&self.rope.line(line).to_string()))
+            .map(|line| utf16_len(self.rope.line(line).chars()))
             .collect();
         let remove_end = (old_end_line.0 + 1).min(utf16.line_lengths.len());
         let remove_start = old_start_line.0.min(remove_end);
@@ -720,35 +755,50 @@ impl Document {
     }
 
     fn apply_inverse(&mut self, step: &UndoStep) {
-        let inserted_chars = step.edit.inserted_chars();
-        let range = CharRange::new(
-            step.edit.range.start,
-            CharOffset((step.edit.range.start.0 + inserted_chars).min(self.len_chars())),
-        );
-        self.rope.remove(range.start.0..range.end.0);
+        let start = step.edit.range.start;
+        let old_start_line = self.line_of(start);
+        let inserted_end = CharOffset((start.0 + step.edit.inserted_chars()).min(self.len_chars()));
+        let old_end_line = self.line_of(inserted_end);
+        self.rope.remove(start.0..inserted_end.0);
         if !step.removed.is_empty() {
-            self.rope.insert(range.start.0, &step.removed);
+            self.rope.insert(start.0, &step.removed);
         }
         self.eol.splice(
             step.eol.break_index,
             step.eol.inserted.len(),
             step.eol.removed.iter().copied(),
         );
-        self.utf16.borrow_mut().rebuild(&self.rope);
+        let new_end = CharOffset((start.0 + step.removed.chars().count()).min(self.len_chars()));
+        self.patch_utf16_lines(
+            old_start_line,
+            old_end_line,
+            self.line_of(start),
+            self.line_of(new_end),
+        );
     }
 
     fn apply_forward(&mut self, step: &UndoStep) {
-        self.rope
-            .remove(step.edit.range.start.0..step.edit.range.end.0);
+        let start = step.edit.range.start;
+        let old_start_line = self.line_of(start);
+        let removed_end =
+            CharOffset((start.0 + step.removed.chars().count()).min(self.len_chars()));
+        let old_end_line = self.line_of(removed_end);
+        self.rope.remove(start.0..step.edit.range.end.0);
         if !step.edit.insert.is_empty() {
-            self.rope.insert(step.edit.range.start.0, &step.edit.insert);
+            self.rope.insert(start.0, &step.edit.insert);
         }
         self.eol.splice(
             step.eol.break_index,
             step.eol.removed.len(),
             step.eol.inserted.iter().copied(),
         );
-        self.utf16.borrow_mut().rebuild(&self.rope);
+        let new_end = CharOffset((start.0 + step.edit.inserted_chars()).min(self.len_chars()));
+        self.patch_utf16_lines(
+            old_start_line,
+            old_end_line,
+            self.line_of(start),
+            self.line_of(new_end),
+        );
     }
 
     #[must_use]

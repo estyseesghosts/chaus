@@ -138,6 +138,8 @@ impl Engine {
             visual_line,
             self.register_mut(),
         );
+        // A visual range has no replayable Normal-mode command; leave `.`
+        // pointing at the previous change.
         self.set_visual_anchor(None);
         self.reset_count();
         match applied {
@@ -146,7 +148,7 @@ impl Engine {
                 self.set_changed();
                 if applied.enter_insert {
                     self.set_mode(Mode::Insert);
-                    self.insert_buffer().clear();
+                    self.begin_insert(applied.caret, Vec::new(), false);
                 } else {
                     self.set_mode(Mode::Normal);
                 }

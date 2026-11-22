@@ -58,20 +58,12 @@ impl Editor {
         let base_row = self.prefix_rows.get(line.0).copied().unwrap_or(0) + row_in_line;
         let total = self.total_rows();
         let target_row = (base_row as isize + delta).clamp(0, total as isize - 1) as usize;
-        let target_line = self.line_at_row(target_row);
-        let local_row =
-            target_row.saturating_sub(self.prefix_rows.get(target_line.0).copied().unwrap_or(0));
+        let (target_line, span) = self.row_span(target_row);
         let column = self
             .preferred_column
             .unwrap_or_else(|| self.caret_column(self.selection.head));
         self.preferred_column = Some(column);
-        let segments = self.segments_for(target_line);
-        let max_column = segments
-            .get(local_row)
-            .or_else(|| segments.last())
-            .map(|segment| segment.end_column())
-            .unwrap_or(0);
-        let offset = self.offset_at(target_line, column.min(max_column));
+        let offset = self.offset_at(target_line, column.min(span.end));
         self.selection = if extend {
             Selection::new(self.selection.anchor, offset)
         } else {

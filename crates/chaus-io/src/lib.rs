@@ -218,20 +218,71 @@ fn platform_identity(_metadata: &fs::Metadata) -> Option<FileIdentity> {
 
 /// Why a save may not proceed automatically.
 #[non_exhaustive]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SaveConflict {
     ChangedOnDisk,
     DeletedOnDisk,
 }
 
+impl std::fmt::Display for SaveConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChangedOnDisk => {
+                write!(formatter, "file changed on disk since it was opened")
+            }
+            Self::DeletedOnDisk => {
+                write!(formatter, "file was deleted on disk since it was opened")
+            }
+        }
+    }
+}
+
+/// A baseline check that could neither confirm nor deny a conflict.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum ConflictCheckError {
+    Conflict(SaveConflict),
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+impl std::fmt::Display for ConflictCheckError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict(conflict) => conflict.fmt(formatter),
+            Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for ConflictCheckError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Conflict(_) => None,
+            Self::Io { source, .. } => Some(source),
+        }
+    }
+}
+
 /// Compare the current on-disk target with the baseline captured at load.
-pub fn check_conflict(meta: &FileMeta) -> Result<(), SaveConflict> {
+///
+/// A target that cannot be read is reported as [`ConflictCheckError::Io`],
+/// never as "unchanged": proceeding with the save would overwrite content that
+/// could not be inspected.
+pub fn check_conflict(meta: &FileMeta) -> Result<(), ConflictCheckError> {
     let current = match fs::read(&meta.canonical_target) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(SaveConflict::DeletedOnDisk);
+            return Err(ConflictCheckError::Conflict(SaveConflict::DeletedOnDisk));
         }
-        Err(_) => return Ok(()),
+        Err(source) => {
+            return Err(ConflictCheckError::Io {
+                path: meta.canonical_target.clone(),
+                source,
+            });
+        }
     };
     let current_meta = fs::metadata(&meta.canonical_target).ok();
     let identity_changed = match (
@@ -242,7 +293,7 @@ pub fn check_conflict(meta: &FileMeta) -> Result<(), SaveConflict> {
         _ => false,
     };
     if identity_changed || fingerprint(&current) != meta.fingerprint {
-        return Err(SaveConflict::ChangedOnDisk);
+        return Err(ConflictCheckError::Conflict(SaveConflict::ChangedOnDisk));
     }
     Ok(())
 }
@@ -300,12 +351,7 @@ pub enum SaveError {
 impl std::fmt::Display for SaveError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SaveError::Conflict(SaveConflict::ChangedOnDisk) => {
-                write!(formatter, "file changed on disk since it was opened")
-            }
-            SaveError::Conflict(SaveConflict::DeletedOnDisk) => {
-                write!(formatter, "file was deleted on disk since it was opened")
-            }
+            SaveError::Conflict(conflict) => conflict.fmt(formatter),
             SaveError::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
             SaveError::ReplaceFailed { path, source } => {
                 write!(
@@ -337,8 +383,14 @@ pub fn save(request: SaveRequest<'_>) -> Result<FileMeta, SaveError> {
     let target = canonical_spelling(request.target);
     if let Some(baseline) = request.baseline {
         if baseline.canonical_target == target {
-            if let Err(conflict) = check_conflict(baseline) {
-                return Err(SaveError::Conflict(conflict));
+            match check_conflict(baseline) {
+                Ok(()) => {}
+                Err(ConflictCheckError::Conflict(conflict)) => {
+                    return Err(SaveError::Conflict(conflict));
+                }
+                Err(ConflictCheckError::Io { path, source }) => {
+                    return Err(SaveError::Io { path, source });
+                }
             }
         }
     }
@@ -358,6 +410,8 @@ pub fn save(request: SaveRequest<'_>) -> Result<FileMeta, SaveError> {
             source,
         })?;
     if let Ok(existing) = fs::metadata(&target) {
+        // Best effort: the replacement itself must still succeed when the
+        // temporary file cannot inherit the old mode bits.
         let _ = fs::set_permissions(temporary.path(), existing.permissions());
     }
 
@@ -436,6 +490,10 @@ mod windows_replace {
         let target_wide = wide(target);
         // ReplaceFileW preserves the target's ACLs and attributes and writes a
         // backup-free replacement. It requires the target to exist.
+        //
+        // SAFETY: both arguments are NUL-terminated UTF-16 buffers that remain
+        // alive for the duration of the call; ReplaceFileW does not retain
+        // them. The remaining arguments are documented to accept null.
         let replaced = unsafe {
             ReplaceFileW(
                 target_wide.as_ptr(),
@@ -454,6 +512,9 @@ mod windows_replace {
             return Err(error);
         }
         // Target did not exist: a normal move-with-replace is correct.
+        //
+        // SAFETY: both arguments are NUL-terminated UTF-16 buffers that remain
+        // alive for the duration of the call; MoveFileExW does not retain them.
         let moved = unsafe {
             MoveFileExW(
                 temporary_wide.as_ptr(),

@@ -1,22 +1,26 @@
 //! Row layout and paint preparation.
 
-use chaus_core::position::CharOffset;
-use chaus_layout::{column_at, segments};
-use gpui::{fill, point, px, size, Bounds, Pixels, SharedString, TextRun, Window};
+use chaus_core::position::{CharOffset, LineIndex};
+use gpui::{fill, point, px, size, Bounds, PaintQuad, Pixels, SharedString, TextRun, Window};
 use silvestris::convert::hsla;
 use silvestris::core::tokens::Theme;
 
 use crate::editor::Editor;
+use crate::geometry::PADDING;
 use crate::paint_row::PaintRow;
-
-const PADDING: f32 = 8.0;
 
 pub(crate) struct PaintFrame {
     pub(crate) line_height: Pixels,
     pub(crate) char_width: Pixels,
     pub(crate) rows: Vec<PaintRow>,
-    pub(crate) selection: Vec<gpui::PaintQuad>,
-    pub(crate) caret: Option<gpui::PaintQuad>,
+    pub(crate) selection: Vec<PaintQuad>,
+    pub(crate) caret: Option<PaintQuad>,
+}
+
+struct PaintMetrics {
+    line_height: Pixels,
+    char_width: Pixels,
+    caret_visible: bool,
 }
 
 impl Editor {
@@ -67,10 +71,10 @@ impl Editor {
         let base_y = bounds.top() + px(PADDING);
 
         for line_index in first_line.0..self.document.len_lines() {
-            let line = chaus_core::position::LineIndex(line_index);
+            let line = LineIndex(line_index);
             let line_start = self.document.line_start(line);
             let line_text = self.document.line_text(line);
-            for segment in segments(&line_text, columns, self.settings.tab_stop) {
+            for segment in chaus_layout::segments(&line_text, columns, self.settings.tab_stop) {
                 let y = base_y + px((row as f32 - self.scroll_row) * f32::from(line_height));
                 row += 1;
                 if y + line_height < bounds.top() {
@@ -79,12 +83,14 @@ impl Editor {
                 if y > bounds.bottom() {
                     return self.finish_frame(
                         bounds,
-                        line_height,
-                        char_width,
+                        PaintMetrics {
+                            line_height,
+                            char_width,
+                            caret_visible,
+                        },
                         rows,
                         selection_quads,
                         theme,
-                        caret_visible,
                     );
                 }
                 let segment_start = CharOffset(line_start.0 + segment.char_start);
@@ -95,7 +101,7 @@ impl Editor {
                 {
                     let start = selection.start.max(segment_start);
                     let end = selection.end.min(segment_end);
-                    let start_column = column_at(
+                    let start_column = chaus_layout::column_at(
                         &line_text,
                         start.0.saturating_sub(line_start.0),
                         self.settings.tab_stop,
@@ -104,7 +110,7 @@ impl Editor {
                     let end_column = if selection.end >= segment_end {
                         segment.end_column()
                     } else {
-                        column_at(
+                        chaus_layout::column_at(
                             &line_text,
                             end.0.saturating_sub(line_start.0),
                             self.settings.tab_stop,
@@ -142,33 +148,33 @@ impl Editor {
         }
         self.finish_frame(
             bounds,
-            line_height,
-            char_width,
+            PaintMetrics {
+                line_height,
+                char_width,
+                caret_visible,
+            },
             rows,
             selection_quads,
             theme,
-            caret_visible,
         )
     }
 
     fn finish_frame(
         &mut self,
         bounds: Bounds<Pixels>,
-        line_height: Pixels,
-        char_width: Pixels,
+        metrics: PaintMetrics,
         rows: Vec<PaintRow>,
-        selection: Vec<gpui::PaintQuad>,
+        selection: Vec<PaintQuad>,
         theme: &Theme,
-        caret_visible: bool,
     ) -> PaintFrame {
-        let caret = if caret_visible && self.selection.is_empty() {
-            self.caret_rect(bounds, line_height, char_width, theme)
+        let caret = if metrics.caret_visible && self.selection.is_empty() {
+            self.caret_rect(bounds, metrics.line_height, metrics.char_width, theme)
         } else {
             None
         };
         PaintFrame {
-            line_height,
-            char_width,
+            line_height: metrics.line_height,
+            char_width: metrics.char_width,
             rows,
             selection,
             caret,
@@ -181,7 +187,7 @@ impl Editor {
         line_height: Pixels,
         char_width: Pixels,
         theme: &Theme,
-    ) -> Option<gpui::PaintQuad> {
+    ) -> Option<PaintQuad> {
         let head = self.selection.head;
         let (line, row) = self.row_of_offset(head);
         let row_top = bounds.top()
@@ -192,7 +198,7 @@ impl Editor {
         }
         let line_start = self.document.line_start(line);
         let line_text = self.document.line_text(line);
-        let absolute_column = column_at(
+        let absolute_column = chaus_layout::column_at(
             &line_text,
             head.0.saturating_sub(line_start.0),
             self.settings.tab_stop,

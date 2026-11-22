@@ -39,11 +39,12 @@ pub(crate) enum Pending {
     },
 }
 
-/// How a repeated change should be replayed.
+/// How `.` should replay the last change: the keys that produced it,
+/// including any count digits, followed by the text a change command inserted.
 #[derive(Clone, Debug)]
-pub(crate) enum LastChange {
-    Keys(Vec<Key>),
-    Insert(String),
+pub(crate) struct LastChange {
+    pub(crate) keys: Vec<Key>,
+    pub(crate) inserted: Option<String>,
 }
 
 pub(crate) enum CommandKind {
@@ -56,21 +57,30 @@ pub struct Engine {
     mode: Mode,
     pub(crate) pending: Option<Pending>,
     pub(crate) count: usize,
-    motion_count: usize,
+    pub(crate) motion_count: usize,
     register: Register,
     mappings: Vec<Mapping>,
     mapping_prefix: Vec<Key>,
-    queue: VecDeque<Key>,
+    queue: VecDeque<QueuedKey>,
     visual_anchor: Option<CharOffset>,
     command: String,
     command_kind: CommandKind,
     last_search: Option<(String, bool)>,
     last_find: Option<char>,
     last_change: Option<LastChange>,
-    insert_buffer: String,
+    insert_start: Option<CharOffset>,
+    insert_keys: Option<Vec<Key>>,
+    insert_always_records: bool,
     changed: bool,
     message: Option<String>,
     replaying: bool,
+}
+
+struct QueuedKey {
+    key: Key,
+    /// Mapping expansions are dispatched directly; only keys that arrived from
+    /// the platform may start another user mapping.
+    resolve_mapping: bool,
 }
 
 impl Default for Engine {
@@ -98,7 +108,9 @@ impl Engine {
             last_search: None,
             last_find: None,
             last_change: None,
-            insert_buffer: String::new(),
+            insert_start: None,
+            insert_keys: None,
+            insert_always_records: false,
             changed: false,
             message: None,
             replaying: false,
@@ -116,13 +128,28 @@ impl Engine {
         self.mode
     }
 
-    /// Return the last informational message, if any.
-    pub fn take_message(&mut self) -> Option<String> {
-        self.message.take()
+    /// Drop a partially typed command, count, mapping prefix, Visual selection
+    /// or Ex input without leaving Insert mode. Used when focus moves to a
+    /// dialog or another window.
+    pub fn cancel_prefix(&mut self) {
+        self.pending = None;
+        self.count = 0;
+        self.motion_count = 0;
+        self.mapping_prefix.clear();
+        self.queue.clear();
+        self.command.clear();
+        self.command_kind = CommandKind::Ex;
+        self.visual_anchor = None;
+        if matches!(
+            self.mode,
+            Mode::VisualChar | Mode::VisualLine | Mode::CommandLine
+        ) {
+            self.mode = Mode::Normal;
+        }
     }
 
-    /// Forget every partial sequence. Used when Vim mode is toggled off or the
-    /// editor loses focus to a dialog.
+    /// Forget every partial sequence and return to Normal. Used when Vim mode
+    /// is toggled off; focus changes use [`Engine::cancel_prefix`] instead.
     pub fn reset(&mut self) {
         self.mode = Mode::Normal;
         self.pending = None;
@@ -133,13 +160,10 @@ impl Engine {
         self.command.clear();
         self.command_kind = CommandKind::Ex;
         self.visual_anchor = None;
-        self.insert_buffer.clear();
+        self.insert_start = None;
+        self.insert_keys = None;
+        self.insert_always_records = false;
         self.replaying = false;
-    }
-
-    /// Text committed while in Insert mode, used by `.` to repeat an insertion.
-    pub fn record_inserted(&mut self, text: &str) {
-        self.insert_buffer.push_str(text);
     }
 
     /// Feed one key. Insert-mode keys other than Escape are unhandled so the
@@ -161,31 +185,43 @@ impl Engine {
         }
 
         self.changed = false;
-        self.queue.push_back(key);
+        self.queue.push_back(QueuedKey {
+            key,
+            resolve_mapping: true,
+        });
         let mut outcome = Outcome::Handled;
-        while let Some(key) = self.queue.pop_front() {
-            let step = if self.mode == Mode::Normal
+        while let Some(queued) = self.queue.pop_front() {
+            let step = if queued.resolve_mapping
+                && self.mode == Mode::Normal
                 && self.pending.is_none()
                 && self.count == 0
                 && self.motion_count == 0
                 && !self.mappings.is_empty()
             {
-                self.resolve_mapping(key)
+                self.resolve_mapping(queued.key)
             } else {
-                MappingStep::Direct(key)
+                MappingStep::Direct(queued.key)
             };
             match step {
                 MappingStep::Wait => {}
                 MappingStep::Keys(keys) => {
+                    // A mapping target is executed as typed keys, not fed
+                    // back through the mapping table (non-recursive mapping).
                     for key in keys.into_iter().rev() {
-                        self.queue.push_front(key);
+                        self.queue.push_front(QueuedKey {
+                            key,
+                            resolve_mapping: false,
+                        });
                     }
                 }
                 MappingStep::Fallback(keys) => {
                     let mut keys = keys;
                     let first = keys.remove(0);
                     for key in keys.into_iter().rev() {
-                        self.queue.push_front(key);
+                        self.queue.push_front(QueuedKey {
+                            key,
+                            resolve_mapping: true,
+                        });
                     }
                     let result = self.dispatch_direct(first, document, selection);
                     outcome = merge_outcome(outcome, result);
@@ -326,9 +362,22 @@ impl Engine {
         self.last_find = character;
     }
 
-    pub(crate) fn set_last_change(&mut self, change: Option<LastChange>) {
+    /// Prefix `keys` with digits for the active count so that replaying them
+    /// repeats the same command without needing the count state.
+    pub(crate) fn counted_keys(&self, keys: Vec<Key>) -> Vec<Key> {
+        let count = self.count();
+        if count <= 1 {
+            return keys;
+        }
+        let mut counted: Vec<Key> = count.to_string().chars().map(Key::Char).collect();
+        counted.extend(keys);
+        counted
+    }
+
+    /// Remember a completed change for `.`. Replaying never overwrites it.
+    pub(crate) fn record_change(&mut self, keys: Vec<Key>, inserted: Option<String>) {
         if !self.replaying {
-            self.last_change = change;
+            self.last_change = Some(LastChange { keys, inserted });
         }
     }
 
@@ -348,8 +397,20 @@ impl Engine {
         self.replaying = false;
     }
 
-    pub(crate) fn insert_buffer(&mut self) -> &mut String {
-        &mut self.insert_buffer
+    /// Start an Insert-mode session. `keys` are the Normal-mode keys that
+    /// entered the mode, and `always_record` keeps an empty change (for
+    /// operators and `o`/`O`) available to `.`.
+    pub(crate) fn begin_insert(&mut self, start: CharOffset, keys: Vec<Key>, always_record: bool) {
+        self.insert_start = Some(start);
+        self.insert_keys = Some(keys);
+        self.insert_always_records = always_record;
+    }
+
+    pub(crate) fn take_insert_session(&mut self) -> Option<(CharOffset, Vec<Key>, bool)> {
+        let start = self.insert_start.take()?;
+        let keys = self.insert_keys.take().unwrap_or_default();
+        let always_record = std::mem::take(&mut self.insert_always_records);
+        Some((start, keys, always_record))
     }
 }
 

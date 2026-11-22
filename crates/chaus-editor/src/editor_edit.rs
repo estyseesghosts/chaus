@@ -1,6 +1,6 @@
 //! Editing operations and the actions that trigger them.
 
-use chaus_core::document::{EditCause, EditTransaction, TextEdit};
+use chaus_core::document::{EditCause, EditTransaction, LineRange, TextEdit};
 use chaus_core::position::{CharOffset, CharRange, Selection};
 use gpui::{ClipboardItem, Context, Window};
 
@@ -11,7 +11,12 @@ use crate::editor_keys::{
 };
 
 impl Editor {
-    pub(crate) fn after_change(&mut self, affected: chaus_core::document::LineRange) {
+    /// Invalidate layout after a document change. Any change invalidates a
+    /// pending "close again to discard" confirmation and a conflict-overwrite
+    /// decision, because the next save now contains different content.
+    pub(crate) fn after_change(&mut self, affected: LineRange) {
+        self.close_confirmed = false;
+        self.force_next_save = false;
         self.refresh_rows(affected);
         self.marked = None;
         self.scroll_to_caret();
@@ -34,7 +39,6 @@ impl Editor {
         if let Ok(result) = self.document.apply(transaction) {
             self.selection = after.clamp(self.document.len_chars());
             self.after_change(result.affected_lines);
-            self.close_confirmed = false;
             cx.notify();
         }
     }
@@ -210,6 +214,8 @@ impl Editor {
             self.scroll_to_caret();
             self.preferred_column = None;
             self.marked = None;
+            self.close_confirmed = false;
+            self.force_next_save = false;
             cx.notify();
         }
     }
@@ -221,6 +227,8 @@ impl Editor {
             self.scroll_to_caret();
             self.preferred_column = None;
             self.marked = None;
+            self.close_confirmed = false;
+            self.force_next_save = false;
             cx.notify();
         }
     }
@@ -240,18 +248,24 @@ impl Editor {
         cx.notify();
     }
 
-    pub(crate) fn escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
-        if self.handle_vim_escape(cx) {
-            self.marked = None;
-            self.preedit_active = false;
-            self.preedit_start = None;
+    pub(crate) fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        let had_composition = self.marked.is_some() || self.preedit_active;
+        let handled = self.handle_vim_escape(window, cx);
+        self.clear_composition_state();
+        if had_composition {
+            window.notify_text_input_changed(&self.focus);
+        }
+        if handled {
             return;
         }
+        self.selection = Selection::caret(self.selection.head);
+        cx.notify();
+    }
+
+    fn clear_composition_state(&mut self) {
         self.marked = None;
         self.preedit_active = false;
         self.preedit_start = None;
-        self.selection = Selection::caret(self.selection.head);
-        cx.notify();
     }
 }
 

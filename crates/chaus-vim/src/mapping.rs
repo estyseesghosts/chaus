@@ -63,28 +63,28 @@ fn tokenize(source: &str, mapleader: char) -> Result<Vec<Key>, String> {
     let mut keys = Vec::new();
     let mut characters = source.chars().peekable();
     while let Some(character) = characters.next() {
-        if character != '<' {
-            keys.push(Key::Char(character));
-            continue;
-        }
-        let mut token = String::new();
-        let mut closed = false;
-        for character in characters.by_ref() {
-            if character == '>' {
-                closed = true;
-                break;
+        if character == '<' {
+            let mut token = String::new();
+            let mut closed = false;
+            for character in characters.by_ref() {
+                if character == '>' {
+                    closed = true;
+                    break;
+                }
+                token.push(character);
             }
-            token.push(character);
-        }
-        if !closed {
-            return Err("unterminated <...> token".to_string());
-        }
-        if token.eq_ignore_ascii_case("leader") {
-            keys.push(Key::Char(mapleader));
-        } else if let Some(key) = Key::parse_token(&token) {
-            keys.push(key);
+            if !closed {
+                return Err("unterminated <...> token".to_string());
+            }
+            if token.eq_ignore_ascii_case("leader") {
+                keys.push(Key::Char(mapleader));
+            } else if let Some(key) = Key::parse_token(&token) {
+                keys.push(key);
+            } else {
+                return Err(format!("unsupported key token <{token}>"));
+            }
         } else {
-            return Err(format!("unsupported key token <{token}>"));
+            keys.push(Key::Char(character));
         }
         if keys.len() > MAX_KEYS {
             return Err(format!("mapping is longer than {MAX_KEYS} keys"));

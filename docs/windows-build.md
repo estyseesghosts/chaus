@@ -2,7 +2,7 @@
 
 ## Shipping target and architecture
 
-Deliver **one `scratchpad.exe`**, runnable by double click or directly through PowerShell/CMD/Windows Terminal. A bare invocation creates a new document window; path arguments open files in separate windows; `--help`/`--version` print to terminal without opening GPUI. No required `.dll`, grammar file, font directory, config file, shell script or installer next to `.exe`. Application resources must be embedded. A Windows executable still uses standard Windows system DLLs and installed graphics drivers. Optional external formatters remain optional.
+Deliver **one `chaus.exe`**, runnable by double click or directly through PowerShell/CMD/Windows Terminal. A bare invocation creates a new document window; path arguments open files in separate windows; `--help`/`--version` print to terminal without opening GPUI. No required `.dll`, grammar file, font directory, config file, shell script or installer next to `.exe`. Application resources must be embedded. A Windows executable still uses standard Windows system DLLs and installed graphics drivers. Optional external formatters remain optional.
 
 The currently inspected [Silvestris README](https://github.com/estyseesghosts/silvestris/blob/source-list-shell/README.md) says its Windows workspace uses the **GNU Rust host/toolchain**. Prefer the **same ABI and toolchain** for initial integration to avoid diverging dependencies, then separately evaluate MSVC release builds if desired. Windows GNU and MSVC are **not interchangeable build/link configurations**; use a single target per CI job and test the binary on a clean machine. Modern Rust recommends MSVC for general Windows integration, but that is not evidence the pinned Silvestris GNU build is broken.
 
@@ -17,11 +17,11 @@ rustup show
 cargo fmt --all -- --check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo build --release -p scratchpad-app --bin scratchpad --locked
-.\target\release\scratchpad.exe --help
-.\target\release\scratchpad.exe --version
-.\target\release\scratchpad.exe
-.\target\release\scratchpad.exe '.\tests\fixtures\notes with spaces.txt'
+cargo build --release -p chaus-app --bin chaus --locked
+.\target\release\chaus.exe --help
+.\target\release\chaus.exe --version
+.\target\release\chaus.exe
+.\target\release\chaus.exe '.\tests\fixtures\notes with spaces.txt'
 ```
 
 If cross-compiling with a named target, adjust the release path under `target/<triple>/release/` and confirm compatible compiler/linker. Pin target triple per release CI; don't assume the host default target is stable.
@@ -40,7 +40,7 @@ If cross-compiling with a named target, adjust the release path under `target/<t
 
 ## Clean-machine packaging audit
 
-1. Build release in CI, copy **only** `scratchpad.exe` to a fresh Windows 11 x64 VM without Rust/MinGW/dev checkout; run both double-click and from a terminal.
+1. Build release in CI, copy **only** `chaus.exe` to a fresh Windows 11 x64 VM without Rust/MinGW/dev checkout; run both double-click and from a terminal.
 2. Inspect imported DLLs with `dumpbin /DEPENDENTS` for MSVC or a PE dependency inspection tool for GNU. Verify all non-Windows DLL imports are resolved on clean supported Windows. If a GNU build pulls in MinGW runtime DLLs, link them appropriately or choose an ABI/build that actually yields the one-file artifact; **do not ship DLLs beside it** while calling it self-contained.
 3. Check that all four themes and highlighting work offline; no hidden file/resource lookups, popups for missing DLL, or auto-install steps.
 4. Test CLI `--help`, `--version`, multiple file arguments, relative paths from an arbitrary working directory, paths with spaces and Unicode characters, unknown flags and binary/invalid file inputs.

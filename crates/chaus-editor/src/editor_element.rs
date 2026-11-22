@@ -2,14 +2,14 @@
 //! input handler.
 
 use gpui::{
-    point, px, size, App, Bounds, Element, ElementId, ElementInputHandler, Entity, GlobalElementId,
-    LayoutId, Pixels, Style, TextAlign, Window,
+    point, px, size, App, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity,
+    GlobalElementId, InspectorElementId, LayoutId, Pixels, Position, Style, TextAlign, Window,
 };
 use silvestris::ActiveTheme;
 
 use crate::editor::Editor;
 use crate::editor_paint::PaintFrame;
-use crate::geometry::Geometry;
+use crate::geometry::{Geometry, PADDING};
 
 pub(crate) struct EditorElement {
     pub(crate) editor: Entity<Editor>,
@@ -34,12 +34,12 @@ impl Element for EditorElement {
     fn request_layout(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
+        _: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
         let mut style = Style {
-            position: gpui::Position::Absolute,
+            position: Position::Absolute,
             ..Default::default()
         };
         style.inset.top = px(0.).into();
@@ -52,7 +52,7 @@ impl Element for EditorElement {
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
+        _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
         window: &mut Window,
@@ -68,7 +68,7 @@ impl Element for EditorElement {
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
+        _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
         prepaint: &mut EditorPrepaint,
@@ -82,13 +82,13 @@ impl Element for EditorElement {
             cx,
         );
         let clip = Bounds::new(
-            bounds.origin + point(px(8.), px(8.)),
+            bounds.origin + point(px(PADDING), px(PADDING)),
             size(
-                (bounds.size.width - px(16.)).max(px(0.)),
-                (bounds.size.height - px(16.)).max(px(0.)),
+                (bounds.size.width - px(2.0 * PADDING)).max(px(0.)),
+                (bounds.size.height - px(2.0 * PADDING)).max(px(0.)),
             ),
         );
-        window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
+        window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
             for quad in &prepaint.frame.selection {
                 window.paint_quad(quad.clone());
             }

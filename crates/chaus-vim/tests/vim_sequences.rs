@@ -1,6 +1,6 @@
 //! Table-driven modal sequences against an in-memory document.
 
-use chaus_core::document::Document;
+use chaus_core::document::{Document, EditCause, EditTransaction, TextEdit};
 use chaus_core::position::{CharOffset, Selection};
 use chaus_vim::{Engine, Key, Mode, Outcome};
 
@@ -97,10 +97,18 @@ fn escape_returns_to_normal_and_moves_off_the_insertion_point() {
     let mut selection = Selection::caret(CharOffset(2));
     let mut engine = new_engine();
     let _ = engine.handle_key(Key::Char('i'), &mut document, &mut selection);
-    engine.record_inserted("xy");
+    document
+        .apply(EditTransaction::new(
+            EditCause::ImeCommit,
+            TextEdit::insertion(selection.head, "xy"),
+            selection,
+            Selection::caret(CharOffset(4)),
+        ))
+        .expect("insert");
+    selection = Selection::caret(CharOffset(4));
     let _ = engine.handle_key(Key::Escape, &mut document, &mut selection);
     assert_eq!(engine.mode(), Mode::Normal);
-    assert_eq!(selection.head, CharOffset(1));
+    assert_eq!(selection.head, CharOffset(3));
 }
 
 #[test]

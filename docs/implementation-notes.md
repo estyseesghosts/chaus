@@ -58,9 +58,28 @@ app-owned. Bundled fonts come from Silvestris; do not add a second copy.
 - No native menu bar or preferences window yet. Theme and Vim defaults come from
   `_chausrc`; theme switching at runtime is not exposed in the UI.
 - Find and replace have no in-window UI. Vim `/` and `?` search exist.
+- `:e {path}` is not wired yet; `:w`, `:q`, `:wq` and `:q!` work. Opening a
+  file from the command line or `Ctrl+O` remains the supported path.
+- An ambiguous mapping prefix waits for the next key. The documented mapping
+  timeout is not implemented; losing focus cancels the prefix instead.
+- `cw`/`ciw` delete in one history entry and the text typed into Insert mode in
+  following entries, so one undo does not remove the whole change.
+- A count before `.` is discarded; the recorded command keeps its original
+  count, so `2.` does not repeat the change twice. Counts before Insert
+  commands (`3i…`) are also not repeated.
 - Tree-sitter highlighting and external formatters are not linked.
-- Save conflict handling reports a message and lets the next Save overwrite; the
-  full Reload / Save As / Overwrite / Cancel sheet is not implemented.
+- Native open/save dialogs are implemented on Windows only. Elsewhere the
+  command reports that no picker is available; pass paths on the command line.
+- `selection_bounds_for_range` is not implemented, so native accessibility can
+  read text but cannot query the pixel bounds of a selection.
+- Save is still synchronous on the UI thread and serializes the whole document
+  into one allocation before writing. A large save can briefly stall the window.
+- Save conflict handling reports a message and lets the next Save (including
+  `:w`/`:wq`) overwrite; the full Reload / Save As / Overwrite / Cancel sheet is
+  not implemented.
+- POSIX save uses `rename` over the target, which does not preserve additional
+  hard links; Windows uses `ReplaceFileW` and keeps the target's ACLs and
+  attributes.
 - Closing a dirty window uses a two-step stopgap (warn, then discard) instead of a
   Save / Discard / Cancel sheet.
 - No crash-recovery snapshots and no external file watcher.

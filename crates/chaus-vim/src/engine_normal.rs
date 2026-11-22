@@ -44,8 +44,10 @@ impl Engine {
         document: &mut Document,
         selection: &mut Selection,
     ) -> Outcome {
+        // A leading `0` is the line-start motion, not a count digit. It is a
+        // digit only after another count digit has already been entered.
         if character.is_ascii_digit()
-            && (character != '0' || self.count > 0 || self.pending.is_some())
+            && (character != '0' || self.count > 0 || self.motion_count > 0)
         {
             self.push_digits(character as usize - '0' as usize);
             return Outcome::Handled;
@@ -70,7 +72,7 @@ impl Engine {
                 }
                 Outcome::Handled
             }
-            'i' => self.enter_insert(document, selection, selection.head),
+            'i' => self.enter_insert(selection, selection.head, 'i'),
             'a' => {
                 let head = selection.head;
                 let line = document.line_of(head);
@@ -80,17 +82,17 @@ impl Engine {
                 } else {
                     end
                 };
-                self.enter_insert(document, selection, target)
+                self.enter_insert(selection, target, 'a')
             }
             'I' => {
                 let line = document.line_of(selection.head);
                 let target = motion::first_non_space(document, line);
-                self.enter_insert(document, selection, target)
+                self.enter_insert(selection, target, 'I')
             }
             'A' => {
                 let line = document.line_of(selection.head);
                 let target = document.line_content_end(line);
-                self.enter_insert(document, selection, target)
+                self.enter_insert(selection, target, 'A')
             }
             'o' => self.open_line(document, selection, true),
             'O' => self.open_line(document, selection, false),
@@ -170,7 +172,15 @@ impl Engine {
                 if let Some((range, linewise)) =
                     self.motion_range(document, selection.head, character)
                 {
-                    return self.apply_operator(operator, document, selection, range, linewise);
+                    let keys = vec![Key::Char(operator.key()), Key::Char(character)];
+                    return self.apply_operator(
+                        operator,
+                        document,
+                        selection,
+                        range,
+                        linewise,
+                        Some(keys),
+                    );
                 }
                 self.reset_count();
                 self.message("operator needs a motion");
@@ -216,7 +226,14 @@ impl Engine {
                     _ => None,
                 };
                 match range {
-                    Some(range) => self.apply_operator(operator, document, selection, range, false),
+                    Some(range) => {
+                        let keys = vec![
+                            Key::Char(operator.key()),
+                            Key::Char(if outer { 'a' } else { 'i' }),
+                            Key::Char(character),
+                        ];
+                        self.apply_operator(operator, document, selection, range, false, Some(keys))
+                    }
                     None => {
                         self.reset_count();
                         self.message("no matching text object");
@@ -354,7 +371,10 @@ impl Engine {
         }
         let start = caret.min(target);
         let mut end = caret.max(target);
-        if inclusive && end.0 < document.len_chars() {
+        // An inclusive motion includes the character under the caret, but a
+        // motion that stops at the line content end must not swallow the
+        // newline (`dl` is `x`, not a line join).
+        if inclusive && end.0 < document.len_chars() && document.rope().char(end.0) != '\n' {
             end = document.next_grapheme_boundary(end);
         }
         Some((CharRange::new(start, end), false))
@@ -373,9 +393,13 @@ impl Engine {
             let last = (line.0 + count - 1).min(document.len_lines().saturating_sub(1));
             range = CharRange::new(range.start, document.line_content_end(LineIndex(last)));
         }
-        self.apply_operator(operator, document, selection, range, true)
+        let keys = vec![Key::Char(operator.key()), Key::Char(operator.key())];
+        self.apply_operator(operator, document, selection, range, true, Some(keys))
     }
 
+    /// Apply a validated operator range. `keys` is the Normal-mode command
+    /// that produced it, used by `.`; visual selections pass `None` because
+    /// their range cannot be replayed from a new caret.
     fn apply_operator(
         &mut self,
         operator: Operator,
@@ -383,16 +407,33 @@ impl Engine {
         selection: &mut Selection,
         range: CharRange,
         linewise: bool,
+        keys: Option<Vec<Key>>,
     ) -> Outcome {
         if range.is_empty() {
+            if operator == Operator::Change {
+                let keys = keys.map(|keys| self.counted_keys(keys)).unwrap_or_default();
+                self.reset_count();
+                *selection = Selection::caret(range.start);
+                self.begin_insert(range.start, keys, true);
+                self.set_mode(Mode::Insert);
+                return Outcome::Handled;
+            }
             self.reset_count();
             return Outcome::Handled;
         }
         let mut range = range;
         if operator == Operator::Change && linewise {
+            let start_line = document.line_of(range.start);
             let end_line = document.line_of(CharOffset(range.end.0.saturating_sub(1)));
-            range = CharRange::new(range.start, document.line_content_end(end_line));
+            range = CharRange::new(
+                motion::first_non_space(document, start_line),
+                document.line_content_end(end_line),
+            );
         }
+        let keys = match operator {
+            Operator::Yank => None,
+            Operator::Delete | Operator::Change => keys.map(|keys| self.counted_keys(keys)),
+        };
         let before = *selection;
         let applied = operator::apply(
             operator,
@@ -405,19 +446,32 @@ impl Engine {
         self.reset_count();
         match applied {
             Some(applied) => {
-                *selection = Selection::caret(motion::clamp_normal(document, applied.caret));
-                let letter = match operator {
-                    Operator::Delete => 'd',
-                    Operator::Change => 'c',
-                    Operator::Yank => 'y',
+                // Change enters Insert mode, where the caret may legally sit
+                // after the line's last character; only Normal-mode carets are
+                // clamped onto a character.
+                *selection = if applied.enter_insert {
+                    Selection::caret(applied.caret)
+                } else {
+                    Selection::caret(motion::clamp_normal(document, applied.caret))
                 };
-                self.set_last_change(Some(LastChange::Keys(vec![Key::Char(letter)])));
-                self.set_changed();
+                if let Some(keys) = keys {
+                    if applied.enter_insert {
+                        self.begin_insert(applied.caret, keys, true);
+                    } else {
+                        self.record_change(keys, None);
+                    }
+                } else if applied.enter_insert {
+                    self.begin_insert(applied.caret, Vec::new(), false);
+                }
                 if applied.enter_insert {
                     self.set_mode(Mode::Insert);
-                    self.insert_buffer().clear();
                 }
-                Outcome::Changed
+                if operator == Operator::Yank {
+                    Outcome::Handled
+                } else {
+                    self.set_changed();
+                    Outcome::Changed
+                }
             }
             None => {
                 self.message("edit was rejected");
@@ -428,13 +482,13 @@ impl Engine {
 
     fn enter_insert(
         &mut self,
-        _document: &mut Document,
         selection: &mut Selection,
         offset: CharOffset,
+        command: char,
     ) -> Outcome {
         *selection = Selection::caret(offset);
         self.set_mode(Mode::Insert);
-        self.insert_buffer().clear();
+        self.begin_insert(offset, vec![Key::Char(command)], false);
         self.set_visual_anchor(None);
         self.clear_pending();
         Outcome::Handled
@@ -479,7 +533,8 @@ impl Engine {
             Ok(_) => {
                 *selection = Selection::caret(caret);
                 self.set_mode(Mode::Insert);
-                self.insert_buffer().clear();
+                let command = if below { 'o' } else { 'O' };
+                self.begin_insert(caret, vec![Key::Char(command)], true);
                 self.set_changed();
                 Outcome::Changed
             }
@@ -492,15 +547,28 @@ impl Engine {
 
     fn delete_characters(&mut self, document: &mut Document, selection: &mut Selection) -> Outcome {
         let count = self.count();
+        let line = document.line_of(selection.head);
+        let content_end = document.line_content_end(line);
         let mut end = selection.head;
         for _ in 0..count {
-            if end.0 >= document.len_chars() {
+            if end >= content_end {
                 break;
             }
-            end = document.next_grapheme_boundary(end);
+            let next = document.next_grapheme_boundary(end);
+            if next > content_end {
+                break;
+            }
+            end = next;
         }
         let range = CharRange::new(selection.head, end);
-        self.apply_operator(Operator::Delete, document, selection, range, false)
+        self.apply_operator(
+            Operator::Delete,
+            document,
+            selection,
+            range,
+            false,
+            Some(vec![Key::Char('x')]),
+        )
     }
 
     fn replace_characters(
@@ -515,31 +583,39 @@ impl Engine {
             return Outcome::Handled;
         }
         let count = self.count();
+        let line = document.line_of(selection.head);
+        let content_end = document.line_content_end(line);
         let mut end = selection.head;
-        for _ in 0..count {
-            if end.0 >= document.len_chars() {
+        let mut replaced = 0;
+        while replaced < count && end < content_end {
+            let next = document.next_grapheme_boundary(end);
+            if next > content_end {
                 break;
             }
-            end = document.next_grapheme_boundary(end);
+            end = next;
+            replaced += 1;
+        }
+        if replaced < count {
+            self.message("not enough characters on the line for 'r'");
+            self.reset_count();
+            return Outcome::Handled;
         }
         let range = CharRange::new(selection.head, end);
         if range.is_empty() {
             self.reset_count();
             return Outcome::Handled;
         }
-        let text: String = std::iter::repeat_n(character, range.len()).collect();
+        let text: String = std::iter::repeat_n(character, replaced).collect();
         let before = *selection;
         let after = Selection::caret(range.start);
         let transaction =
             EditTransaction::new(EditCause::Vim, TextEdit::new(range, text), before, after);
+        let keys = self.counted_keys(vec![Key::Char('r'), Key::Char(character)]);
         self.reset_count();
         match document.apply(transaction) {
             Ok(_) => {
                 *selection = after;
-                self.set_last_change(Some(LastChange::Keys(vec![
-                    Key::Char('r'),
-                    Key::Char(character),
-                ])));
+                self.record_change(keys, None);
                 self.set_changed();
                 Outcome::Changed
             }
@@ -614,19 +690,19 @@ impl Engine {
             self.message("nothing to repeat");
             return Outcome::Handled;
         };
-        match change {
-            LastChange::Keys(keys) => {
-                self.begin_replay();
-                for key in keys {
-                    let outcome = self.dispatch_direct(key, document, selection);
-                    if matches!(outcome, Outcome::Message(_)) {
-                        break;
-                    }
-                }
-                self.end_replay();
-                Outcome::Handled
+        // A count before `.` would multiply an already-counted command. The
+        // recorded keys carry the original count, so discard the prefix.
+        self.reset_count();
+        let LastChange { keys, inserted } = change;
+        self.begin_replay();
+        for key in keys {
+            let outcome = self.dispatch_direct(key, document, selection);
+            if matches!(outcome, Outcome::Message(_)) {
+                break;
             }
-            LastChange::Insert(text) => {
+        }
+        if self.mode() == Mode::Insert {
+            if let Some(text) = inserted {
                 let before = *selection;
                 let caret = CharOffset(selection.head.0 + text.chars().count());
                 let transaction = EditTransaction::new(
@@ -635,28 +711,41 @@ impl Engine {
                     before,
                     Selection::caret(caret),
                 );
-                match document.apply(transaction) {
-                    Ok(_) => {
-                        *selection = Selection::caret(caret);
-                        self.set_changed();
-                        Outcome::Changed
-                    }
-                    Err(_) => Outcome::Handled,
+                if document.apply(transaction).is_ok() {
+                    *selection = Selection::caret(caret);
+                    self.set_changed();
                 }
             }
+            self.finish_insert(document, selection);
         }
+        self.end_replay();
+        Outcome::Handled
     }
 
     pub(crate) fn finish_insert(&mut self, document: &mut Document, selection: &mut Selection) {
-        let inserted = std::mem::take(self.insert_buffer());
-        if !inserted.is_empty() {
-            self.set_last_change(Some(LastChange::Insert(inserted)));
+        let mut move_back = false;
+        if let Some((start, keys, always_record)) = self.take_insert_session() {
+            let inserted = if selection.head >= start {
+                document.slice(CharRange::new(start, selection.head))
+            } else {
+                String::new()
+            };
+            let has_text = !inserted.is_empty();
+            // `a`/`A` place the Insert caret after an existing character, so
+            // leaving without typing still steps back onto that character.
+            let entered_after = matches!(keys.first(), Some(Key::Char('a' | 'A')));
+            move_back = has_text || entered_after;
+            if !keys.is_empty() && (always_record || has_text) {
+                self.record_change(keys, has_text.then_some(inserted));
+            }
         }
-        let line = document.line_of(selection.head);
-        let start = document.line_start(line);
-        if selection.head > start {
-            let target = document.prev_grapheme_boundary(selection.head);
-            *selection = Selection::caret(motion::clamp_normal(document, target));
+        if move_back {
+            let line = document.line_of(selection.head);
+            let start = document.line_start(line);
+            if selection.head > start {
+                let target = document.prev_grapheme_boundary(selection.head);
+                *selection = Selection::caret(motion::clamp_normal(document, target));
+            }
         }
         self.set_mode(Mode::Normal);
         self.clear_pending();
@@ -670,9 +759,11 @@ impl Engine {
     ) -> Outcome {
         if self.register().is_empty() {
             self.message("register is empty");
+            self.reset_count();
             return Outcome::Handled;
         }
-        let text = self.register().text().to_string();
+        let keys = self.counted_keys(vec![Key::Char(if after { 'p' } else { 'P' })]);
+        let text = self.register().text().repeat(self.count());
         let linewise = self.register().is_linewise();
         let before = *selection;
         let (at, insert, caret) = if linewise {
@@ -714,14 +805,17 @@ impl Engine {
             before,
             Selection::caret(caret),
         );
-        match document.apply(transaction) {
+        let result = match document.apply(transaction) {
             Ok(_) => {
                 *selection = Selection::caret(motion::clamp_normal(document, caret));
+                self.record_change(keys, None);
                 self.set_changed();
                 Outcome::Changed
             }
             Err(_) => Outcome::Handled,
-        }
+        };
+        self.reset_count();
+        result
     }
 
     pub(crate) fn clear_pending(&mut self) {

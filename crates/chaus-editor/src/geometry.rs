@@ -2,7 +2,8 @@
 
 use gpui::{point, px, Bounds, Pixels, Point};
 
-const PADDING: f32 = 8.0;
+/// Inset between the element bounds and the text area, in logical pixels.
+pub(crate) const PADDING: f32 = 8.0;
 
 /// Where the text area is on screen, in logical pixels.
 #[non_exhaustive]

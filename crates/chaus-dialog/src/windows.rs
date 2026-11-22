@@ -25,19 +25,21 @@ pub(crate) fn choose_file(
         let length = units.len().min(buffer.len() - 1);
         buffer[..length].copy_from_slice(&units[..length]);
     }
-    let filter: Vec<u16> =
-        "Text files\0*.txt;*.md;*.rs;*.toml;*.json;*.log;*.*\0All files\0*.*\0\0"
-            .encode_utf16()
-            .collect();
+    let filter: Vec<u16> = "Text files\0*.txt;*.md;*.rs;*.toml;*.json;*.log\0All files\0*.*\0\0"
+        .encode_utf16()
+        .collect();
     let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
     let mut flags = OFN_EXPLORER | OFN_NOCHANGEDIR;
     flags |= match choice {
         Choice::Open => OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST,
         Choice::Save => OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST,
     };
+    // SAFETY: GetActiveWindow has no preconditions and returns a null handle
+    // when no window is active; a null owner is valid for these dialogs.
+    let owner = unsafe { GetActiveWindow() };
     let mut options = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
-        hwndOwner: unsafe { GetActiveWindow() },
+        hwndOwner: owner,
         lpstrFilter: filter.as_ptr(),
         lpstrFile: buffer.as_mut_ptr(),
         nMaxFile: buffer.len() as u32,

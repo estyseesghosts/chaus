@@ -5,8 +5,9 @@
 //! Normal mode is active, and it prevents Normal-mode letters from leaking into
 //! the platform text-input service.
 
-use chaus_vim::{Key as VimKey, Outcome};
-use gpui::{Context, KeyDownEvent, Window};
+use chaus_core::position::Selection;
+use chaus_vim::{Key as VimKey, Mode, Outcome};
+use gpui::{Context, KeyDownEvent, Keystroke, Window};
 
 use crate::editor::Editor;
 
@@ -32,9 +33,23 @@ impl Editor {
             && !modifiers.alt
             && !modifiers.platform
             && keystroke.key.eq_ignore_ascii_case("r");
+        let clipboard_shortcut = (modifiers.control || modifiers.platform)
+            && !modifiers.shift
+            && !modifiers.alt
+            && matches!(keystroke.key.as_str(), "c" | "x" | "v");
+        if clipboard_shortcut {
+            // Copy/cut/paste must still see the Visual selection, so cancel a
+            // pending Vim prefix without collapsing it.
+            self.vim_engine.cancel_prefix();
+            cx.notify();
+            return false;
+        }
         if (modifiers.control || modifiers.alt || modifiers.platform || modifiers.function)
             && !control_redo
         {
+            // An application shortcut abandons a partial Vim command rather
+            // than leaving it armed for the next keystroke after the action.
+            self.cancel_vim_prefix(cx);
             return false;
         }
         let Some(key) = translate(keystroke, control_redo) else {
@@ -43,45 +58,35 @@ impl Editor {
         let outcome = self
             .vim_engine
             .handle_key(key, &mut self.document, &mut self.selection);
-        match outcome {
-            Outcome::Unhandled => false,
-            Outcome::Changed => {
-                self.rebuild_rows();
-                self.scroll_to_caret();
-                self.close_confirmed = false;
-                cx.notify();
-                true
-            }
-            Outcome::Handled => {
-                self.scroll_to_caret();
-                cx.notify();
-                true
-            }
-            Outcome::Message(message) => {
-                self.set_status(message);
-                cx.notify();
-                true
-            }
-            Outcome::Command(command) => {
-                self.run_ex_command(&command, window, cx);
-                true
-            }
-            _ => false,
-        }
+        let consumed = !matches!(outcome, Outcome::Unhandled);
+        self.apply_vim_outcome(outcome, window, cx);
+        consumed
     }
 
     /// Cancel a pending modal sequence from the Escape action.
-    pub(crate) fn handle_vim_escape(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn handle_vim_escape(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.vim {
             return false;
         }
         let outcome =
             self.vim_engine
                 .handle_key(VimKey::Escape, &mut self.document, &mut self.selection);
+        self.apply_vim_outcome(outcome, window, cx);
+        true
+    }
+
+    fn apply_vim_outcome(&mut self, outcome: Outcome, window: &mut Window, cx: &mut Context<Self>) {
         match outcome {
+            Outcome::Unhandled => {}
             Outcome::Changed => {
                 self.rebuild_rows();
                 self.scroll_to_caret();
+                self.close_confirmed = false;
+                self.force_next_save = false;
                 cx.notify();
             }
             Outcome::Handled => {
@@ -92,9 +97,23 @@ impl Editor {
                 self.set_status(message);
                 cx.notify();
             }
+            Outcome::Command(command) => self.run_ex_command(&command, window, cx),
+            // `Outcome` is `#[non_exhaustive]`; future variants are treated as
+            // informational until routed explicitly.
             _ => {}
         }
-        true
+    }
+
+    /// Drop a partially typed Vim command when focus leaves the editor.
+    pub fn cancel_vim_prefix(&mut self, cx: &mut Context<Self>) {
+        if self.vim {
+            let was_visual = matches!(self.vim_engine.mode(), Mode::VisualChar | Mode::VisualLine);
+            self.vim_engine.cancel_prefix();
+            if was_visual {
+                self.selection = Selection::caret(self.selection.head);
+            }
+            cx.notify();
+        }
     }
 
     /// Corner indicator text for the current modal state.
@@ -114,28 +133,23 @@ impl Editor {
         };
         match name {
             "w" => {
-                self.save_inner(false, cx);
+                self.save_inner(cx);
             }
             "q" => {
                 if self.confirm_close() {
                     window.remove_window();
                 } else {
-                    let message = self
-                        .status
-                        .clone()
-                        .unwrap_or_else(|| "Unsaved changes: close again to discard".to_string());
-                    self.set_status(message);
                     cx.notify();
                 }
             }
             "q!" => window.remove_window(),
             "wq" => {
-                if self.save_inner(false, cx) {
+                if self.save_inner(cx) {
                     window.remove_window();
                 }
             }
             "e" => {
-                self.set_status(":e needs a native open dialog (not wired up yet)");
+                self.set_status(":e {path} is not implemented yet; use Ctrl+O to open a file");
                 cx.notify();
             }
             "set" => {
@@ -150,7 +164,7 @@ impl Editor {
     }
 }
 
-fn translate(keystroke: &gpui::Keystroke, control_redo: bool) -> Option<VimKey> {
+fn translate(keystroke: &Keystroke, control_redo: bool) -> Option<VimKey> {
     if control_redo {
         return Some(VimKey::Control('r'));
     }

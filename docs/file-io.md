@@ -2,7 +2,7 @@
 
 ## External contract
 
-`[scratchpad] [--new] [--help] [--version] [--] [path ...]` starts **a native graphical application from a terminal**. No file → one empty window. One path → one file window. Several paths → one window per path, **not tabs**. Do not hide the CLI in a separate helper executable. The one binary must also handle `--help`/`--version` without initializing GPUI, fonts or GPU. An invalid flag returns nonzero and prints useful stderr. Use `std::env::args_os` + an `OsString`-aware parser; accept absolute/relative paths and spaces. Consider whether directory arguments produce errors (recommended) rather than treating them as projects.
+`[chaus] [--new] [--help] [--version] [--] [path ...]` starts **a native graphical application from a terminal**. No file → one empty window. One path → one file window. Several paths → one window per path, **not tabs**. Do not hide the CLI in a separate helper executable. The one binary must also handle `--help`/`--version` without initializing GPUI, fonts or GPU. An invalid flag returns nonzero and prints useful stderr. Use `std::env::args_os` + an `OsString`-aware parser; accept absolute/relative paths and spaces. Consider whether directory arguments produce errors (recommended) rather than treating them as projects.
 
 Opening a missing path should show a clear error (or explicitly offer a new file at that path, without auto-creating it). On launching with multiple files, one failed open must not discard successfully opened files; report error and choose a documented overall exit behavior if the process remains running. Windows file association / Linux `.desktop` integration is **optional** and must call this same executable.
 
@@ -47,11 +47,11 @@ On window focus and before Save, stat/hash the file. Optionally add `notify` wat
 
 ## Crash recovery (after core save reliability)
 
-Use OS state directories (Linux `$XDG_STATE_HOME/scratchpad/` or `~/.local/state/scratchpad/`; Windows `%LOCALAPPDATA%\Scratchpad\Recovery\`), **not** original file sidecars by default. Debounce a write of dirty-document snapshots with metadata (original path, save baseline, document revision, timestamp, encoding/EOL); use an app-controlled storage limit and deletion policy. On launch, offer Recover / Discard per unsaved snapshot. Recovery never silently overwrites original documents. Prefer write-ahead or versioned recovery records so a crash during recovery write leaves previous snapshot intact. Do not market recovery as guaranteeing no data loss until power-failure tests pass.
+Use OS state directories (Linux `$XDG_STATE_HOME/chaus/` or `~/.local/state/chaus/`; Windows `%LOCALAPPDATA%\Chaus\Recovery\`), **not** original file sidecars by default. Debounce a write of dirty-document snapshots with metadata (original path, save baseline, document revision, timestamp, encoding/EOL); use an app-controlled storage limit and deletion policy. On launch, offer Recover / Discard per unsaved snapshot. Recovery never silently overwrites original documents. Prefer write-ahead or versioned recovery records so a crash during recovery write leaves previous snapshot intact. Do not market recovery as guaranteeing no data loss until power-failure tests pass.
 
 ## Dialog and CLI test matrix
 
-- `scratchpad`, `scratchpad --help`, `scratchpad "a b.txt"`, `scratchpad -- --leading-dash.txt`, multiple paths, missing path, folder path, invalid UTF-8 OsString path on Linux.
+- `chaus`, `chaus --help`, `chaus "a b.txt"`, `chaus -- --leading-dash.txt`, multiple paths, missing path, folder path, invalid UTF-8 OsString path on Linux.
 - Round-trip UTF-8+BOM, LF, CRLF, mixed LF/CRLF, final newline, no final newline, empty file, long line, Unicode graphemes. For a no-op open/save, output bytes should match input for supported encodings/EOL.
 - Edit first/middle/last line of mixed-EOL file and undo: unaffected line separators unchanged. Inserting/deleting line breaks updates EolMap count and undo perfectly.
 - Read-only file; lost permissions; file locked by another Windows process; target replaced externally with same mtime/length but different hash; symlink target; hard links; disk full; failed temp commit.

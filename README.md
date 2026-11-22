@@ -1,6 +1,6 @@
-# Scratchpad — native plaintext editor implementation packet
+# Chaus — native plaintext editor implementation packet
 
-> **Working name:** `scratchpad`, used for package names, executable examples, and config paths until the project receives a real name. Rename consistently before the first release. This packet is an engineering specification, not an implemented application.
+> **Working name:** the product name is not final; the implemented binary, Rust packages and config files use `chaus`. Rename consistently before the first release. The specification below describes the target application; the implemented increment and its known gaps are recorded in `docs/implementation-notes.md`.
 
 ## Product contract
 
@@ -11,11 +11,11 @@ Two ways of editing the *same document*: conventional point-and-click/keyboard e
 One **self-contained application executable** (no colocated assets, grammar DLLs, scripts, or runtime installer). The executable must launch a GUI window from a terminal:
 
 ```sh
-scratchpad                       # new untitled window
-scratchpad path/to/file.txt      # open a file
-scratchpad --new                 # new untitled window
-scratchpad --help                # print usage in terminal without launching GUI
-scratchpad --version             # print version
+chaus                       # new untitled window
+chaus path/to/file.txt      # open a file
+chaus --new                 # new untitled window
+chaus --help                # print usage in terminal without launching GUI
+chaus --version             # print version
 ```
 
 Open multiple positional paths as **multiple windows**. Resolve relative paths against the invoking process's current directory. Preserve proper exit statuses on invalid flags and file-open failures. `--` terminates option parsing. Support paths with spaces and non-UTF-8 OS path representations using `OsString`/`PathBuf`, not `String`. An optional `-` (stdin) mode may be added later; do not silently block on terminal stdin in v0.1.
@@ -28,35 +28,33 @@ Open multiple positional paths as **multiple windows**. Resolve relative paths a
 - Plain-text mouse editing, drag/double/triple-click selection, keyboard navigation, scroll, soft wrap, copy/cut/paste, undo/redo, find and replace, Unicode graphemes, IME composition, native text services and accessibility appropriate to the pinned GPUI APIs.
 - Reasonably large files without full-buffer redraw/reparse. No specific performance promise before measurement; test 1–10 MiB and 100k+ lines, including long lines.
 - Ropey text model, visible-line GPUI painting, Tree-sitter highlighting for a small embedded grammar set, optional external code formatters and built-in indent/dedent/trim whitespace.
-- Silvestris-managed chrome/menus/appearance/preferences UI; application-owned settings storage and a limited **vimrc-style** parser in `~/.scratchpadrc` (on Windows, `%USERPROFILE%\_scratchpadrc` by default). GUI and file drive one validated settings model. Never execute arbitrary Vimscript.
+- Silvestris-managed chrome/menus/appearance/preferences UI; application-owned settings storage and a limited **vimrc-style** parser in `~/.chausrc` (on Windows, `%USERPROFILE%\_chausrc` by default). GUI and file drive one validated settings model. Never execute arbitrary Vimscript.
 - Limited Vim Normal/Insert/Visual/Command grammar with repeat counts, basic operators/motions/text objects, search, undo/redo and configurable normal-mode mappings. Not a Vim clone.
 
 ## Scope boundary: NOT an IDE
 
 **Do not add** tabs, split panes, project/workspace state, command palette as a dependency, Git, LSP, completion, debugger, integrated terminal, extension/plugin system, runtime scripting, Vimscript VM, advanced Ex semantics, collaboration, rich text, Markdown preview, GPUI Kit or the Zed editor subsystem. The UI should not visibly change character when syntax highlighting is enabled.
 
-## Source layout (proposed)
+## Source layout
 
 ```text
-scratchpad/
+chaus/
   Cargo.toml                 # workspace, shared GPUI pin with Silvestris
   Cargo.lock                 # commit for reproducible release builds
   rust-toolchain.toml        # match Silvestris toolchain initially
   crates/
-    scratchpad-core/         # Ropey, commands, selections, undo, Vim, config parser
-      src/{document,edit,position,history,selection,vim,settings}.rs
-    scratchpad-language/     # Tree-sitter grammars/queries, highlight spans, formatters
-      src/{registry,parser,highlights,format}.rs
-    scratchpad-io/           # file metadata, read/write, external changes/recovery
-      src/{open,save,watch,recovery}.rs
-    scratchpad-app/          # binary, GPUI view, OS menus/dialogs, windows
-      src/{main,app,editor_view,input,paint,commands,preferences}.rs
-  tests/fixtures/            # Unicode, line endings, syntax, bad encodings
-  packaging/{windows,linux}/
-  docs/                     # these implementation guides
+    chaus-core/              # Ropey document, positions, EOL map, undo history, settings parser
+    chaus-layout/            # soft-wrap segments and column mapping, no GPUI dependency
+    chaus-io/                # file metadata, checked load/save, external-change detection
+    chaus-cli/               # argument parsing and invocation model
+    chaus-vim/               # modal state machine, motions, operators, mappings
+    chaus-dialog/            # native open/save pickers and availability reporting
+    chaus-editor/            # GPUI view, input handling, painting, Vim integration
+    chaus-app/               # binary, window lifecycle, platform setup
+  docs/                      # implementation guides and recorded gaps
 ```
 
-Do not create these files mechanically up front if the APIs suggest a simpler layout. The separation of responsibilities is the requirement, not the filename spelling. A crate must not import the application GUI from a lower layer.
+The separation of responsibilities is the requirement, not the filename spelling; a crate must not import the application GUI from a lower layer.
 
 ## Milestones and gates
 

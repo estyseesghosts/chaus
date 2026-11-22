@@ -1,5 +1,6 @@
 //! Per-window file session: save, save-as, dirty close policy.
 
+use chaus_io::FileMeta;
 use gpui::{Context, Window};
 
 use crate::editor::Editor;
@@ -9,8 +10,7 @@ use crate::editor_keys::{Save, SaveAs};
 #[non_exhaustive]
 #[derive(Debug)]
 pub struct FileState {
-    pub meta: chaus_io::FileMeta,
-    pub had_utf8_bom: bool,
+    pub meta: FileMeta,
 }
 
 impl Editor {
@@ -19,10 +19,18 @@ impl Editor {
             self.save_as(&SaveAs, window, cx);
             return;
         }
-        self.save_inner(false, cx);
+        self.save_inner(cx);
     }
 
     pub(crate) fn save_as(&mut self, _: &SaveAs, _: &mut Window, cx: &mut Context<Self>) {
+        if !chaus_dialog::is_available() {
+            self.set_status("Save As needs a native file picker, which is not available yet");
+            cx.notify();
+            return;
+        }
+        // Choosing a new target abandons a pending conflict overwrite; a
+        // cancelled picker must not leave the old force armed either.
+        self.force_next_save = false;
         let suggested = self
             .file
             .as_ref()
@@ -34,7 +42,10 @@ impl Editor {
             cx.notify();
             return;
         };
-        let had_utf8_bom = self.file.as_ref().is_some_and(|file| file.had_utf8_bom);
+        let had_utf8_bom = self
+            .file
+            .as_ref()
+            .is_some_and(|file| file.meta.had_utf8_bom);
         let text = self.document.text_with_eol();
         let bytes = chaus_io::encode_for_save(&text, had_utf8_bom);
         let result = chaus_io::save(chaus_io::SaveRequest::new(
@@ -47,7 +58,7 @@ impl Editor {
         ));
         match result {
             Ok(meta) => {
-                self.file = Some(FileState { meta, had_utf8_bom });
+                self.file = Some(FileState { meta });
                 self.document.mark_saved();
                 self.close_confirmed = false;
                 self.set_status("Saved");
@@ -57,22 +68,25 @@ impl Editor {
         cx.notify();
     }
 
-    pub(crate) fn save_inner(&mut self, force: bool, cx: &mut Context<Self>) -> bool {
+    /// Save the document, or overwrite a known external change on the second
+    /// attempt. Returns `true` only when the file was written.
+    pub(crate) fn save_inner(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(file) = self.file.as_ref() else {
             self.set_status("Untitled document: use Save As");
             cx.notify();
             return false;
         };
         let text = self.document.text_with_eol();
-        let bytes = chaus_io::encode_for_save(&text, file.had_utf8_bom);
+        let bytes = chaus_io::encode_for_save(&text, file.meta.had_utf8_bom);
         let target = file.meta.canonical_target.clone();
         let requested = file.meta.user_requested_path.clone();
+        let force = std::mem::take(&mut self.force_next_save);
         let baseline = (!force).then(|| file.meta.clone());
         let result = chaus_io::save(chaus_io::SaveRequest::new(
             &target,
             &requested,
             &bytes,
-            file.had_utf8_bom,
+            file.meta.had_utf8_bom,
             self.document.preferred_eol(),
             baseline.as_ref(),
         ));
@@ -81,6 +95,7 @@ impl Editor {
                 if let Some(file) = self.file.as_mut() {
                     file.meta = meta;
                 }
+                self.force_next_save = false;
                 self.document.mark_saved();
                 self.close_confirmed = false;
                 self.set_status("Saved");
@@ -88,16 +103,8 @@ impl Editor {
                 true
             }
             Err(chaus_io::SaveError::Conflict(conflict)) => {
-                let message = match conflict {
-                    chaus_io::SaveConflict::ChangedOnDisk => {
-                        "File changed on disk. Save again to overwrite."
-                    }
-                    chaus_io::SaveConflict::DeletedOnDisk => {
-                        "File was deleted on disk. Save again to recreate it."
-                    }
-                    _ => "File changed on disk. Save again to overwrite.",
-                };
-                self.set_status(message);
+                self.force_next_save = true;
+                self.set_status(format!("{conflict}. Save again to overwrite."));
                 cx.notify();
                 false
             }

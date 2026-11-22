@@ -16,6 +16,7 @@ pub enum Eol {
 }
 
 impl Eol {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Eol::Lf => "\n",
@@ -25,6 +26,7 @@ impl Eol {
     }
 
     /// Detect the dominant newline kind in raw file text.
+    #[must_use]
     pub fn detect(text: &str) -> Eol {
         let mut crlf = 0usize;
         let mut lf = 0usize;
@@ -63,22 +65,27 @@ pub struct EolMap {
 }
 
 impl EolMap {
+    #[must_use]
     pub fn new(kinds: Vec<Eol>) -> Self {
         Self { kinds }
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.kinds.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.kinds.is_empty()
     }
 
+    #[must_use]
     pub fn eol_at(&self, break_index: usize) -> Option<Eol> {
         self.kinds.get(break_index).copied()
     }
 
+    #[must_use]
     pub fn kinds(&self) -> &[Eol] {
         &self.kinds
     }
@@ -97,6 +104,7 @@ impl EolMap {
     /// Rebuild the map for canonical text that has already been normalized to
     /// `\n`, using `source` offsets (pre-normalization text) to recover each
     /// break's original kind.
+    #[must_use]
     pub fn from_source(source: &str) -> (String, EolMap) {
         let mut normalized = String::with_capacity(source.len());
         let mut kinds = Vec::new();
@@ -124,10 +132,18 @@ impl EolMap {
 
     /// Reconstruct raw text for save: `text` is canonical (`\n` breaks).
     /// `break_index` advances per `\n` encountered.
+    #[must_use]
     pub fn apply_to(&self, text: &str, fallback: Eol) -> String {
-        let mut out = String::with_capacity(text.len() + self.len());
+        self.expand(text.chars(), fallback)
+    }
+
+    /// Reconstruct raw text from any character source, without first
+    /// materializing the canonical text as a single `String`.
+    #[must_use]
+    pub fn expand(&self, characters: impl Iterator<Item = char>, fallback: Eol) -> String {
+        let mut out = String::new();
         let mut break_ix = 0;
-        for ch in text.chars() {
+        for ch in characters {
             if ch == '\n' {
                 out.push_str(self.eol_at(break_ix).unwrap_or(fallback).as_str());
                 break_ix += 1;

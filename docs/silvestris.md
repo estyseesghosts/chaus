@@ -19,7 +19,7 @@
 3. Create a `WindowFrame` **without** a toolbar or bottom bar; use a single full-size document view. Keep title `Untitled` or the filename, plus modified indicator. No `Shell` sidebar/inspector: it solves a different layout problem.
 4. Create a global `CommandRegistry` with stable ids: `file.new`, `file.open`, `file.save`, `file.save_as`, `file.close`, `edit.undo`, `edit.redo`, `edit.find`, `edit.replace`, `edit.format`, `view.vim_mode`, `view.appearance`, `settings.open`. The GUI menu, context menu and shortcuts must dispatch the same ids. Publish checked/disabled states as the document changes.
 5. Display `View → Vim Mode` checked according to **active window**. Bind proposed shortcut `Ctrl+Shift+V` on Windows/Linux; platform-specific shortcuts require collision testing against GPUI/OS and app text contexts. A future macOS default may differ.
-6. Build Settings using Silvestris preferences components: **Appearance** (theme, font, size, spacing), **Editor** (wrap, indent, numbers), **Vim** (enabled by default, mappings/help, shortcut), **Files** (EOL, BOM/backup/recovery preferences). Settings model, validation, save/reload and conflict detection remain app-owned.
+6. Build Settings using Silvestris preferences components: **Appearance** (theme, font, size, spacing), **Editor** (wrap, indent, numbers), **Vim** (enabled with `set vim`; standard editing is the default, plus mappings/help and the shortcut), **Files** (EOL, BOM/backup/recovery preferences). Settings model, validation, save/reload and conflict detection remain app-owned.
 
 ## Reusable upstream work: where the boundary lies
 
@@ -33,17 +33,17 @@ When implementation exposes a generic gap in Silvestris, write an upstreamable p
 | Cross-platform native open/save dialog abstraction | Yes, if not already provided | Paths and cancellation/errors only; no file policy |
 | Generic command toggle/menu checked-state semantics | Yes | No editor-specific enum in Silvestris |
 | Syntax highlighting engine, Vim interpreter, formatter | **No** | Application-owned |
-| Scratchpad rc file parser | **No** | Application-owned |
+| chaus rc file parser | **No** | Application-owned |
 | Entire Ropey edit model | **No** | Application-owned |
 
 Upstream contribution process: reproduce gap with framework gallery first; add general API + unit/interaction test; keep theme token usage; validate Aqua/Geist, mouse/keyboard and native OS; update framework docs; submit in isolated commit/PR; consume via exact pinned revision, not an app-local copied widget.
 
 ## Config source of truth and GUI synchronization
 
-Define one `Settings` struct with derived `EffectiveSettings` (defaults + user overrides). Parse `~/.scratchpadrc` on Linux and `%USERPROFILE%\_scratchpadrc` on Windows; allow `--config <path>` for tests/advanced use only if needed. Format is **Vim-like subset**, not genuine vimrc compatibility:
+Define one `Settings` struct with derived `EffectiveSettings` (defaults + user overrides). Parse `~/.chausrc` on Linux and `%USERPROFILE%\_chausrc` on Windows; allow `--config <path>` for tests/advanced use only if needed. Format is **Vim-like subset**, not genuine vimrc compatibility:
 
 ```vim
-" Scratchpad-specific, not general Vimscript
+" chaus-specific, not general Vimscript
 set theme=geist-dark
 set font=GeistMono
 set fontsize=14
@@ -63,7 +63,7 @@ GUI editing must **not replace the whole file**. Parse to a line-preserving repr
 ## Do not
 
 - Do not fork Silvestris to introduce app-specific editor code, or copy the whole `controls/text_field.rs` into the app.
-- Do not use the framework `Shell` because the sample explorer uses it; scratchpad needs only `WindowFrame`.
+- Do not use the framework `Shell` because the sample explorer uses it; chaus needs only `WindowFrame`.
 - Do not claim the existing Silvestris settings UI already persists user preferences.
 - Do not treat a command descriptor shortcut update as a live GPUI keymap update; source explicitly says it is not.
 - Do not ship a second set of private Geist or Aqua assets or fetch fonts from a network.

@@ -224,15 +224,16 @@ pub(crate) fn bracketed_object(
     close: char,
     outer: bool,
 ) -> Option<CharRange> {
-    let text = document.text();
-    let characters: Vec<char> = text.chars().collect();
-    let mut index = offset.0.min(characters.len().saturating_sub(1));
+    let rope = document.rope();
+    let length = rope.len_chars();
+    let character_at = |index: usize| (index < length).then(|| rope.char(index));
+    let mut index = offset.0.min(length.saturating_sub(1));
     let mut depth = 0usize;
     let mut open_index = None;
     loop {
-        if characters.get(index) == Some(&close) {
+        if character_at(index) == Some(close) {
             depth += 1;
-        } else if characters.get(index) == Some(&open) {
+        } else if character_at(index) == Some(open) {
             if depth == 0 {
                 open_index = Some(index);
                 break;
@@ -245,15 +246,12 @@ pub(crate) fn bracketed_object(
         index -= 1;
     }
     let open_index = open_index?;
-    if characters.get(open_index) != Some(&open) {
-        return None;
-    }
     let mut depth = 0usize;
     let mut index = open_index;
     loop {
-        if characters.get(index) == Some(&open) {
+        if character_at(index) == Some(open) {
             depth += 1;
-        } else if characters.get(index) == Some(&close) {
+        } else if character_at(index) == Some(close) {
             depth -= 1;
             if depth == 0 {
                 let start = if outer { open_index } else { open_index + 1 };
@@ -262,13 +260,15 @@ pub(crate) fn bracketed_object(
             }
         }
         index += 1;
-        if index >= characters.len() {
+        if index >= length {
             return None;
         }
     }
 }
 
-/// First literal occurrence at or after `from`, wrapping to the start.
+/// Next literal occurrence strictly after (or before) `from`, wrapping at the
+/// document edge. Skipping the caret is what makes `n` advance instead of
+/// finding the current match again.
 pub(crate) fn find_literal(
     document: &Document,
     from: CharOffset,
@@ -280,17 +280,19 @@ pub(crate) fn find_literal(
     }
     let text = document.text();
     if forward {
-        let start_byte = document.char_to_byte(from).0.min(text.len());
-        let found = text[start_byte..]
+        let start = document.next_grapheme_boundary(from);
+        let start_byte = document.char_to_byte(start).0.min(text.len());
+        text[start_byte..]
             .find(needle)
             .map(|offset| start_byte + offset)
-            .or_else(|| text.find(needle));
-        found.map(|byte| CharOffset(document.rope().byte_to_char(byte)))
+            .or_else(|| text.find(needle))
+            .map(|byte| CharOffset(document.rope().byte_to_char(byte)))
     } else {
-        let end_byte = document.char_to_byte(from).0.min(text.len());
-        let found = text[..end_byte]
+        let end = document.prev_grapheme_boundary(from);
+        let end_byte = document.char_to_byte(end).0.min(text.len());
+        text[..end_byte]
             .rfind(needle)
-            .or_else(|| text.rfind(needle));
-        found.map(|byte| CharOffset(document.rope().byte_to_char(byte)))
+            .or_else(|| text.rfind(needle))
+            .map(|byte| CharOffset(document.rope().byte_to_char(byte)))
     }
 }

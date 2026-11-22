@@ -23,6 +23,14 @@ impl Operator {
             _ => None,
         }
     }
+
+    pub(crate) fn key(self) -> char {
+        match self {
+            Self::Delete => 'd',
+            Self::Change => 'c',
+            Self::Yank => 'y',
+        }
+    }
 }
 
 /// What the caller should do after an operator ran.

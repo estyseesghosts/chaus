@@ -77,6 +77,7 @@ index_type!(
 );
 
 impl DocumentRevision {
+    #[must_use]
     pub fn next(self) -> Self {
         Self(self.0.wrapping_add(1))
     }
@@ -90,6 +91,7 @@ pub struct CharRange {
 }
 
 impl CharRange {
+    #[must_use]
     pub fn new(start: CharOffset, end: CharOffset) -> Self {
         // Construction normalizes direction; callers that care about anchor
         // and head use `Selection`, not `CharRange`.
@@ -99,26 +101,32 @@ impl CharRange {
         }
     }
 
+    #[must_use]
     pub fn empty(at: CharOffset) -> Self {
         Self { start: at, end: at }
     }
 
+    #[must_use]
     pub fn len(self) -> usize {
         self.end.0 - self.start.0
     }
 
+    #[must_use]
     pub fn is_empty(self) -> bool {
         self.start == self.end
     }
 
+    #[must_use]
     pub fn contains(self, offset: CharOffset) -> bool {
         self.start <= offset && offset < self.end
     }
 
+    #[must_use]
     pub fn intersects(self, other: Self) -> bool {
         self.start < other.end && other.start < self.end
     }
 
+    #[must_use]
     pub fn union(self, other: Self) -> Self {
         Self {
             start: self.start.min(other.start),
@@ -137,6 +145,7 @@ pub struct Selection {
 }
 
 impl Selection {
+    #[must_use]
     pub fn caret(at: CharOffset) -> Self {
         Self {
             anchor: at,
@@ -144,22 +153,27 @@ impl Selection {
         }
     }
 
+    #[must_use]
     pub fn new(anchor: CharOffset, head: CharOffset) -> Self {
         Self { anchor, head }
     }
 
+    #[must_use]
     pub fn range(self) -> CharRange {
         CharRange::new(self.anchor, self.head)
     }
 
+    #[must_use]
     pub fn is_empty(self) -> bool {
         self.anchor == self.head
     }
 
+    #[must_use]
     pub fn reversed(self) -> bool {
         self.head < self.anchor
     }
 
+    #[must_use]
     pub fn clamp(self, len: usize) -> Self {
         let max = CharOffset(len);
         Self {

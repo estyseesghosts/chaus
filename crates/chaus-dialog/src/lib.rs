@@ -4,6 +4,8 @@
 //! there is no document work to overlap with it. Paths are returned as
 //! `PathBuf` so non-UTF-8 Windows names survive.
 
+use std::path::{Path, PathBuf};
+
 #[cfg(windows)]
 mod windows;
 
@@ -15,14 +17,20 @@ pub enum Choice {
     Save,
 }
 
-/// Show the platform's file picker. Returns `None` when the person cancels or
-/// the platform has no picker wired up.
+/// Whether this build has a native file picker.
+///
+/// Callers should check this before [`choose_file`] so that "the platform has
+/// no picker" is not reported to people as "you cancelled".
 #[must_use]
-pub fn choose_file(
-    choice: Choice,
-    title: &str,
-    suggested: Option<&std::path::Path>,
-) -> Option<std::path::PathBuf> {
+pub fn is_available() -> bool {
+    cfg!(windows)
+}
+
+/// Show the platform's file picker. Returns `None` when the person cancels or
+/// the platform has no picker wired up; callers distinguish the two with
+/// [`is_available`].
+#[must_use]
+pub fn choose_file(choice: Choice, title: &str, suggested: Option<&Path>) -> Option<PathBuf> {
     platform::choose_file(choice, title, suggested)
 }
 

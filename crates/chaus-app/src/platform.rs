@@ -5,6 +5,8 @@
 //! toolchain. Building the platform object directly keeps the same pinned GPUI
 //! backend without that build step.
 
+use gpui::Application;
+
 #[cfg(windows)]
 mod windows {
     use std::rc::Rc;
@@ -30,17 +32,17 @@ mod linux {
 
 /// The native application for the current target.
 #[cfg(windows)]
-pub(crate) fn application() -> gpui::Application {
+pub(crate) fn application() -> Application {
     windows::application()
 }
 
 /// The native application for the current target.
 #[cfg(target_os = "linux")]
-pub(crate) fn application() -> gpui::Application {
+pub(crate) fn application() -> Application {
     linux::application()
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-pub(crate) fn application() -> gpui::Application {
+pub(crate) fn application() -> Application {
     compile_error!("chaus supports Windows and Linux in v0.1");
 }

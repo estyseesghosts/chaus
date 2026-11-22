@@ -15,6 +15,7 @@ use gpui::{
 
 use crate::editor::Editor;
 use crate::editor_edit::normalize_newlines;
+use crate::geometry::Geometry;
 
 impl EntityInputHandler for Editor {
     fn text_for_range(
@@ -93,16 +94,11 @@ impl EntityInputHandler for Editor {
         let transaction =
             EditTransaction::new(cause, TextEdit::new(range, text), self.selection, after);
         if let Ok(result) = self.document.apply(transaction) {
-            if self.vim && self.vim_engine.mode().accepts_text() {
-                self.vim_engine
-                    .record_inserted(&self.document.slice(CharRange::new(range.start, after.head)));
-            }
             self.selection = after;
             self.marked = None;
             self.preedit_active = false;
             self.preedit_start = None;
             self.after_change(result.affected_lines);
-            self.close_confirmed = false;
             window.notify_text_input_changed(&self.focus);
             cx.notify();
         }
@@ -175,6 +171,9 @@ impl EntityInputHandler for Editor {
     }
 
     fn accepts_text_input(&self, _: &mut Window, _: &mut Context<Self>) -> bool {
+        // GPUI derives `prefers_ime_for_printable_keys` from this method, so
+        // Normal mode sends printable keys through the command grammar while
+        // Insert mode and standard editing defer to an active IME.
         !self.vim || self.vim_engine.mode().accepts_text()
     }
 
@@ -187,11 +186,7 @@ impl EntityInputHandler for Editor {
 }
 
 impl Editor {
-    fn bounds_for_offset(
-        &mut self,
-        offset: CharOffset,
-        geometry: crate::geometry::Geometry,
-    ) -> Point<Pixels> {
+    fn bounds_for_offset(&mut self, offset: CharOffset, geometry: Geometry) -> Point<Pixels> {
         let (line, row) = self.row_of_offset(offset);
         let line_start = self.document.line_start(line);
         let text = self.document.line_text(line);

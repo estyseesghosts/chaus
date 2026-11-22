@@ -2,7 +2,7 @@
 
 ## Shipping target
 
-Ship **one executable** named `scratchpad` that opens a GPUI window from a terminal. Fonts, icons, app styles, Tree-sitter grammars and highlight queries must be embedded into that executable or linked into it. A single ELF **does not imply a completely static Linux binary**: it normally relies on glibc/libstdc++ as applicable, fontconfig/windowing components, Vulkan userspace/driver stack and host system APIs. Do not promise "runs on every Linux distribution".
+Ship **one executable** named `chaus` that opens a GPUI window from a terminal. Fonts, icons, app styles, Tree-sitter grammars and highlight queries must be embedded into that executable or linked into it. A single ELF **does not imply a completely static Linux binary**: it normally relies on glibc/libstdc++ as applicable, fontconfig/windowing components, Vulkan userspace/driver stack and host system APIs. Do not promise "runs on every Linux distribution".
 
 The pinned GPUI source's [`gpui_platform` features](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui_platform/Cargo.toml) explicitly include `wayland` and `x11`. Its [`gpui_linux`](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui_linux/Cargo.toml) uses `gpui_wgpu`/window backend dependencies. **Silvestris currently has `gpui_platform` with `default-features = false`; the consuming build must ensure a Linux windowing feature is enabled**, then smoke-test both sessions. Cargo feature unification can change as the repository evolves—inspect `cargo tree -e features` rather than assume.
 
@@ -29,24 +29,24 @@ cargo tree -e features -i gpui_platform
 cargo fmt --all -- --check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo build --release -p scratchpad-app --bin scratchpad --locked
-file target/release/scratchpad
-ldd target/release/scratchpad
-readelf -d target/release/scratchpad
-readelf --version-info target/release/scratchpad | grep GLIBC_ | sort -u
-./target/release/scratchpad --help
-./target/release/scratchpad --version
-./target/release/scratchpad
-./target/release/scratchpad './tests/fixtures/notes with spaces.txt'
+cargo build --release -p chaus-app --bin chaus --locked
+file target/release/chaus
+ldd target/release/chaus
+readelf -d target/release/chaus
+readelf --version-info target/release/chaus | grep GLIBC_ | sort -u
+./target/release/chaus --help
+./target/release/chaus --version
+./target/release/chaus
+./target/release/chaus './tests/fixtures/notes with spaces.txt'
 ```
 
 For window tests, run in an actual user graphical session with the correct `DISPLAY`/`WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` rather than headless CI pretending a window has launched. Test window close/resizing, focus/IME/clipboard, font rendering, dropdown menus, file dialogs, DPI scaling, Save prompts and `Ctrl+Shift+V`. Validate both native Wayland and X11 (including XWayland if relevant), keyboard layouts and a machine without development checkout.
 
 ## Release artifact
 
-- Produce `scratchpad-linux-x86_64` as the **actual ELF**, plus optionally `scratchpad-linux-x86_64.tar.gz` containing the same ELF and notices. The tarball is optional; the executable must not need adjacent resource files.
+- Produce `chaus-linux-x86_64` as the **actual ELF**, plus optionally `chaus-linux-x86_64.tar.gz` containing the same ELF and notices. The tarball is optional; the executable must not need adjacent resource files.
 - Build release with `--locked`; record binary hash (`sha256sum`), Rust/GPUI/Silvestris SHAs, Linux baseline, tested backends and all third-party font/grammar license notices in the release page (not silently omit notices merely because app is one-file).
-- Optional `.desktop` entry and desktop icon installer are separate conveniences, not required for starting the binary. Running `./scratchpad` remains first-class. No AppImage requirement for v0.1; it can be offered later if true cross-distro portability needs it.
+- Optional `.desktop` entry and desktop icon installer are separate conveniences, not required for starting the binary. Running `./chaus` remains first-class. No AppImage requirement for v0.1; it can be offered later if true cross-distro portability needs it.
 - Check `ldd` and `readelf`; distinguish ordinary system libraries from accidental application-private `.so`/plugin deps. Check actual graphics driver availability. If shader assets are required at runtime by the pinned GPUI build, ensure the build embeds them or explicitly record that a single-file release is **blocked**; do not claim self containment merely because it launches on the build PC.
 
 ## Common blockers and how to diagnose

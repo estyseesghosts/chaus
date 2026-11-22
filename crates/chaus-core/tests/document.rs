@@ -125,6 +125,24 @@ fn newline_starts_a_new_undo_entry() {
 }
 
 #[test]
+fn no_op_transactions_do_not_add_history_or_dirty_the_document() {
+    let mut document = doc("abc");
+    let error = document
+        .apply(EditTransaction::new(
+            EditCause::Typing,
+            TextEdit::insertion(CharOffset(1), ""),
+            Selection::caret(CharOffset(1)),
+            Selection::caret(CharOffset(1)),
+        ))
+        .expect_err("empty edit should be rejected");
+    assert!(matches!(error, EditError::EmptyTransaction));
+    assert_eq!(document.text(), "abc");
+    assert_eq!(document.undo_depth(), 0);
+    assert!(!document.is_dirty());
+    assert_eq!(document.revision(), DocumentRevision::ZERO);
+}
+
+#[test]
 fn out_of_bounds_edits_are_rejected_without_mutation() {
     let mut document = doc("abc");
     let error = document
@@ -209,6 +227,56 @@ fn utf16_index_stays_correct_after_edits() {
         if let Some(ch) = text.chars().nth(offset) {
             expected += ch.len_utf16();
         }
+    }
+}
+
+#[test]
+fn multi_edit_transaction_invalidates_lines_shifted_by_a_lower_edit() {
+    let mut document = doc("a\nb\nc");
+    let result = document
+        .apply(EditTransaction {
+            edits: vec![
+                TextEdit::insertion(CharOffset::ZERO, "\n\n"),
+                TextEdit::new(CharRange::new(CharOffset(4), CharOffset(5)), "X"),
+            ],
+            before_selection: Selection::caret(CharOffset::ZERO),
+            after_selection: Selection::caret(CharOffset::ZERO),
+            cause: EditCause::ReplaceAll,
+        })
+        .expect("multi-edit transaction should apply");
+
+    assert_eq!(document.text(), "\n\na\nb\nX");
+    assert_eq!(document.len_lines(), 5);
+    assert_eq!(
+        result.affected_lines.end,
+        LineIndex(document.len_lines()),
+        "the changed line moved below the pre-shift range"
+    );
+}
+
+#[test]
+fn disjoint_edits_of_different_lengths_undo_and_redo_in_order() {
+    let mut document = doc("abcdef");
+    document
+        .apply(EditTransaction {
+            edits: vec![
+                TextEdit::new(CharRange::new(CharOffset(0), CharOffset(1)), "LONG"),
+                TextEdit::new(CharRange::new(CharOffset(4), CharOffset(5)), "X"),
+            ],
+            before_selection: Selection::caret(CharOffset::ZERO),
+            after_selection: Selection::caret(CharOffset(8)),
+            cause: EditCause::ReplaceAll,
+        })
+        .expect("multi-edit transaction should apply");
+
+    assert_eq!(document.text(), "LONGbcdXf");
+    document.undo();
+    assert_eq!(document.text(), "abcdef");
+    document.redo();
+    assert_eq!(document.text(), "LONGbcdXf");
+    for offset in 0..=document.len_chars() {
+        let units = document.char_to_utf16(CharOffset(offset));
+        assert_eq!(document.utf16_to_char(units), CharOffset(offset));
     }
 }
 

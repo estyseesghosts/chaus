@@ -15,8 +15,7 @@ mod motion;
 mod operator;
 mod register;
 
-pub use engine::Engine;
-pub use engine::Outcome;
+pub use engine::{Engine, Outcome};
 pub use key::Key;
 pub use mapping::{parse_mappings, Mapping};
 pub use mode::Mode;

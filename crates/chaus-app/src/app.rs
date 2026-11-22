@@ -1,9 +1,10 @@
 //! Window lifecycle and application startup.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chaus_core::settings::Settings;
 use chaus_editor::Editor;
+use chaus_io::LoadedFile;
 use gpui::{actions, px, size, App, AppContext, Bounds, Focusable, KeyBinding, WindowHandle};
 use silvestris::{chrome, ThemePreference};
 
@@ -18,8 +19,15 @@ pub fn load_settings() -> Settings {
     let Some(path) = settings_path() else {
         return Settings::default();
     };
-    let Ok(source) = std::fs::read_to_string(&path) else {
-        return Settings::default();
+    let source = match std::fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Settings::default();
+        }
+        Err(error) => {
+            eprintln!("chaus: could not read {}: {error}", path.display());
+            return Settings::default();
+        }
     };
     let parsed = chaus_core::settings::parse_rc(&source);
     for diagnostic in &parsed.diagnostics {
@@ -59,6 +67,10 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) {
             open_untitled(cx);
         });
         cx.on_action(|_: &OpenFile, cx| {
+            if !chaus_dialog::is_available() {
+                eprintln!("chaus: no native file picker is available on this platform yet");
+                return;
+            }
             let Some(path) = chaus_dialog::choose_file(chaus_dialog::Choice::Open, "Open", None)
             else {
                 return;
@@ -87,7 +99,7 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) {
 
 fn window_for(
     title: &str,
-    loaded: Option<chaus_io::LoadedFile>,
+    loaded: Option<LoadedFile>,
     message: Option<String>,
     cx: &mut App,
 ) -> Option<WindowHandle<Editor>> {
@@ -95,20 +107,25 @@ fn window_for(
     let bounds = Bounds::centered(None, size(px(900.), px(620.)), cx);
     let options = chrome::window_options(title, bounds, size(px(420.), px(300.)), cx);
     let handle = chrome::open_window(options, cx, move |window, cx| {
-        let editor = cx.new(|cx| Editor::new(window, cx, loaded.clone(), settings.clone()));
+        let editor = cx.new(|cx| Editor::new(cx, loaded.clone(), settings.clone()));
         if let Some(message) = message.clone() {
             let editor_handle = editor.clone();
             editor_handle.update(cx, |editor, _| editor.show_message(message));
         }
         let focus = editor.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
+        let vim_editor = editor.clone();
+        window
+            .on_focus_out(&focus, cx, move |_, _, cx| {
+                vim_editor.update(cx, |editor, cx| editor.cancel_vim_prefix(cx));
+            })
+            .detach();
         window.on_window_should_close(cx, {
             let editor = editor.clone();
             move |window, cx| {
                 let allow = editor.update(cx, |editor, cx| {
                     let allow = editor.confirm_close();
                     if !allow {
-                        editor.show_message("Unsaved changes: close again to discard");
                         cx.notify();
                     }
                     allow
@@ -135,22 +152,28 @@ pub fn open_untitled(cx: &mut App) -> Option<WindowHandle<Editor>> {
     window_for("Untitled", None, None, cx)
 }
 
-fn open_file(path: &std::path::Path, cx: &mut App) -> Option<WindowHandle<Editor>> {
+fn open_file(path: &Path, cx: &mut App) -> Option<WindowHandle<Editor>> {
     match chaus_io::load(path) {
         Ok(loaded) => {
-            let title = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
+            let title = display_name(path);
             window_for(&title, Some(loaded), None, cx)
         }
         Err(error) => {
             eprintln!("chaus: {error}");
-            let title = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Untitled".to_string());
-            window_for(&title, None, Some(error.to_string()), cx)
+            // The file did not open, so the window must not pretend it did by
+            // taking the failed path as its title.
+            window_for(
+                "Untitled",
+                None,
+                Some(format!("Could not open {}: {error}", path.display())),
+                cx,
+            )
         }
     }
+}
+
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }

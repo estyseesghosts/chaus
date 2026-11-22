@@ -2,7 +2,8 @@
 
 use chaus_core::position::{CharOffset, Selection};
 use gpui::{
-    Context, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollEvent, Window,
+    px, Context, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
+    ScrollEvent, Window,
 };
 
 use crate::editor::Editor;
@@ -63,7 +64,16 @@ impl Editor {
             self.scroll_row += 1.0;
             self.clamp_scroll();
         }
-        if let Some(offset) = self.offset_for_point(event.position) {
+        // Keep extending the selection when the pointer leaves the viewport;
+        // clamp into the element so hit testing still yields the edge row.
+        let bounds = geometry.bounds;
+        let last_x = (bounds.right() - px(1.0)).max(bounds.left());
+        let last_y = (bounds.bottom() - px(1.0)).max(bounds.top());
+        let position = Point {
+            x: event.position.x.clamp(bounds.left(), last_x),
+            y: event.position.y.clamp(bounds.top(), last_y),
+        };
+        if let Some(offset) = self.offset_for_point(position) {
             self.selection = Selection::new(self.selection.anchor, offset);
             cx.notify();
         }
@@ -87,18 +97,21 @@ impl Editor {
         match event.delta {
             ScrollDelta::Lines(delta) => {
                 self.scroll_row -= delta.y;
-                self.scroll_x -= gpui::px(delta.x * 12.0);
+                self.scroll_x -= px(delta.x * 12.0);
             }
             ScrollDelta::Pixels(delta) => {
                 self.scroll_row -= f32::from(delta.y) / line_height.max(1.0);
                 self.scroll_x -= delta.x;
             }
         }
+        if self.rows_columns.is_some() {
+            self.scroll_x = px(0.0);
+        }
         self.clamp_scroll();
         cx.notify();
     }
 
-    pub(crate) fn offset_for_point(&mut self, position: Point<gpui::Pixels>) -> Option<CharOffset> {
+    pub(crate) fn offset_for_point(&mut self, position: Point<Pixels>) -> Option<CharOffset> {
         let geometry = self.geometry?;
         if !geometry.bounds.contains(&position) {
             return None;
@@ -107,15 +120,10 @@ impl Editor {
         let row = (position.y - geometry.bounds.top() - geometry.padding()) / line_height
             + self.scroll_row;
         let target_row = (row.max(0.0) as usize).min(self.total_rows().saturating_sub(1));
-        let line = self.line_at_row(target_row);
-        let local_row =
-            target_row.saturating_sub(self.prefix_rows.get(line.0).copied().unwrap_or(0));
-        let segments = self.segments_for(line);
-        let segment = segments.get(local_row).or_else(|| segments.last())?;
+        let (line, span) = self.row_span(target_row);
         let x = position.x - geometry.bounds.left() - geometry.padding() + self.scroll_x;
         let local_columns =
             (f32::from(x) / f32::from(geometry.char_width).max(1.0)).max(0.0) as usize;
-        let column = segment.start_column + local_columns;
-        Some(self.offset_at(line, column))
+        Some(self.offset_at(line, span.start + local_columns))
     }
 }

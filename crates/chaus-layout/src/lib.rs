@@ -67,11 +67,6 @@ pub fn segments(text: &str, max_columns: Option<usize>, tab_stop: usize) -> Vec<
         } else {
             grapheme.width()
         };
-        let piece = if is_tab {
-            " ".repeat(piece_width)
-        } else {
-            grapheme.to_string()
-        };
 
         if let Some(max) = max_columns {
             if width > 0 && width + piece_width > max {
@@ -88,7 +83,11 @@ pub fn segments(text: &str, max_columns: Option<usize>, tab_stop: usize) -> Vec<
             }
         }
 
-        display.push_str(&piece);
+        if is_tab {
+            display.extend(std::iter::repeat_n(' ', piece_width));
+        } else {
+            display.push_str(grapheme);
+        }
         width += piece_width;
         char_index += grapheme.chars().count();
     }
@@ -104,9 +103,31 @@ pub fn segments(text: &str, max_columns: Option<usize>, tab_stop: usize) -> Vec<
 }
 
 /// Visual rows occupied by a hard line.
+///
+/// This mirrors [`segments`] without constructing display strings, so rewrap
+/// of a large document does not allocate once per grapheme.
 #[must_use]
 pub fn row_count(text: &str, max_columns: Option<usize>, tab_stop: usize) -> usize {
-    segments(text, max_columns, tab_stop).len()
+    let max_columns = max_columns.filter(|columns| *columns > 0);
+    let mut rows = 1;
+    let mut width = 0usize;
+    let mut column = 0usize;
+    for grapheme in text.graphemes(true) {
+        let piece_width = if grapheme == "\t" {
+            tab_width(column, tab_stop)
+        } else {
+            grapheme.width()
+        };
+        if let Some(max) = max_columns {
+            if width > 0 && width + piece_width > max {
+                rows += 1;
+                width = 0;
+            }
+        }
+        width += piece_width;
+        column += piece_width;
+    }
+    rows
 }
 
 /// Column of a char offset within a hard line, tab stops included.
