@@ -57,21 +57,16 @@ app-owned. Bundled fonts come from Silvestris; do not add a second copy.
 
 - No native menu bar or preferences window yet. Theme and Vim defaults come from
   `_chausrc`; theme switching at runtime is not exposed in the UI.
-- Find and replace use literal search with Previous/Next, a match-case toggle,
-  and one-transaction Replace One/Replace All. Regular expressions are not
-  supported; Vim `/` and `?` remain separate.
+- Find and replace support literal search only; regular expressions are not
+  implemented. Vim `/` and `?` remain separate.
 - Tree-sitter highlighting and external formatters are not linked.
 - Open/save dialogs use the Win32 common dialogs on Windows. Linux uses the
   desktop's `zenity` or `kdialog` helper when one is installed; otherwise the
   command reports that no picker is available, so pass paths on the command
   line and use `Ctrl+S` for an already-open file. The Linux helper path has not
   been smoke-tested in this Windows environment.
-- Save conflicts show a document-modal Reload / Save As / Overwrite / Cancel
-  sheet. Overwrite is an explicit destructive choice and is never armed by a
-  previous failed save.
-- Closing a dirty window shows a document-modal Save / Discard / Cancel sheet.
-  Save starts the normal save path (including Save As for an untitled document);
-  a failed or cancelled save leaves the window open.
+- The save-conflict and dirty-close sheets cover the normal paths. Reload after
+  a conflict replaces the document; there is no three-way merge.
 - No crash-recovery snapshots and no external file watcher.
 - Open and save run on the background executor, but a save still expands the
   document into one string and one byte buffer before writing. Initial row
