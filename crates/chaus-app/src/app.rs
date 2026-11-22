@@ -92,16 +92,36 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) {
         })
         .detach();
 
-        let mut opened = 0;
-        for path in &paths {
-            if open_file(path, cx).is_some() {
-                opened += 1;
-            }
-        }
-        if new_window || opened == 0 {
+        if paths.is_empty() {
             open_untitled(cx);
+            cx.activate(true);
+            return;
         }
-        cx.activate(true);
+        let load_paths = paths.clone();
+        let task = cx.background_executor().spawn(async move {
+            load_paths
+                .into_iter()
+                .map(|path| {
+                    let result = chaus_io::load(&path);
+                    (path, result)
+                })
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |cx| {
+            let loaded = task.await;
+            let mut opened = 0;
+            for (path, result) in loaded {
+                let opened_window = cx.update(|cx| open_loaded_result(&path, result, cx).is_some());
+                if opened_window {
+                    opened += 1;
+                }
+            }
+            if new_window || opened == 0 {
+                let _ = cx.update(open_untitled);
+            }
+            cx.update(|cx| cx.activate(true));
+        })
+        .detach();
     });
 }
 
@@ -160,13 +180,8 @@ pub fn open_untitled(cx: &mut App) -> Option<WindowHandle<Editor>> {
     window_for("Untitled", None, None, cx)
 }
 
-fn open_file(path: &Path, cx: &mut App) -> Option<WindowHandle<Editor>> {
-    let result = chaus_io::load(path);
-    open_loaded_result(path, result, cx)
-}
-
-/// Create a window for a load result. Startup loads already-completed files;
-/// Ctrl+O calls this after the background load finishes.
+/// Create a window for a load result. Startup and Ctrl+O call this after a
+/// background load finishes.
 fn open_loaded_result(
     path: &Path,
     result: Result<LoadedFile, chaus_io::LoadError>,
