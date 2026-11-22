@@ -311,16 +311,32 @@ struct HistoryEntry {
 }
 
 impl HistoryEntry {
-    fn undo(&self, document: &mut Document) {
+    fn undo(&self, document: &mut Document) -> LineRange {
+        let mut affected: Option<LineRange> = None;
         for step in self.steps.iter().rev() {
-            document.apply_inverse(step);
+            let range = document.apply_inverse(step);
+            affected = Some(match affected {
+                Some(previous) => {
+                    LineRange::new(previous.start.min(range.start), previous.end.max(range.end))
+                }
+                None => range,
+            });
         }
+        affected.unwrap_or_default()
     }
 
-    fn redo(&self, document: &mut Document) {
+    fn redo(&self, document: &mut Document) -> LineRange {
+        let mut affected: Option<LineRange> = None;
         for step in &self.steps {
-            document.apply_forward(step);
+            let range = document.apply_forward(step);
+            affected = Some(match affected {
+                Some(previous) => {
+                    LineRange::new(previous.start.min(range.start), previous.end.max(range.end))
+                }
+                None => range,
+            });
         }
+        affected.unwrap_or_default()
     }
 }
 
@@ -357,6 +373,9 @@ pub struct Document {
     group_depth: usize,
     group_start_depth: usize,
     utf16: RefCell<Utf16Index>,
+    /// Hard lines touched by the most recent mutation. Editors use this to
+    /// refresh row metadata incrementally instead of rebuilding the document.
+    last_changed_lines: LineRange,
 }
 
 impl Document {
@@ -400,6 +419,7 @@ impl Document {
             group_depth: 0,
             group_start_depth: 0,
             utf16: RefCell::new(utf16),
+            last_changed_lines: LineRange::default(),
         }
     }
 
@@ -851,11 +871,21 @@ impl Document {
             affected_start,
             LineIndex(affected_end.0.max(affected_start.0 + 1)),
         );
+        self.last_changed_lines = affected_lines;
         Ok(EditResult {
             revision: self.revision,
             edits: applied,
             affected_lines,
         })
+    }
+
+    /// Hard lines touched by the most recent mutation (apply, undo or redo).
+    ///
+    /// Editors refresh row metadata for this range instead of rebuilding the
+    /// whole document after every key.
+    #[must_use]
+    pub fn last_changed_lines(&self) -> LineRange {
+        self.last_changed_lines
     }
 
     fn can_coalesce(&self, cause: EditCause, edits: &[TextEdit], before: Selection) -> bool {
@@ -898,7 +928,7 @@ impl Document {
         utf16.prefix_valid = false;
     }
 
-    fn apply_inverse(&mut self, step: &UndoStep) {
+    fn apply_inverse(&mut self, step: &UndoStep) -> LineRange {
         let start = step.edit.range.start;
         let old_start_line = self.line_of(start);
         let inserted_end = CharOffset((start.0 + step.edit.inserted_chars()).min(self.len_chars()));
@@ -913,15 +943,21 @@ impl Document {
             step.eol.removed.iter().copied(),
         );
         let new_end = CharOffset((start.0 + step.removed.chars().count()).min(self.len_chars()));
-        self.patch_utf16_lines(
-            old_start_line,
-            old_end_line,
-            self.line_of(start),
-            self.line_of(new_end),
-        );
+        let new_start_line = self.line_of(start);
+        let new_end_line = self.line_of(new_end);
+        self.patch_utf16_lines(old_start_line, old_end_line, new_start_line, new_end_line);
+        LineRange::new(
+            old_start_line.min(new_start_line),
+            LineIndex(
+                old_end_line
+                    .max(new_end_line)
+                    .0
+                    .max(old_start_line.min(new_start_line).0 + 1),
+            ),
+        )
     }
 
-    fn apply_forward(&mut self, step: &UndoStep) {
+    fn apply_forward(&mut self, step: &UndoStep) -> LineRange {
         let start = step.edit.range.start;
         let old_start_line = self.line_of(start);
         let removed_end =
@@ -937,12 +973,18 @@ impl Document {
             step.eol.inserted.iter().copied(),
         );
         let new_end = CharOffset((start.0 + step.edit.inserted_chars()).min(self.len_chars()));
-        self.patch_utf16_lines(
-            old_start_line,
-            old_end_line,
-            self.line_of(start),
-            self.line_of(new_end),
-        );
+        let new_start_line = self.line_of(start);
+        let new_end_line = self.line_of(new_end);
+        self.patch_utf16_lines(old_start_line, old_end_line, new_start_line, new_end_line);
+        LineRange::new(
+            old_start_line.min(new_start_line),
+            LineIndex(
+                old_end_line
+                    .max(new_end_line)
+                    .0
+                    .max(old_start_line.min(new_start_line).0 + 1),
+            ),
+        )
     }
 
     #[must_use]
@@ -957,7 +999,8 @@ impl Document {
 
     pub fn undo(&mut self) -> Option<Selection> {
         let entry = self.undo_stack.pop()?;
-        entry.undo(self);
+        let affected = entry.undo(self);
+        self.last_changed_lines = affected;
         self.revision = self.revision.next();
         let selection = entry.before_selection.clamp(self.len_chars());
         self.current_state = entry.before_state;
@@ -967,7 +1010,8 @@ impl Document {
 
     pub fn redo(&mut self) -> Option<Selection> {
         let entry = self.redo_stack.pop()?;
-        entry.redo(self);
+        let affected = entry.redo(self);
+        self.last_changed_lines = affected;
         self.revision = self.revision.next();
         let selection = entry.after_selection.clamp(self.len_chars());
         self.current_state = entry.after_state;

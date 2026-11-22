@@ -25,3 +25,6 @@ gpui_windows = { git = "https://github.com/zed-industries/zed", rev = "6b7209730
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_linux = { git = "https://github.com/zed-industries/zed", rev = "6b720973027999bae402df23d469026f4cced988", default-features = false, features = ["wayland", "x11"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

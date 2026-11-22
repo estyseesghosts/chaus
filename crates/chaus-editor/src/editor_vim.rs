@@ -120,7 +120,8 @@ impl Editor {
         match outcome {
             Outcome::Unhandled => {}
             Outcome::Changed => {
-                self.rebuild_rows();
+                let affected = self.document.last_changed_lines();
+                self.refresh_rows(affected);
                 self.scroll_to_caret();
                 self.force_next_save = false;
                 cx.notify();

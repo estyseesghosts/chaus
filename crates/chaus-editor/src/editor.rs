@@ -274,30 +274,57 @@ impl Editor {
 
     pub(crate) fn rebuild_rows(&mut self) {
         let columns = self.rows_columns;
+        let line_count = self.document.len_lines();
         self.line_rows.clear();
-        for line in 0..self.document.len_lines() {
+        self.line_rows.reserve(line_count);
+        self.prefix_rows.clear();
+        self.prefix_rows.reserve(line_count + 1);
+        let mut total = 0;
+        for line in 0..line_count {
             let text = self.document.line_text(LineIndex(line));
-            self.line_rows.push(chaus_layout::row_count(
-                &text,
-                columns,
-                self.settings.tab_stop,
-            ));
+            let rows = chaus_layout::row_count(&text, columns, self.settings.tab_stop);
+            self.prefix_rows.push(total);
+            total += rows;
+            self.line_rows.push(rows);
         }
-        self.prefix_valid = false;
+        self.prefix_rows.push(total);
+        self.prefix_valid = true;
     }
 
+    /// Update wrap metadata for only the touched hard lines.
+    ///
+    /// The row prefix is adjusted by the total delta instead of being rebuilt,
+    /// so an ordinary edit inside one line costs O(affected lines), not
+    /// O(document). A change in hard-line count still falls back to a rebuild.
     pub(crate) fn refresh_rows(&mut self, affected: LineRange) {
-        if self.line_rows.len() != self.document.len_lines() {
+        let line_count = self.document.len_lines();
+        if self.line_rows.len() != line_count || self.prefix_rows.len() != line_count + 1 {
             self.rebuild_rows();
             return;
         }
-        let end = affected.end.0.min(self.line_rows.len());
-        for line in affected.start.0..end {
-            let text = self.document.line_text(LineIndex(line));
-            self.line_rows[line] =
-                chaus_layout::row_count(&text, self.rows_columns, self.settings.tab_stop);
+        let start = affected.start.0.min(line_count);
+        let end = affected.end.0.min(line_count);
+        if start >= end {
+            return;
         }
-        self.prefix_valid = false;
+        let prefix_was_valid = self.prefix_valid;
+        let mut delta: i64 = 0;
+        for line in start..end {
+            let text = self.document.line_text(LineIndex(line));
+            let rows = chaus_layout::row_count(&text, self.rows_columns, self.settings.tab_stop);
+            let old = self.line_rows[line];
+            if rows != old {
+                delta += rows as i64 - old as i64;
+                self.line_rows[line] = rows;
+            }
+        }
+        if !prefix_was_valid {
+            self.prefix_valid = false;
+        } else if delta != 0 {
+            for value in &mut self.prefix_rows[start + 1..] {
+                *value = (*value as i64 + delta).max(0) as usize;
+            }
+        }
     }
 
     pub(crate) fn ensure_prefix(&mut self) {
@@ -318,6 +345,15 @@ impl Editor {
     pub(crate) fn total_rows(&mut self) -> usize {
         self.ensure_prefix();
         self.prefix_rows.last().copied().unwrap_or(1).max(1)
+    }
+
+    /// Total visual rows at the current wrap width, for diagnostics and tests.
+    ///
+    /// A caller editing a large document can compare this against a fresh
+    /// rebuild to prove the incremental row cache stayed consistent.
+    #[must_use]
+    pub fn visual_row_count(&mut self) -> usize {
+        self.total_rows()
     }
 
     pub(crate) fn set_wrap_columns(&mut self, columns: Option<usize>) {

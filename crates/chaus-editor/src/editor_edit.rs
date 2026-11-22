@@ -210,7 +210,7 @@ impl Editor {
     pub(crate) fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(selection) = self.document.undo() {
             self.selection = selection;
-            self.rebuild_rows();
+            self.refresh_rows(self.document.last_changed_lines());
             self.scroll_to_caret();
             self.preferred_column = None;
             self.marked = None;
@@ -222,7 +222,7 @@ impl Editor {
     pub(crate) fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(selection) = self.document.redo() {
             self.selection = selection;
-            self.rebuild_rows();
+            self.refresh_rows(self.document.last_changed_lines());
             self.scroll_to_caret();
             self.preferred_column = None;
             self.marked = None;

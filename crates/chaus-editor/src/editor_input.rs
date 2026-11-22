@@ -113,7 +113,7 @@ impl EntityInputHandler for Editor {
         cx: &mut Context<Self>,
     ) {
         if self.preedit_active && self.document.undo().is_some() {
-            self.rebuild_rows();
+            self.refresh_rows(self.document.last_changed_lines());
         }
         let text = normalize_newlines(new_text);
         let start = self
