@@ -992,6 +992,12 @@ impl Document {
         self.saved_state = state;
     }
 
+    /// Mark the current content as unsaved. Recovery uses this after restoring
+    /// a snapshot so closing the window still prompts to save.
+    pub fn mark_unsaved(&mut self) {
+        self.saved_state = self.fresh_state();
+    }
+
     /// Opaque identity of the current history state, for a late save result.
     #[must_use]
     pub fn state_token(&self) -> u64 {

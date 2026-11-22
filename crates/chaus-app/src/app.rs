@@ -110,8 +110,15 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) {
         })
         .detach();
 
+        let recovery_records = chaus_io::recovery::list();
         if paths.is_empty() {
-            open_untitled(cx);
+            if let Some(handle) = open_untitled(cx) {
+                if !recovery_records.is_empty() {
+                    let _ = handle.update(cx, |editor, window, cx| {
+                        editor.queue_recovery(recovery_records.clone(), window, cx);
+                    });
+                }
+            }
             cx.activate(true);
             return;
         }
@@ -128,14 +135,24 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) {
         cx.spawn(async move |cx| {
             let loaded = task.await;
             let mut opened = 0;
+            let mut first = None;
             for (path, result) in loaded {
-                let opened_window = cx.update(|cx| open_loaded_result(&path, result, cx).is_some());
-                if opened_window {
+                let handle = cx.update(|cx| open_loaded_result(&path, result, cx));
+                if let Some(handle) = handle {
                     opened += 1;
+                    if first.is_none() {
+                        first = Some(handle);
+                    }
                 }
             }
             if new_window || opened == 0 {
                 let _ = cx.update(open_untitled);
+            }
+            if let Some(handle) = first {
+                let records = recovery_records.clone();
+                let _ = handle.update(cx, |editor, window, cx| {
+                    editor.queue_recovery(records, window, cx);
+                });
             }
             cx.update(|cx| cx.activate(true));
         })

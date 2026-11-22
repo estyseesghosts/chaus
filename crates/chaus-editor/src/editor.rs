@@ -1,11 +1,13 @@
 //! The `Editor` entity: document, caret, scroll and per-window settings.
 
+use std::collections::VecDeque;
 use std::ops::Range;
 
 use chaus_core::document::{Document, LineRange};
 use chaus_core::eol::{Eol, EolMap};
 use chaus_core::position::{CharOffset, CharRange, LineIndex, Selection};
 use chaus_core::settings::Settings;
+use chaus_io::recovery::RecoveryRecord;
 use chaus_io::LoadedFile;
 use chaus_vim::Engine;
 use gpui::prelude::FluentBuilder as _;
@@ -28,6 +30,7 @@ use crate::editor_keys::{
     SelectDown, SelectEnd, SelectHome, SelectLeft, SelectRight, SelectUp, SelectWordLeft,
     SelectWordRight, ToggleVim, Undo, Up, WordLeft, WordRight, KEY_CONTEXT,
 };
+use crate::editor_recovery::{new_recovery_id, RecoveryPromptFocus};
 use crate::geometry::Geometry;
 
 /// One editor window.
@@ -55,6 +58,10 @@ pub struct Editor {
     pub(crate) close_focus: ClosePromptFocus,
     pub(crate) conflict_prompt: Option<chaus_io::SaveConflict>,
     pub(crate) conflict_focus: ConflictPromptFocus,
+    pub(crate) recovery_queue: VecDeque<RecoveryRecord>,
+    pub(crate) recovery_focus: RecoveryPromptFocus,
+    pub(crate) recovery_key: u64,
+    pub(crate) recovery_epoch: u64,
     pub(crate) force_next_save: bool,
     pub(crate) vim: bool,
     pub(crate) vim_engine: Engine,
@@ -89,6 +96,7 @@ impl Editor {
         }
         let close_focus = ClosePromptFocus::new(cx);
         let conflict_focus = ConflictPromptFocus::new(cx);
+        let recovery_focus = RecoveryPromptFocus::new(cx);
         let mut editor = Self {
             document,
             file,
@@ -113,6 +121,10 @@ impl Editor {
             close_focus,
             conflict_prompt: None,
             conflict_focus,
+            recovery_queue: VecDeque::new(),
+            recovery_focus,
+            recovery_key: new_recovery_id(),
+            recovery_epoch: 0,
             force_next_save: false,
             vim,
             vim_engine: Engine::new(mappings),
@@ -325,6 +337,8 @@ impl Render for Editor {
             .conflict_prompt
             .is_some()
             .then(|| self.render_conflict_prompt(cx));
+        let recovery_prompt =
+            (!self.recovery_queue.is_empty()).then(|| self.render_recovery_prompt(cx));
         let vim_label = self.vim_mode_label();
         let content = div()
             .id("chaus-editor")
@@ -523,7 +537,8 @@ impl Render for Editor {
             })
             .when_some(find_bar, |element, bar| element.child(bar))
             .when_some(close_prompt, |element, sheet| element.child(sheet))
-            .when_some(conflict_prompt, |element, sheet| element.child(sheet));
+            .when_some(conflict_prompt, |element, sheet| element.child(sheet))
+            .when_some(recovery_prompt, |element, sheet| element.child(sheet));
         silvestris::chrome::WindowFrame::new(title).child(content)
     }
 }

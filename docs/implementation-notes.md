@@ -68,7 +68,13 @@ app-owned. Bundled fonts come from Silvestris; do not add a second copy.
   been smoke-tested in this Windows environment.
 - The save-conflict and dirty-close sheets cover the normal paths. Reload after
   a conflict replaces the document; there is no three-way merge.
-- No crash-recovery snapshots and no external file watcher.
+- Dirty documents write a debounced crash-recovery snapshot under the platform
+  state directory (`%LOCALAPPDATA%\Chaus\Recovery`, `$XDG_STATE_HOME/chaus/recovery`,
+  or `~/.local/state/chaus/recovery`). Launch offers Recover/Discard per
+  snapshot, and saving or discarding removes it. Recovery is best-effort and
+  does not replace a power-failure test.
+- No external file watcher; changes made by other programs are detected when a
+  save conflict is checked.
 - Open and save run on the background executor, but a save still expands the
   document into one string and one byte buffer before writing. Initial row
   layout after a load runs on the UI thread. Large files are not yet measured.

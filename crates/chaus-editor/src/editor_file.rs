@@ -78,6 +78,8 @@ impl Editor {
                 self.preedit_start = None;
                 self.preedit_active = false;
                 self.force_next_save = false;
+                self.remove_recovery_snapshot();
+                self.reset_recovery_key();
                 self.document.cancel_user_operation();
                 self.vim_engine.reset();
                 self.rebuild_rows();
@@ -236,6 +238,8 @@ impl Editor {
                 self.force_next_save = false;
                 self.conflict_prompt = None;
                 self.document.mark_saved_at(state);
+                self.remove_recovery_snapshot();
+                self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
                 if close_after && !self.document.is_dirty() {
                     window.remove_window();
                     return;

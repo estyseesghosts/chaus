@@ -30,6 +30,7 @@ impl Editor {
             || self.find_bar.is_some()
             || self.close_prompt
             || self.conflict_prompt.is_some()
+            || !self.recovery_queue.is_empty()
         {
             return false;
         }
@@ -171,7 +172,7 @@ impl Editor {
                     window.remove_window();
                 }
             }
-            "q!" => window.remove_window(),
+            "q!" => self.discard_and_close(window),
             "wq" => {
                 self.save_inner(true, cx);
             }

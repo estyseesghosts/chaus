@@ -39,6 +39,7 @@ impl Editor {
             return false;
         }
         if !self.document.is_dirty() {
+            self.remove_recovery_snapshot();
             return true;
         }
         self.close_prompt = true;
@@ -56,6 +57,7 @@ impl Editor {
 
     pub(crate) fn discard_and_close(&mut self, window: &mut Window) {
         self.close_prompt = false;
+        self.remove_recovery_snapshot();
         window.remove_window();
     }
 

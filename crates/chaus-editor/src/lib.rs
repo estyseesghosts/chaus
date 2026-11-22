@@ -17,6 +17,7 @@ mod editor_input;
 mod editor_keys;
 mod editor_paint;
 mod editor_pointer;
+mod editor_recovery;
 mod editor_vim;
 mod geometry;
 mod paint_row;

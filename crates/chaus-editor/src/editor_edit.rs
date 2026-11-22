@@ -14,11 +14,12 @@ impl Editor {
     /// Invalidate layout after a document change. Any change invalidates a
     /// conflict-overwrite decision because the next save now contains
     /// different content.
-    pub(crate) fn after_change(&mut self, affected: LineRange) {
+    pub(crate) fn after_change(&mut self, affected: LineRange, cx: &mut Context<Self>) {
         self.force_next_save = false;
         self.refresh_rows(affected);
         self.marked = None;
         self.scroll_to_caret();
+        self.schedule_recovery(cx);
     }
 
     pub(crate) fn replace_selection(
@@ -37,7 +38,7 @@ impl Editor {
             EditTransaction::new(cause, TextEdit::new(range, text), self.selection, after);
         if let Ok(result) = self.document.apply(transaction) {
             self.selection = after.clamp(self.document.len_chars());
-            self.after_change(result.affected_lines);
+            self.after_change(result.affected_lines, cx);
             cx.notify();
         }
     }
@@ -171,7 +172,7 @@ impl Editor {
         );
         if let Ok(result) = self.document.apply(transaction) {
             self.selection = after;
-            self.after_change(result.affected_lines);
+            self.after_change(result.affected_lines, cx);
             cx.notify();
         }
     }
@@ -247,6 +248,10 @@ impl Editor {
     }
 
     pub(crate) fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.recovery_queue.is_empty() {
+            self.dismiss_recovery(window, cx);
+            return;
+        }
         if self.find_bar.is_some() {
             self.close_find(window, cx);
             return;
