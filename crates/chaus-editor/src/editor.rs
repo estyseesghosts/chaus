@@ -351,6 +351,10 @@ impl Render for Editor {
         let vim_label = self.vim_mode_label();
         let content = div()
             .id("chaus-editor")
+            .track_focus(&self.focus)
+            // The focus handle must be tracked by an element in the rendered
+            // tree, otherwise GPUI never adds `ChausEditor` to the key-dispatch
+            // path and every action binding silently does nothing.
             .key_context(KEY_CONTEXT)
             .size_full()
             .relative()
