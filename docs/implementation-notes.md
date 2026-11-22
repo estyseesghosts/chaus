@@ -60,6 +60,24 @@ OFL-1.1 text and SHA-256 of each face. It is registered with GPUI and selected
 through Silvestris's public per-theme `FontOverrides` API, so Aqua typography
 and every measured size stay unchanged.
 
+## Soft wrapping
+
+`WrapMode` has three values: `Word` (default), `Character`, and `None`.
+`set wrap=word`, `set wrap=char`, `set wrap=none`, the legacy `set wrap` /
+`set nowrap`, `:set wrap=...`, and View → Wrap all drive the same setting.
+`chaus-layout` implements UAX #14 word-preferred wrapping through
+`unicode-linebreak`: each row takes the last permitted break that fits; when no
+break fits (a long URL, path or token) it falls back to the furthest fitting
+grapheme. Byte offsets from the line-break crate are converted to char offsets
+and snapped to grapheme boundaries, so combining sequences, CJK and ZWJ emoji
+are never split. Trailing whitespace stays on the final row rather than making a
+blank one. Tabs keep their stops anchored to the logical line, continuation
+rows start at the normal left inset, and the source text and char offsets are
+untouched. A single `Rows` walker backs `row_count`, `segments` and the
+editor's painting, caret and hit-testing, so the caches cannot disagree.
+Changing the mode reflows the window without touching the document or undo
+history; `None` restores horizontal scrolling.
+
 ## Known gaps in this increment
 
 - The titlebar carries File/Edit/View menus built from Silvestris's

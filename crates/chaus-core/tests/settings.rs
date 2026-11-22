@@ -1,6 +1,6 @@
 //! Rc-file parsing, defaults and diagnostics.
 
-use chaus_core::settings::{parse_rc, LineRole, SettingKey, ThemeName};
+use chaus_core::settings::{parse_rc, LineRole, SettingKey, ThemeName, WrapMode};
 
 const SAMPLE: &str = r#"" chaus settings
 set theme=geist-dark
@@ -49,7 +49,7 @@ fn invalid_lines_do_not_discard_valid_settings() {
         parsed.settings.font_family, None,
         "without `set font`, the active theme supplies the face"
     );
-    assert!(parsed.settings.wrap);
+    assert_eq!(parsed.settings.wrap, WrapMode::Word);
     assert_eq!(parsed.settings.tab_stop, 4, "invalid value keeps default");
     assert_eq!(parsed.settings.theme, ThemeName::GeistDark);
     assert_eq!(parsed.diagnostics.len(), 3);
@@ -60,11 +60,11 @@ fn invalid_lines_do_not_discard_valid_settings() {
 fn boolean_negation_works_for_every_boolean() {
     let parsed = parse_rc("set novim\nset nowrap\nset noexpandtab\n");
     assert!(!parsed.settings.vim);
-    assert!(!parsed.settings.wrap);
+    assert_eq!(parsed.settings.wrap, WrapMode::None);
     assert!(!parsed.settings.expand_tabs);
     let parsed = parse_rc("set vim\nset wrap\nset expandtab\n");
     assert!(parsed.settings.vim);
-    assert!(parsed.settings.wrap);
+    assert_eq!(parsed.settings.wrap, WrapMode::Word);
     assert!(parsed.settings.expand_tabs);
 }
 

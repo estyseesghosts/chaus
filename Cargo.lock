@@ -833,6 +833,7 @@ dependencies = [
 name = "chaus-layout"
 version = "0.1.0"
 dependencies = [
+ "unicode-linebreak",
  "unicode-segmentation",
  "unicode-width",
 ]

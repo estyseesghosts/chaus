@@ -1,10 +1,11 @@
 //! Soft-wrap geometry independent of GPUI.
 //!
-//! Lines are split at column boundaries measured in grapheme clusters. Tabs
-//! expand to the next tab stop, wide CJK/emoji graphemes occupy two columns and
-//! combining sequences/zero-width joiners stay attached to their base. The
-//! same functions drive painting, caret placement and hit testing so those
-//! three can never disagree.
+//! A hard line is split into visual rows at either a Unicode line-break
+//! opportunity (the default, word-preferred policy) or the furthest grapheme
+//! that fits. Tabs expand to the next tab stop, wide CJK/emoji graphemes occupy
+//! two columns and combining sequences/zero-width joiners stay attached to
+//! their base. One shared row walker drives [`segments`], [`row_count`], caret
+//! placement, hit testing and selection, so those can never disagree.
 //!
 //! Tab stops are measured from the start of the logical line, never from the
 //! start of a visual row. Resizing the window therefore changes where a line
@@ -12,9 +13,24 @@
 //! the columns recorded in each [`Segment`]. A grapheme or an expanded tab is
 //! never split across rows; when a tab does not fit it moves whole to the next
 //! row, which can leave that row one tab stop wider than requested.
+//!
+//! Wrapping is visual only: the source text and every char offset are kept
+//! exactly as they were.
 
+use unicode_linebreak::linebreaks;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+/// How a hard line is split when it does not fit the available width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WrapPolicy {
+    /// Break at the furthest grapheme that fits.
+    Character,
+    /// Break at the last Unicode line-break opportunity that fits, and fall
+    /// back to grapheme boundaries when no opportunity fits (an oversized
+    /// token, URL or path).
+    Word,
+}
 
 /// One visual row of a hard line.
 #[non_exhaustive]
@@ -44,6 +60,29 @@ impl Segment {
     }
 }
 
+/// One row produced by [`rows`] without allocating its display string.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisualRow {
+    /// Char offset of the row start within the hard line.
+    pub char_start: usize,
+    /// Char offset one past the row end within the hard line.
+    pub char_end: usize,
+    /// Visual columns before this row (wrapping included).
+    pub start_column: usize,
+    /// Number of visual columns covered by this row.
+    pub columns: usize,
+    grapheme_start: usize,
+    grapheme_end: usize,
+}
+
+impl VisualRow {
+    #[must_use]
+    pub fn end_column(&self) -> usize {
+        self.start_column + self.columns
+    }
+}
+
 /// Clamp absolute logical-line selection columns to this segment and return
 /// segment-local columns. Returns `None` when the selection does not cover any
 /// cell on this visual row.
@@ -69,6 +108,14 @@ fn tab_width(column: usize, tab_stop: usize) -> usize {
     tab_stop - (column % tab_stop)
 }
 
+fn piece_width(grapheme: &str, column: usize, tab_stop: usize) -> usize {
+    if grapheme == "\t" {
+        tab_width(column, tab_stop)
+    } else {
+        grapheme.width()
+    }
+}
+
 /// Preferred floating find-bar width for a window of `available_width`.
 ///
 /// The bar keeps a 10px inset on both sides and never grows past 470 logical
@@ -78,85 +125,250 @@ pub fn find_bar_width(available_width: f32) -> f32 {
     (available_width - 20.0).clamp(0.0, 470.0)
 }
 
-/// Split `text` into visual rows. `max_columns = None` means no soft wrap.
-#[must_use]
-pub fn segments(text: &str, max_columns: Option<usize>, tab_stop: usize) -> Vec<Segment> {
-    let max_columns = max_columns.filter(|columns| *columns > 0);
-    let mut result = Vec::new();
-    let mut display = String::new();
-    let mut char_start = 0usize;
-    let mut char_index = 0usize;
-    let mut start_column = 0usize;
-    let mut width = 0usize;
+struct Grapheme<'a> {
+    text: &'a str,
+    char_start: usize,
+    char_end: usize,
+    /// A Unicode line-break opportunity immediately before this grapheme.
+    break_before: bool,
+}
 
-    for grapheme in text.graphemes(true) {
-        let is_tab = grapheme == "\t";
-        let piece_width = if is_tab {
-            tab_width(start_column + width, tab_stop)
-        } else {
-            grapheme.width()
-        };
+/// Iterator over the visual rows of one hard line.
+pub struct Rows<'a> {
+    graphemes: Vec<Grapheme<'a>>,
+    policy: WrapPolicy,
+    max_columns: Option<usize>,
+    tab_stop: usize,
+    next_grapheme: usize,
+    next_char: usize,
+    column: usize,
+    finished: bool,
+}
 
-        if let Some(max) = max_columns {
-            if width > 0 && width + piece_width > max {
-                result.push(Segment {
-                    display: std::mem::take(&mut display),
-                    char_start,
-                    char_end: char_index,
-                    start_column,
-                    columns: width,
-                });
-                char_start = char_index;
-                start_column += width;
-                width = 0;
-            }
+impl<'a> Rows<'a> {
+    fn new(text: &'a str, max_columns: Option<usize>, tab_stop: usize, policy: WrapPolicy) -> Self {
+        let max_columns = max_columns.filter(|columns| *columns > 0);
+        let mut graphemes = Vec::new();
+        let mut char_index = 0usize;
+        for grapheme in text.graphemes(true) {
+            let char_start = char_index;
+            char_index += grapheme.chars().count();
+            graphemes.push(Grapheme {
+                text: grapheme,
+                char_start,
+                char_end: char_index,
+                break_before: false,
+            });
         }
-
-        if is_tab {
-            display.extend(std::iter::repeat_n(' ', piece_width));
-        } else {
-            display.push_str(grapheme);
+        if policy == WrapPolicy::Word && !graphemes.is_empty() {
+            mark_break_opportunities(text, &mut graphemes);
         }
-        width += piece_width;
-        char_index += grapheme.chars().count();
+        Self {
+            graphemes,
+            policy,
+            max_columns,
+            tab_stop,
+            next_grapheme: 0,
+            next_char: 0,
+            column: 0,
+            finished: false,
+        }
     }
 
-    result.push(Segment {
-        display,
-        char_start,
-        char_end: char_index,
-        start_column,
-        columns: width,
-    });
+    fn width_between(&self, start_column: usize, from: usize, to: usize) -> usize {
+        let mut column = start_column;
+        for grapheme in &self.graphemes[from..to] {
+            column += piece_width(grapheme.text, column, self.tab_stop);
+        }
+        column - start_column
+    }
+
+    fn display_between(&self, from: usize, to: usize, start_column: usize) -> String {
+        let mut display = String::new();
+        let mut column = start_column;
+        for grapheme in &self.graphemes[from..to] {
+            let width = piece_width(grapheme.text, column, self.tab_stop);
+            if grapheme.text == "\t" {
+                display.extend(std::iter::repeat_n(' ', width));
+            } else {
+                display.push_str(grapheme.text);
+            }
+            column += width;
+        }
+        display
+    }
+}
+
+/// Map every UAX #14 break opportunity to a grapheme boundary.
+///
+/// `unicode-linebreak` reports UTF-8 byte offsets. A grapheme boundary is the
+/// only safe place to break, so an opportunity that falls inside a grapheme is
+/// ignored rather than splitting a combining sequence or ZWJ emoji.
+fn mark_break_opportunities(text: &str, graphemes: &mut [Grapheme<'_>]) {
+    // Byte offset -> char offset, valid at every char boundary.
+    let mut byte_to_char = vec![0usize; text.len() + 1];
+    let mut char_index = 0usize;
+    for (byte, _) in text.char_indices() {
+        byte_to_char[byte] = char_index;
+        char_index += 1;
+    }
+    byte_to_char[text.len()] = char_index;
+
+    let mut grapheme = 0usize;
+    for (byte, _) in linebreaks(text) {
+        let char_offset = byte_to_char[byte];
+        while grapheme + 1 < graphemes.len() && graphemes[grapheme + 1].char_start <= char_offset {
+            grapheme += 1;
+        }
+        if graphemes[grapheme].char_start == char_offset {
+            graphemes[grapheme].break_before = true;
+        }
+    }
+}
+
+impl Iterator for Rows<'_> {
+    type Item = VisualRow;
+
+    fn next(&mut self) -> Option<VisualRow> {
+        if self.finished {
+            return None;
+        }
+        if self.graphemes.is_empty() {
+            self.finished = true;
+            return Some(VisualRow {
+                char_start: 0,
+                char_end: 0,
+                start_column: 0,
+                columns: 0,
+                grapheme_start: 0,
+                grapheme_end: 0,
+            });
+        }
+
+        let start = self.next_grapheme;
+        let start_char = self.next_char;
+        let start_column = self.column;
+        let mut end = start;
+        let mut last_break = None;
+        let mut width = 0usize;
+
+        while end < self.graphemes.len() {
+            let grapheme = &self.graphemes[end];
+            if self.policy == WrapPolicy::Word
+                && grapheme.break_before
+                && end > start
+                && self.max_columns.is_none_or(|max| width <= max)
+            {
+                last_break = Some(end);
+            }
+            let piece = piece_width(grapheme.text, start_column + width, self.tab_stop);
+            if let Some(max) = self.max_columns {
+                if width > 0 && width + piece > max {
+                    end = last_break.unwrap_or(end);
+                    break;
+                }
+            }
+            width += piece;
+            end += 1;
+        }
+
+        // Never emit a blank row made only of trailing whitespace: keep it on
+        // the final row so the visible document has no phantom line. All
+        // characters remain in row ranges and no source text is removed.
+        if self.policy == WrapPolicy::Word
+            && end < self.graphemes.len()
+            && end > start
+            && self.graphemes[end..]
+                .iter()
+                .all(|grapheme| grapheme.text.chars().all(char::is_whitespace))
+        {
+            end = self.graphemes.len();
+        }
+        if end == start {
+            // Defensive: a zero-width first grapheme must still make progress.
+            end = start + 1;
+        }
+
+        let end_char = self.graphemes[end - 1].char_end;
+        let columns = self.width_between(start_column, start, end);
+        self.next_grapheme = end;
+        self.next_char = end_char;
+        self.column = start_column + columns;
+        if end >= self.graphemes.len() {
+            self.finished = true;
+        }
+        Some(VisualRow {
+            char_start: start_char,
+            char_end: end_char,
+            start_column,
+            columns,
+            grapheme_start: start,
+            grapheme_end: end,
+        })
+    }
+}
+
+/// Iterate over the visual rows of `text`. `max_columns = None` means no soft
+/// wrap. No display strings are allocated.
+#[must_use]
+pub fn rows(
+    text: &str,
+    max_columns: Option<usize>,
+    tab_stop: usize,
+    policy: WrapPolicy,
+) -> Rows<'_> {
+    Rows::new(text, max_columns, tab_stop, policy)
+}
+
+/// Split `text` into visual rows with the given policy.
+#[must_use]
+pub fn segments_with(
+    text: &str,
+    max_columns: Option<usize>,
+    tab_stop: usize,
+    policy: WrapPolicy,
+) -> Vec<Segment> {
+    let mut iter = Rows::new(text, max_columns, tab_stop, policy);
+    let mut result = Vec::new();
+    while let Some(row) = iter.next() {
+        result.push(Segment {
+            display: iter.display_between(row.grapheme_start, row.grapheme_end, row.start_column),
+            char_start: row.char_start,
+            char_end: row.char_end,
+            start_column: row.start_column,
+            columns: row.columns,
+        });
+    }
     result
 }
 
-/// Visual rows occupied by a hard line.
+/// Visual rows occupied by a hard line under `policy`.
 ///
-/// This mirrors [`segments`] without constructing display strings, so rewrap
-/// of a large document does not allocate once per grapheme.
+/// This uses the same walker as [`segments_with`] without constructing display
+/// strings, so a rewrap of a large document does not allocate once per row.
+#[must_use]
+pub fn row_count_with(
+    text: &str,
+    max_columns: Option<usize>,
+    tab_stop: usize,
+    policy: WrapPolicy,
+) -> usize {
+    Rows::new(text, max_columns, tab_stop, policy).count()
+}
+
+/// Split `text` into visual rows at grapheme boundaries.
+///
+/// This is the character policy kept as the default of the older API; callers
+/// that want Unicode word-preferred wrapping use [`segments_with`].
+#[must_use]
+pub fn segments(text: &str, max_columns: Option<usize>, tab_stop: usize) -> Vec<Segment> {
+    segments_with(text, max_columns, tab_stop, WrapPolicy::Character)
+}
+
+/// Visual rows occupied by a hard line at grapheme boundaries.
 #[must_use]
 pub fn row_count(text: &str, max_columns: Option<usize>, tab_stop: usize) -> usize {
-    let max_columns = max_columns.filter(|columns| *columns > 0);
-    let mut rows = 1;
-    let mut width = 0usize;
-    let mut column = 0usize;
-    for grapheme in text.graphemes(true) {
-        let piece_width = if grapheme == "\t" {
-            tab_width(column, tab_stop)
-        } else {
-            grapheme.width()
-        };
-        if let Some(max) = max_columns {
-            if width > 0 && width + piece_width > max {
-                rows += 1;
-                width = 0;
-            }
-        }
-        width += piece_width;
-        column += piece_width;
-    }
-    rows
+    row_count_with(text, max_columns, tab_stop, WrapPolicy::Character)
 }
 
 /// Column of a char offset within a hard line, tab stops included.

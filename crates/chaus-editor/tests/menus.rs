@@ -105,9 +105,7 @@ fn two_windows_report_independent_checked_state() {
         });
         let editor = cx.update(|_, app| harness.read(app).editor.clone());
         draw(cx);
-        descriptor(&editor, cx, "view.vim_mode")
-            .unwrap()
-            .checked
+        descriptor(&editor, cx, "view.vim_mode").unwrap().checked
     };
     let plain_checked = {
         let (harness, cx) = app.add_window_view(|window, cx| {
@@ -118,9 +116,7 @@ fn two_windows_report_independent_checked_state() {
         });
         let editor = cx.update(|_, app| harness.read(app).editor.clone());
         draw(cx);
-        descriptor(&editor, cx, "view.vim_mode")
-            .unwrap()
-            .checked
+        descriptor(&editor, cx, "view.vim_mode").unwrap().checked
     };
 
     assert!(vim_checked, "the Vim window keeps its checkmark");

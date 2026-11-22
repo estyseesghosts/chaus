@@ -41,7 +41,7 @@ fn a_selection_spanning_wrapped_rows_returns_one_rectangle_per_row() {
     std::fs::write(&path, "a".repeat(400)).unwrap();
     let loaded = chaus_io::load(&path).expect("load fixture");
     let mut settings = Settings::default();
-    settings.wrap = true;
+    settings.wrap = chaus_core::settings::WrapMode::Word;
 
     let mut app = TestAppContext::single();
     initialize(&mut app);

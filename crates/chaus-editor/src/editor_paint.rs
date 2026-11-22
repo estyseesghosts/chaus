@@ -51,12 +51,14 @@ impl Editor {
         let caret_visible = self.caret_visible && self.focus.is_focused(window);
         let usable_width =
             (f32::from(bounds.size.width) - 2.0 * PADDING).max(f32::from(char_width));
-        let columns = self.settings.wrap.then(|| {
+        let mode = self.settings.wrap;
+        let columns = (mode != chaus_core::settings::WrapMode::None).then(|| {
             (usable_width / f32::from(char_width).max(1.0))
                 .floor()
                 .max(1.0) as usize
         });
-        self.set_wrap_columns(columns);
+        let policy = Editor::wrap_policy(mode);
+        self.set_wrap_layout(columns, policy);
 
         let visible = (f32::from(bounds.size.height) / f32::from(line_height)).ceil() as usize + 2;
         let first_row = self.scroll_row.floor().max(0.0) as usize;
@@ -74,7 +76,9 @@ impl Editor {
             let line = LineIndex(line_index);
             let line_start = self.document.line_start(line);
             let line_text = self.document.line_text(line);
-            for segment in chaus_layout::segments(&line_text, columns, self.settings.tab_stop) {
+            for segment in
+                chaus_layout::segments_with(&line_text, columns, self.settings.tab_stop, policy)
+            {
                 let y = base_y + px((row as f32 - self.scroll_row) * f32::from(line_height));
                 row += 1;
                 if y + line_height < bounds.top() {

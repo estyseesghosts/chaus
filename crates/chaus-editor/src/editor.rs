@@ -8,7 +8,7 @@ use std::time::Duration;
 use chaus_core::document::{Document, LineRange};
 use chaus_core::eol::{Eol, EolMap};
 use chaus_core::position::{CharOffset, CharRange, LineIndex, Selection};
-use chaus_core::settings::Settings;
+use chaus_core::settings::{Settings, WrapMode};
 use chaus_io::recovery::RecoveryRecord;
 use chaus_io::LoadedFile;
 use chaus_vim::Engine;
@@ -58,6 +58,10 @@ pub struct Editor {
     pub(crate) prefix_rows: Vec<usize>,
     pub(crate) prefix_valid: bool,
     pub(crate) rows_columns: Option<usize>,
+    /// Break policy used by the row cache. Kept next to the width so a change
+    /// between word and character wrapping invalidates the rows even when the
+    /// column count did not change.
+    pub(crate) rows_policy: chaus_layout::WrapPolicy,
     pub(crate) settings: Settings,
     /// Per-window zoom override in logical pixels. `None` follows
     /// `settings.font_size`; this never writes back to the rc file.
@@ -145,6 +149,7 @@ impl Editor {
             prefix_rows: Vec::new(),
             prefix_valid: false,
             rows_columns: None,
+            rows_policy: chaus_layout::WrapPolicy::Word,
             settings,
             zoom: None,
             status: None,
@@ -231,8 +236,32 @@ impl Editor {
     }
 
     pub fn set_settings(&mut self, settings: Settings) {
+        let mode = settings.wrap;
         self.settings = settings;
+        self.rows_policy = Self::wrap_policy(mode);
+        if mode == WrapMode::None {
+            self.rows_columns = None;
+        }
         self.rebuild_rows();
+    }
+
+    /// Current soft-wrap mode for this window.
+    #[must_use]
+    pub fn wrap_mode(&self) -> WrapMode {
+        self.settings.wrap
+    }
+
+    /// Change wrapping without touching the document or its undo history.
+    pub fn set_wrap_mode(&mut self, mode: WrapMode, cx: &mut Context<Self>) {
+        if self.settings.wrap == mode {
+            return;
+        }
+        let mut settings = self.settings.clone();
+        settings.wrap = mode;
+        self.set_settings(settings);
+        self.clamp_scroll();
+        self.scroll_to_caret();
+        cx.notify();
     }
 
     #[must_use]
@@ -307,6 +336,7 @@ impl Editor {
 
     pub(crate) fn rebuild_rows(&mut self) {
         let columns = self.rows_columns;
+        let policy = self.rows_policy;
         let line_count = self.document.len_lines();
         self.line_rows.clear();
         self.line_rows.reserve(line_count);
@@ -315,7 +345,7 @@ impl Editor {
         let mut total = 0;
         for line in 0..line_count {
             let text = self.document.line_text(LineIndex(line));
-            let rows = chaus_layout::row_count(&text, columns, self.settings.tab_stop);
+            let rows = chaus_layout::row_count_with(&text, columns, self.settings.tab_stop, policy);
             self.prefix_rows.push(total);
             total += rows;
             self.line_rows.push(rows);
@@ -344,7 +374,12 @@ impl Editor {
         let mut delta: i64 = 0;
         for line in start..end {
             let text = self.document.line_text(LineIndex(line));
-            let rows = chaus_layout::row_count(&text, self.rows_columns, self.settings.tab_stop);
+            let rows = chaus_layout::row_count_with(
+                &text,
+                self.rows_columns,
+                self.settings.tab_stop,
+                self.rows_policy,
+            );
             let old = self.line_rows[line];
             if rows != old {
                 delta += rows as i64 - old as i64;
@@ -389,17 +424,46 @@ impl Editor {
         self.total_rows()
     }
 
-    pub(crate) fn set_wrap_columns(&mut self, columns: Option<usize>) {
-        if self.rows_columns == columns {
+    /// Break policy implied by the current wrap mode.
+    #[must_use]
+    pub(crate) fn wrap_policy(mode: WrapMode) -> chaus_layout::WrapPolicy {
+        match mode {
+            WrapMode::Word => chaus_layout::WrapPolicy::Word,
+            _ => chaus_layout::WrapPolicy::Character,
+        }
+    }
+
+    /// Install the row width and break policy, rebuilding only when either
+    /// changed. Reflow never touches the document or its undo history.
+    pub(crate) fn set_wrap_layout(
+        &mut self,
+        columns: Option<usize>,
+        policy: chaus_layout::WrapPolicy,
+    ) {
+        if self.rows_columns == columns && self.rows_policy == policy {
             return;
         }
         self.rows_columns = columns;
+        self.rows_policy = policy;
         self.rebuild_rows();
+    }
+
+    /// Visual rows of one hard line at the current wrap width, for
+    /// diagnostics and tests. These are the exact rows used for painting,
+    /// caret placement and hit testing.
+    #[must_use]
+    pub fn visual_segments(&self, line: LineIndex) -> Vec<chaus_layout::Segment> {
+        self.segments_for(line)
     }
 
     pub(crate) fn segments_for(&self, line: LineIndex) -> Vec<chaus_layout::Segment> {
         let text = self.document.line_text(line);
-        chaus_layout::segments(&text, self.rows_columns, self.settings.tab_stop)
+        chaus_layout::segments_with(
+            &text,
+            self.rows_columns,
+            self.settings.tab_stop,
+            self.rows_policy,
+        )
     }
 
     pub(crate) fn local_row_of(&self, offset: CharOffset, line: LineIndex) -> usize {

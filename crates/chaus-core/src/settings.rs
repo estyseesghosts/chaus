@@ -50,6 +50,42 @@ impl ThemeName {
     }
 }
 
+/// How a hard line is displayed when it is wider than the window.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WrapMode {
+    /// Break at Unicode word/line-break opportunities (the default).
+    #[default]
+    Word,
+    /// Break at the furthest grapheme that fits, even inside a word.
+    Character,
+    /// Do not wrap; scroll horizontally instead.
+    None,
+}
+
+impl WrapMode {
+    /// Parse a `set wrap=...` value. The legacy `nowrap` boolean maps to
+    /// [`Self::None`] and a bare `set wrap` maps to [`Self::Word`].
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "word" => Some(Self::Word),
+            "char" | "character" => Some(Self::Character),
+            "none" | "nowrap" => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Word => "word",
+            Self::Character => "char",
+            Self::None => "none",
+        }
+    }
+}
+
 /// A normal-mode mapping from the rc file. The Vim engine validates the
 /// sequence before activation.
 #[non_exhaustive]
@@ -79,7 +115,7 @@ pub struct Settings {
     pub font_family: Option<String>,
     pub font_size: f32,
     pub line_height: f32,
-    pub wrap: bool,
+    pub wrap: WrapMode,
     pub tab_stop: usize,
     pub expand_tabs: bool,
     /// Default Vim mode for new windows.
@@ -95,7 +131,7 @@ impl Default for Settings {
             font_family: None,
             font_size: 14.0,
             line_height: 1.4,
-            wrap: true,
+            wrap: WrapMode::Word,
             tab_stop: 4,
             expand_tabs: true,
             vim: false,
@@ -379,6 +415,11 @@ fn apply_key_value(key: &str, value: &str, settings: &mut Settings) -> Result<Se
             settings.line_height = parse_positive_f32(value, "lineheight")?;
             Ok(SettingKey::LineHeight)
         }
+        "wrap" => {
+            settings.wrap =
+                WrapMode::parse(value).ok_or_else(|| format!("unknown wrap mode '{value}'"))?;
+            Ok(SettingKey::Wrap)
+        }
         "tabstop" => {
             let parsed: usize = value
                 .parse()
@@ -400,7 +441,11 @@ fn apply_boolean(word: &str, settings: &mut Settings) -> Result<SettingKey, Stri
     };
     match name {
         "wrap" => {
-            settings.wrap = enabled;
+            settings.wrap = if enabled {
+                WrapMode::Word
+            } else {
+                WrapMode::None
+            };
             Ok(SettingKey::Wrap)
         }
         "expandtab" => {

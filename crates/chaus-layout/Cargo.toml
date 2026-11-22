@@ -8,5 +8,6 @@ authors.workspace = true
 description = "Soft-wrap column geometry for chaus."
 
 [dependencies]
+unicode-linebreak = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }

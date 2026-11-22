@@ -223,7 +223,9 @@ impl Editor {
 
     fn run_set_command(&mut self, arguments: &str, cx: &mut Context<Self>) {
         if arguments.is_empty() {
-            self.set_status("usage: :set wrap|nowrap|expandtab|noexpandtab|tabstop=N");
+            self.set_status(
+                "usage: :set wrap=word|char|none|wrap|nowrap|expandtab|noexpandtab|tabstop=N",
+            );
             cx.notify();
             return;
         }
@@ -232,11 +234,11 @@ impl Editor {
         for argument in arguments.split_whitespace() {
             match argument {
                 "wrap" => {
-                    settings.wrap = true;
+                    settings.wrap = chaus_core::settings::WrapMode::Word;
                     changed = true;
                 }
                 "nowrap" => {
-                    settings.wrap = false;
+                    settings.wrap = chaus_core::settings::WrapMode::None;
                     changed = true;
                 }
                 "expandtab" => {
@@ -248,7 +250,19 @@ impl Editor {
                     changed = true;
                 }
                 _ => {
-                    if let Some(value) = argument.strip_prefix("tabstop=") {
+                    if let Some(value) = argument.strip_prefix("wrap=") {
+                        match chaus_core::settings::WrapMode::parse(value) {
+                            Some(mode) => {
+                                settings.wrap = mode;
+                                changed = true;
+                            }
+                            None => {
+                                self.set_status(format!("unknown wrap mode '{value}'"));
+                                cx.notify();
+                                return;
+                            }
+                        }
+                    } else if let Some(value) = argument.strip_prefix("tabstop=") {
                         match value.parse::<usize>() {
                             Ok(tab_stop) if (1..=16).contains(&tab_stop) => {
                                 settings.tab_stop = tab_stop;

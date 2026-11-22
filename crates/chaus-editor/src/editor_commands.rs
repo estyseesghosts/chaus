@@ -5,6 +5,7 @@
 //! so the checked Vim/Wrap items and disabled Undo/Redo follow the focused
 //! document instead of a global stale value.
 
+use chaus_core::settings::WrapMode;
 use gpui::{point, px, App, AppContext as _, Context, Entity, WeakEntity, Window};
 use silvestris::command::CommandRegistry;
 use silvestris::controls::{Button, ButtonStyle};
@@ -13,6 +14,13 @@ use silvestris::menu::PopupMenu;
 
 use crate::editor::Editor;
 use crate::editor_keys::{Copy, Cut, Paste, Redo, ToggleVim, Undo};
+
+/// View → Wrap radio items, in menu order.
+const WRAP_COMMANDS: [(&str, &str, WrapMode); 3] = [
+    ("view.wrap_word", "Word", WrapMode::Word),
+    ("view.wrap_char", "Character", WrapMode::Character),
+    ("view.wrap_none", "No Wrap", WrapMode::None),
+];
 
 fn register_command<F>(
     commands: &Entity<CommandRegistry>,
@@ -76,7 +84,15 @@ impl MenuKind {
             ],
             Self::View => vec![
                 MenuEntry::Command("view.vim_mode".into()),
-                MenuEntry::Command("view.wrap".into()),
+                MenuEntry::Separator,
+                MenuEntry::Submenu {
+                    label: "Wrap".to_string(),
+                    entries: vec![
+                        MenuEntry::Command("view.wrap_word".into()),
+                        MenuEntry::Command("view.wrap_char".into()),
+                        MenuEntry::Command("view.wrap_none".into()),
+                    ],
+                },
             ],
         };
         MenuModel {
@@ -250,15 +266,19 @@ impl Editor {
             },
         );
 
-        let editor = weak;
-        register_command(
-            &commands,
-            cx,
-            CommandDescriptor::toggle("view.wrap", "Wrap Lines", true),
-            move |_, _, cx| {
-                editor.update(cx, |editor, cx| editor.toggle_wrap(cx)).ok();
-            },
-        );
+        for (id, label, mode) in WRAP_COMMANDS {
+            let editor = weak.clone();
+            register_command(
+                &commands,
+                cx,
+                CommandDescriptor::radio(id, label, "wrap", mode == WrapMode::Word),
+                move |_, _, cx| {
+                    editor
+                        .update(cx, |editor, cx| editor.set_wrap_mode(mode, cx))
+                        .ok();
+                },
+            );
+        }
     }
 
     /// Create the popup menu on first render, when a window is available.
@@ -307,10 +327,12 @@ impl Editor {
                     .shortcut("ctrl-shift-v"),
                 cx,
             );
-            let _ = registry.publish(
-                CommandDescriptor::toggle("view.wrap", "Wrap Lines", wrap),
-                cx,
-            );
+            for (id, label, mode) in WRAP_COMMANDS {
+                let _ = registry.publish(
+                    CommandDescriptor::radio(id, label, "wrap", wrap == mode),
+                    cx,
+                );
+            }
             let _ = registry.publish(
                 CommandDescriptor::action("edit.undo", "Undo")
                     .shortcut("secondary-z")
@@ -347,16 +369,6 @@ impl Editor {
                 cx,
             );
         });
-    }
-
-    pub(crate) fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
-        self.settings.wrap = !self.settings.wrap;
-        if !self.settings.wrap {
-            self.set_wrap_columns(None);
-        }
-        self.clamp_scroll();
-        self.scroll_to_caret();
-        cx.notify();
     }
 
     pub(crate) fn render_menu_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
