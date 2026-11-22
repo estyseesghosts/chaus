@@ -284,6 +284,36 @@ impl std::error::Error for ConflictCheckError {
     }
 }
 
+/// Cheap pre-check: does the target's identity, size and mtime still match?
+///
+/// This exists so a periodic watcher can skip reading and hashing a large file
+/// on idle ticks. It is deliberately not a conflict check: a matching result
+/// means "no cheap evidence of change", not "content is unchanged". Callers
+/// must still run [`check_conflict`] at save time, and should periodically hash
+/// anyway, because timestamp granularity can hide a same-size edit.
+#[must_use]
+pub fn metadata_matches(meta: &FileMeta) -> bool {
+    let Ok(current) = fs::metadata(&meta.canonical_target) else {
+        return false;
+    };
+    if !current.is_file() || current.len() != meta.size {
+        return false;
+    }
+    if let (Some(expected), Some(actual)) = (meta.modified, current.modified().ok()) {
+        if expected != actual {
+            return false;
+        }
+    }
+    if let (Some(expected), Some(actual)) =
+        (meta.identity, platform_identity(&meta.canonical_target))
+    {
+        if expected != actual {
+            return false;
+        }
+    }
+    true
+}
+
 /// Compare the current on-disk target with the baseline captured at load.
 ///
 /// A target that cannot be read is reported as [`ConflictCheckError::Io`],

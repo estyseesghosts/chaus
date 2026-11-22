@@ -30,7 +30,8 @@ use crate::editor_keys::{
     Down, End, Escape, Find, FindNext, FindPrevious, Home, InsertNewline, InsertTab, Left, Outdent,
     Paste, Redo, Replace, Right, Save, SaveAs, SelectAll, SelectDocumentEnd, SelectDocumentStart,
     SelectDown, SelectEnd, SelectHome, SelectLeft, SelectRight, SelectUp, SelectWordLeft,
-    SelectWordRight, ToggleVim, Undo, Up, WordLeft, WordRight, KEY_CONTEXT,
+    SelectWordRight, ToggleVim, Undo, Up, WordLeft, WordRight, ZoomIn, ZoomOut, ZoomReset,
+    KEY_CONTEXT,
 };
 use crate::editor_recovery::{new_recovery_id, RecoveryPromptFocus};
 use crate::geometry::Geometry;
@@ -57,6 +58,9 @@ pub struct Editor {
     pub(crate) prefix_valid: bool,
     pub(crate) rows_columns: Option<usize>,
     pub(crate) settings: Settings,
+    /// Per-window zoom override in logical pixels. `None` follows
+    /// `settings.font_size`; this never writes back to the rc file.
+    pub(crate) zoom: Option<f32>,
     pub(crate) status: Option<String>,
     pub(crate) status_epoch: u64,
     pub(crate) find_bar: Option<FindBar>,
@@ -75,6 +79,9 @@ pub struct Editor {
     pub(crate) recovery_had_utf8_bom: bool,
     pub(crate) disk_change: Option<chaus_io::SaveConflict>,
     pub(crate) disk_epoch: u64,
+    /// Set while a watcher conflict check is running, so a slow poll of a large
+    /// file is not stacked behind a faster one.
+    pub(crate) disk_check_in_flight: bool,
     pub(crate) force_next_save: bool,
     pub(crate) vim: bool,
     pub(crate) vim_engine: Engine,
@@ -128,6 +135,7 @@ impl Editor {
             prefix_valid: false,
             rows_columns: None,
             settings,
+            zoom: None,
             status: None,
             status_epoch: 0,
             find_bar: None,
@@ -143,6 +151,7 @@ impl Editor {
             recovery_had_utf8_bom: false,
             disk_change: None,
             disk_epoch: 0,
+            disk_check_in_flight: false,
             force_next_save: false,
             vim,
             vim_engine: Engine::new(mappings),
@@ -171,6 +180,21 @@ impl Editor {
     #[must_use]
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Effective document font size for this window, including zoom.
+    #[must_use]
+    pub fn editor_font_size(&self) -> f32 {
+        self.zoom.unwrap_or(self.settings.font_size)
+    }
+
+    /// Whether a background disk conflict check is currently running.
+    ///
+    /// The watcher skips a tick while this is set, so a slow poll of a large
+    /// file is not stacked behind the next one.
+    #[must_use]
+    pub fn is_checking_disk(&self) -> bool {
+        self.disk_check_in_flight
     }
 
     pub fn set_settings(&mut self, settings: Settings) {
@@ -410,8 +434,6 @@ impl Render for Editor {
             .relative()
             .bg(background)
             .text_color(silvestris::convert::hsla(theme.colors.text))
-            .font_family(theme.type_.mono)
-            .text_size(px(self.settings.font_size))
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(
                 MouseButton::Left,
@@ -562,6 +584,15 @@ impl Render for Editor {
             }))
             .on_action(cx.listener(|editor, action: &Escape, window, cx| {
                 editor.escape(action, window, cx);
+            }))
+            .on_action(cx.listener(|editor, action: &ZoomIn, _, cx| {
+                editor.zoom_in_action(action, cx);
+            }))
+            .on_action(cx.listener(|editor, action: &ZoomOut, _, cx| {
+                editor.zoom_out_action(action, cx);
+            }))
+            .on_action(cx.listener(|editor, action: &ZoomReset, _, cx| {
+                editor.zoom_reset_action(action, cx);
             }))
             .child(EditorElement {
                 editor: cx.entity(),

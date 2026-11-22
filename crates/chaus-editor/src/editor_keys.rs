@@ -49,6 +49,9 @@ actions!(
         FindPrevious,
         ToggleVim,
         Escape,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
     ]
 );
 
@@ -107,6 +110,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(primary!("shift-home"), SelectDocumentStart, context),
         KeyBinding::new(primary!("shift-end"), SelectDocumentEnd, context),
         KeyBinding::new("ctrl-shift-v", ToggleVim, context),
+        KeyBinding::new(primary!("="), ZoomIn, context),
+        KeyBinding::new(primary!("shift-="), ZoomIn, context),
+        KeyBinding::new(primary!("-"), ZoomOut, context),
+        KeyBinding::new(primary!("0"), ZoomReset, context),
     ];
     if !cfg!(target_os = "macos") {
         bindings.extend([

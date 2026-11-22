@@ -13,44 +13,70 @@ use silvestris::ActiveTheme;
 use crate::editor::Editor;
 
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
+/// Force a content hash even when size/mtime/identity are unchanged. Timestamp
+/// granularity can hide a same-size edit, so metadata alone is never trusted
+/// forever.
+const FORCED_HASH_TICKS: u32 = 15;
 
 impl Editor {
     pub(crate) fn start_disk_watch(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |editor, cx| loop {
-            cx.background_executor().timer(WATCH_INTERVAL).await;
-            let snapshot = editor
-                .update(cx, |editor, _| {
-                    if editor.saving || editor.opening {
+        cx.spawn(async move |editor, cx| {
+            let mut ticks: u32 = 0;
+            loop {
+                cx.background_executor().timer(WATCH_INTERVAL).await;
+                let snapshot = editor.update(cx, |editor, _| {
+                    if editor.saving || editor.opening || editor.disk_check_in_flight {
                         return None;
                     }
                     editor
                         .file
                         .as_ref()
                         .map(|file| (file.meta.clone(), editor.disk_epoch))
-                })
-                .ok()
-                .flatten();
-            let Some((meta, epoch)) = snapshot else {
-                continue;
-            };
-            let task = cx
-                .background_executor()
-                .spawn(async move { chaus_io::check_conflict(&meta) });
-            let result = task.await;
-            if editor
-                .update(cx, |editor, cx| {
-                    editor.apply_disk_check(epoch, result, cx);
-                })
-                .is_err()
-            {
-                break;
+                });
+                // The entity is gone: stop the timer instead of looping forever
+                // against a closed window.
+                let Ok(snapshot) = snapshot else {
+                    break;
+                };
+                // Entity still alive but nothing is open (or a save/open is in
+                // progress): keep waiting without touching the disk.
+                let Some((meta, epoch)) = snapshot else {
+                    continue;
+                };
+                ticks = ticks.wrapping_add(1);
+                let force_hash = ticks % FORCED_HASH_TICKS == 0;
+                if editor
+                    .update(cx, |editor, _| {
+                        editor.disk_check_in_flight = true;
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                let task = cx.background_executor().spawn(async move {
+                    if force_hash || !chaus_io::metadata_matches(&meta) {
+                        chaus_io::check_conflict(&meta)
+                    } else {
+                        Ok(())
+                    }
+                });
+                let result = task.await;
+                if editor
+                    .update(cx, |editor, cx| {
+                        editor.apply_disk_check(epoch, result, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();
     }
 
     /// Check the open file once, off the UI thread. Used by the periodic
-    /// watcher and by deterministic tests.
+    /// watcher and by deterministic tests. Always hashes, so it is also the
+    /// path that catches same-size edits hidden by coarse timestamps.
     pub fn check_disk_now(&mut self, cx: &mut Context<Self>) {
         let Some((meta, epoch)) = self
             .file
@@ -59,6 +85,10 @@ impl Editor {
         else {
             return;
         };
+        if self.disk_check_in_flight {
+            return;
+        }
+        self.disk_check_in_flight = true;
         let task = cx
             .background_executor()
             .spawn(async move { chaus_io::check_conflict(&meta) });
@@ -79,6 +109,7 @@ impl Editor {
         result: Result<(), ConflictCheckError>,
         cx: &mut Context<Self>,
     ) {
+        self.disk_check_in_flight = false;
         if epoch != self.disk_epoch {
             return;
         }

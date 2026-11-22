@@ -20,6 +20,7 @@ mod editor_pointer;
 mod editor_recovery;
 mod editor_vim;
 mod editor_watch;
+mod editor_zoom;
 mod geometry;
 mod paint_row;
 

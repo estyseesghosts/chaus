@@ -30,8 +30,8 @@ impl Editor {
         bounds: Bounds<Pixels>,
         theme: &Theme,
     ) -> PaintFrame {
-        let font_size = px(self.settings.font_size);
-        let line_height = px(self.settings.font_size * self.settings.line_height);
+        let font_size = px(self.editor_font_size());
+        let line_height = px(self.editor_font_size() * self.settings.line_height);
         let font_family = self
             .settings
             .font_family
