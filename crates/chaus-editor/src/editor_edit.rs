@@ -1,6 +1,6 @@
 //! Editing operations and the actions that trigger them.
 
-use chaus_core::document::{EditCause, EditResult, EditTransaction, TextEdit};
+use chaus_core::document::{EditCause, EditResult, EditTransaction, LineRange, TextEdit};
 use chaus_core::position::{CharOffset, Selection};
 use gpui::{ClipboardItem, Context, Window};
 
@@ -12,16 +12,48 @@ use crate::editor_keys::{
 };
 
 impl Editor {
-    /// Invalidate layout after a document change. Any change invalidates a
-    /// conflict-overwrite decision because the next save now contains
-    /// different content.
+    /// Complete an ordinary edit. Every document-changing path routes through
+    /// here so layout, recovery, highlighting and the forced-overwrite decision
+    /// cannot drift apart.
     pub(crate) fn after_change(&mut self, result: &EditResult, cx: &mut Context<Self>) {
-        self.force_next_save = false;
-        self.refresh_rows(result.affected_lines);
+        self.after_document_mutation(result.affected_lines, cx);
+        self.clear_composition();
         self.after_highlight_edit(result, cx);
-        self.marked = None;
+    }
+
+    /// Complete an IME preedit update without clearing the marked range that
+    /// the composition just installed.
+    pub(crate) fn after_composition_change(&mut self, result: &EditResult, cx: &mut Context<Self>) {
+        self.after_document_mutation(result.affected_lines, cx);
+        self.after_highlight_edit(result, cx);
+    }
+
+    /// Side effects shared by every mutation: standard edits, Vim, undo/redo,
+    /// IME, find/replace, formatting and indentation. Recovery is debounced and
+    /// epoch-tagged, so a clean document retires the snapshot instead of
+    /// writing a stale one.
+    pub(crate) fn after_document_mutation(&mut self, affected: LineRange, cx: &mut Context<Self>) {
+        self.force_next_save = false;
+        self.refresh_rows(affected);
         self.scroll_to_caret();
         self.schedule_recovery(cx);
+    }
+
+    pub(crate) fn clear_composition(&mut self) {
+        self.marked = None;
+        self.preedit_start = None;
+        self.preedit_active = false;
+    }
+
+    /// Complete an undo/redo. `EditResult` is not available because history
+    /// replays whole transactions, so highlighting reparses from the current
+    /// revision.
+    pub(crate) fn after_history_change(&mut self, cx: &mut Context<Self>) {
+        self.after_document_mutation(self.document.last_changed_lines(), cx);
+        self.clear_composition();
+        self.preferred_column = None;
+        self.schedule_highlight(None, cx);
+        cx.notify();
     }
 
     pub(crate) fn replace_selection(
@@ -219,26 +251,14 @@ impl Editor {
     pub(crate) fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(selection) = self.document.undo() {
             self.selection = selection;
-            self.refresh_rows(self.document.last_changed_lines());
-            self.schedule_highlight(None, cx);
-            self.scroll_to_caret();
-            self.preferred_column = None;
-            self.marked = None;
-            self.force_next_save = false;
-            cx.notify();
+            self.after_history_change(cx);
         }
     }
 
     pub(crate) fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(selection) = self.document.redo() {
             self.selection = selection;
-            self.refresh_rows(self.document.last_changed_lines());
-            self.schedule_highlight(None, cx);
-            self.scroll_to_caret();
-            self.preferred_column = None;
-            self.marked = None;
-            self.force_next_save = false;
-            cx.notify();
+            self.after_history_change(cx);
         }
     }
 

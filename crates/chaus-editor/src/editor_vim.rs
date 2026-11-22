@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use chaus_core::position::Selection;
+use chaus_core::position::{DocumentRevision, Selection};
 use chaus_vim::{Key as VimKey, Mode, Outcome};
 use gpui::{Context, KeyDownEvent, Keystroke, Window};
 
@@ -87,11 +87,12 @@ impl Editor {
                 other => other,
             };
         }
+        let before = self.document.revision();
         let outcome = self
             .vim_engine
             .handle_key(key, &mut self.document, &mut self.selection);
         let consumed = !matches!(outcome, Outcome::Unhandled);
-        self.apply_vim_outcome(outcome, window, cx);
+        self.apply_vim_outcome(outcome, before, window, cx);
         self.arm_mapping_timeout(cx);
         self.suppress_text_input = consumed;
         consumed
@@ -111,10 +112,11 @@ impl Editor {
                     {
                         return;
                     }
+                    let before = editor.document.revision();
                     let outcome = editor
                         .vim_engine
                         .resolve_mapping_timeout(&mut editor.document, &mut editor.selection);
-                    editor.apply_vim_outcome(outcome, window, cx);
+                    editor.apply_vim_outcome(outcome, before, window, cx);
                     cx.notify();
                 })
                 .ok();
@@ -131,26 +133,39 @@ impl Editor {
         if !self.vim {
             return false;
         }
+        let before = self.document.revision();
         let outcome =
             self.vim_engine
                 .handle_key(VimKey::Escape, &mut self.document, &mut self.selection);
-        self.apply_vim_outcome(outcome, window, cx);
+        self.apply_vim_outcome(outcome, before, window, cx);
         true
     }
 
-    fn apply_vim_outcome(&mut self, outcome: Outcome, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_vim_outcome(
+        &mut self,
+        outcome: Outcome,
+        before: DocumentRevision,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The engine normally reports `Changed`, but deriving the revision
+        // comparison keeps bookkeeping correct if an edit path forgets to.
+        let mutated = self.document.revision() != before || matches!(outcome, Outcome::Changed);
+        if mutated {
+            self.after_document_mutation(self.document.last_changed_lines(), cx);
+            self.clear_composition();
+            self.preferred_column = None;
+            self.schedule_highlight(None, cx);
+            cx.notify();
+        }
         match outcome {
             Outcome::Unhandled => {}
-            Outcome::Changed => {
-                let affected = self.document.last_changed_lines();
-                self.refresh_rows(affected);
-                self.scroll_to_caret();
-                self.force_next_save = false;
-                cx.notify();
-            }
+            Outcome::Changed => {}
             Outcome::Handled => {
-                self.scroll_to_caret();
-                cx.notify();
+                if !mutated {
+                    self.scroll_to_caret();
+                    cx.notify();
+                }
             }
             Outcome::Message(message) => {
                 self.flash_status(message, cx);

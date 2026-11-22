@@ -168,7 +168,7 @@ impl EntityInputHandler for Editor {
             self.preedit_start = Some(start);
             self.preedit_active = true;
             self.marked = Some(CharRange::new(start, after.head));
-            self.after_change(&result, cx);
+            self.after_composition_change(&result, cx);
             window.notify_text_input_changed(&self.focus);
             cx.notify();
         }
