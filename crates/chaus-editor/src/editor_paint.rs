@@ -1,11 +1,10 @@
 //! Row layout and paint preparation.
 
 use chaus_core::position::{CharOffset, LineIndex};
-use chaus_highlight::TokenKind;
+use chaus_highlight::{Span, TokenKind};
 use gpui::{fill, point, px, size, Bounds, PaintQuad, Pixels, SharedString, TextRun, Window};
 use silvestris::convert::hsla;
 use silvestris::core::tokens::Theme;
-use unicode_width::UnicodeWidthChar as _;
 
 use crate::editor::Editor;
 use crate::geometry::PADDING;
@@ -171,6 +170,30 @@ impl Editor {
         )
     }
 
+    /// Byte length and syntax kind of each painted run on one visual row.
+    ///
+    /// This is the diagnostic form of the runs passed to GPUI. Lengths index
+    /// `Segment::display`, whose tab expansion and grapheme segmentation come
+    /// from `chaus-layout`; their sum always equals its UTF-8 length.
+    #[must_use]
+    pub fn syntax_run_lengths(
+        &self,
+        line: LineIndex,
+        segment_index: usize,
+    ) -> Option<Vec<(usize, Option<TokenKind>)>> {
+        let text = self.document.line_text(line);
+        let segments = self.segments_for(line);
+        let segment = segments.get(segment_index)?;
+        let spans = self.highlight_spans();
+        Some(syntax_run_lengths(
+            spans,
+            &text,
+            self.document.line_start(line).0,
+            segment,
+            self.settings.tab_stop,
+        ))
+    }
+
     /// Split one visual row into GPUI runs by the current highlight spans.
     ///
     /// Runs are counted in bytes of `segment.display`, where a tab became
@@ -192,59 +215,16 @@ impl Editor {
                 ..base.clone()
             }];
         }
-        let segment_start = line_start + segment.char_start;
-        let mut span_index = spans.partition_point(|span| span.range.end <= segment_start);
-        let mut column = segment.start_column;
-        let mut display_bytes = 0usize;
-        let mut run_start = 0usize;
-        let mut run_kind: Option<TokenKind> = None;
-        let mut runs = Vec::new();
-        for (index, character) in line
-            .chars()
-            .skip(segment.char_start)
-            .take(segment.char_end.saturating_sub(segment.char_start))
-            .enumerate()
-        {
-            let offset = segment_start + index;
-            while span_index < spans.len() && spans[span_index].range.end <= offset {
-                span_index += 1;
-            }
-            let kind = spans
-                .get(span_index)
-                .filter(|span| span.range.contains(&offset))
-                .map(|span| span.kind);
-            if run_kind.is_none() && index == 0 {
-                run_kind = kind;
-            } else if kind != run_kind {
-                if display_bytes > run_start {
-                    runs.push(run(display_bytes - run_start, run_kind, base, theme));
-                }
-                run_start = display_bytes;
-                run_kind = kind;
-            }
-            let width = if character == '\t' {
-                let stop = self.settings.tab_stop.max(1);
-                stop - (column % stop)
-            } else {
-                character.width().unwrap_or(0)
-            };
-            display_bytes += if character == '\t' {
-                width
-            } else {
-                character.len_utf8()
-            };
-            column += width;
-        }
-        if display_bytes > run_start {
-            runs.push(run(display_bytes - run_start, run_kind, base, theme));
-        }
-        if runs.is_empty() {
-            runs.push(TextRun {
-                len: segment.display.len(),
-                color: base.color,
-                ..base.clone()
-            });
-        }
+        let pieces = syntax_run_lengths(spans, line, line_start, segment, self.settings.tab_stop);
+        let runs: Vec<TextRun> = pieces
+            .into_iter()
+            .map(|(len, kind)| run(len, kind, base, theme))
+            .collect();
+        debug_assert_eq!(
+            runs.iter().map(|text_run| text_run.len).sum::<usize>(),
+            segment.display.len(),
+            "GPUI run lengths must cover the displayed row exactly"
+        );
         runs
     }
 
@@ -304,6 +284,57 @@ impl Editor {
             hsla(theme.colors.text),
         ))
     }
+}
+
+/// Resolve syntax spans into contiguous display-byte runs for one segment.
+///
+/// The display mapping comes from `chaus-layout`, so a run boundary is always
+/// a grapheme boundary in the expanded string. A span that covers only part of
+/// a grapheme colours the whole grapheme, chosen by the kind at its first
+/// source scalar; joined emoji are never split.
+fn syntax_run_lengths(
+    spans: &[Span],
+    line: &str,
+    line_start: usize,
+    segment: &chaus_layout::Segment,
+    tab_stop: usize,
+) -> Vec<(usize, Option<TokenKind>)> {
+    let boundaries = chaus_layout::display_boundaries(line, segment, tab_stop);
+    let segment_start = line_start + segment.char_start;
+    let mut span_index = spans.partition_point(|span| span.range.end <= segment_start);
+    let mut run_start = 0usize;
+    let mut run_kind: Option<TokenKind> = None;
+    let mut runs = Vec::new();
+    let mut first = true;
+    for pair in boundaries.windows(2) {
+        let offset = line_start + pair[0].char_offset;
+        let display_start = pair[0].display_byte;
+        while span_index < spans.len() && spans[span_index].range.end <= offset {
+            span_index += 1;
+        }
+        let kind = spans
+            .get(span_index)
+            .filter(|span| span.range.contains(&offset))
+            .map(|span| span.kind);
+        if first {
+            run_kind = kind;
+            first = false;
+        } else if kind != run_kind {
+            if display_start > run_start {
+                runs.push((display_start - run_start, run_kind));
+            }
+            run_start = display_start;
+            run_kind = kind;
+        }
+        debug_assert!(pair[1].display_byte <= segment.display.len());
+    }
+    if segment.display.len() > run_start {
+        runs.push((segment.display.len() - run_start, run_kind));
+    }
+    if runs.is_empty() {
+        runs.push((segment.display.len(), None));
+    }
+    runs
 }
 
 fn run(len: usize, kind: Option<TokenKind>, base: &TextRun, theme: &Theme) -> TextRun {

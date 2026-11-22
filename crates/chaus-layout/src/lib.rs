@@ -83,6 +83,76 @@ impl VisualRow {
     }
 }
 
+/// One grapheme boundary within a segment's rendered text.
+///
+/// `char_offset` is the source offset within the hard line; `display_byte` is
+/// the UTF-8 byte offset within [`Segment::display`], where a tab has already
+/// become spaces. The first entry starts at `(segment.char_start, 0)` and the
+/// last ends at `(segment.char_end, segment.display.len())`.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayBoundary {
+    pub char_offset: usize,
+    pub display_byte: usize,
+}
+
+/// Map every grapheme boundary in `segment` to its displayed byte offset.
+///
+/// This is the authoritative source-to-display mapping used by painting. It
+/// reuses the same grapheme segmentation, width measurement and logical-line
+/// tab stops as [`segments_with`], so run lengths can never disagree with the
+/// display string. Callers must pass the same `line` the segment came from and
+/// the same `tab_stop`; previewing a segment under different settings is not a
+/// supported use.
+#[must_use]
+pub fn display_boundaries(line: &str, segment: &Segment, tab_stop: usize) -> Vec<DisplayBoundary> {
+    let tab_stop = tab_stop.max(1);
+    let mut boundaries = Vec::new();
+    boundaries.push(DisplayBoundary {
+        char_offset: segment.char_start,
+        display_byte: 0,
+    });
+    let mut char_index = 0usize;
+    let mut column = 0usize;
+    let mut display_byte = 0usize;
+    for grapheme in line.graphemes(true) {
+        let char_end = char_index + grapheme.chars().count();
+        if char_end <= segment.char_start {
+            column += piece_width(grapheme, column, tab_stop);
+            char_index = char_end;
+            continue;
+        }
+        if char_index >= segment.char_end {
+            break;
+        }
+        // `segments_with` only breaks at grapheme boundaries, so a segment
+        // never begins inside this grapheme.
+        debug_assert!(
+            char_index >= segment.char_start,
+            "segment {:?} starts inside the grapheme at char {char_index}",
+            (segment.char_start, segment.char_end)
+        );
+        let width = piece_width(grapheme, column, tab_stop);
+        if grapheme == "\t" {
+            display_byte += width;
+        } else {
+            display_byte += grapheme.len();
+        }
+        column += width;
+        char_index = char_end;
+        boundaries.push(DisplayBoundary {
+            char_offset: char_end,
+            display_byte,
+        });
+    }
+    debug_assert_eq!(
+        boundaries.last().map(|boundary| boundary.display_byte),
+        Some(segment.display.len()),
+        "display mapping must cover the whole segment"
+    );
+    boundaries
+}
+
 /// Clamp absolute logical-line selection columns to this segment and return
 /// segment-local columns. Returns `None` when the selection does not cover any
 /// cell on this visual row.
