@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use chaus_core::settings::Settings;
 use chaus_editor::Editor;
 use chaus_io::LoadedFile;
-use gpui::{actions, px, size, App, AppContext, Bounds, Focusable, KeyBinding, WindowHandle};
+use gpui::{
+    actions, px, size, App, AppContext, Bounds, Entity, Focusable, KeyBinding, WindowHandle,
+};
+use silvestris::core::command::CommandDescriptor;
 use silvestris::{chrome, ThemePreference};
 
 use crate::preferences::open_preferences;
@@ -182,6 +185,35 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
     exit_code
 }
 
+/// Register application commands on a window's registry so the File menu and
+/// keyboard shortcuts invoke the same handlers.
+fn register_app_commands(editor: &Entity<Editor>, cx: &mut App) {
+    let commands = editor.read(cx).commands().clone();
+    commands.update(cx, |registry, cx| {
+        registry
+            .register(
+                CommandDescriptor::action("file.new", "New").shortcut("secondary-n"),
+                |_, _, cx| cx.dispatch_action(&NewWindow),
+                cx,
+            )
+            .expect("file.new is unique");
+        registry
+            .register(
+                CommandDescriptor::action("file.open", "Open…").shortcut("secondary-o"),
+                |_, _, cx| cx.dispatch_action(&OpenFile),
+                cx,
+            )
+            .expect("file.open is unique");
+        registry
+            .register(
+                CommandDescriptor::action("settings.open", "Preferences…").shortcut("secondary-,"),
+                |_, _, cx| cx.dispatch_action(&Preferences),
+                cx,
+            )
+            .expect("settings.open is unique");
+    });
+}
+
 fn window_for(
     title: &str,
     loaded: Option<LoadedFile>,
@@ -193,6 +225,7 @@ fn window_for(
     let options = chrome::window_options(title, bounds, size(px(420.), px(300.)), cx);
     let handle = chrome::open_window(options, cx, move |window, cx| {
         let editor = cx.new(|cx| Editor::new(cx, loaded.clone(), settings.clone()));
+        register_app_commands(&editor, cx);
         if let Some(message) = message.clone() {
             let editor_handle = editor.clone();
             editor_handle.update(cx, |editor, _| editor.show_message(message));

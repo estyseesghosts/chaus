@@ -31,13 +31,13 @@ fn root_editor_dispatches_deletion_selection_and_shortcuts() {
         );
         chaus_editor::bind_keys(cx);
     });
-    let (editor, mut cx) = app.add_window_view(|window, cx| {
+    let (editor, cx) = app.add_window_view(|window, cx| {
         let editor = Editor::new(cx, None, Settings::default());
         let focus = editor.focus_handle(cx);
         window.focus(&focus, cx);
         editor
     });
-    draw(&mut cx);
+    draw(cx);
 
     // The focused handle must be the one rendered with `ChausEditor`.
     let focus = cx.update(|_, cx| editor.read(cx).focus_handle(cx));
@@ -47,49 +47,49 @@ fn root_editor_dispatches_deletion_selection_and_shortcuts() {
     );
 
     cx.simulate_input("abc");
-    draw(&mut cx);
-    assert_eq!(text(&editor, &mut cx), "abc");
+    draw(cx);
+    assert_eq!(text(&editor, cx), "abc");
 
     // Backspace deletes the character before the caret.
     cx.simulate_keystrokes("backspace");
-    draw(&mut cx);
+    draw(cx);
     assert_eq!(
-        text(&editor, &mut cx),
+        text(&editor, cx),
         "ab",
         "Backspace must dispatch through its action binding"
     );
 
     // Shift+Right extends a selection and Backspace deletes it.
     cx.simulate_keystrokes("home");
-    draw(&mut cx);
+    draw(cx);
     cx.simulate_keystrokes("shift-right");
-    draw(&mut cx);
+    draw(cx);
     assert!(
         !cx.update(|_, cx| editor.read(cx).selection().is_empty()),
         "Shift+Right must create a selection"
     );
     cx.simulate_keystrokes("backspace");
-    draw(&mut cx);
+    draw(cx);
     assert_eq!(
-        text(&editor, &mut cx),
+        text(&editor, cx),
         "b",
         "Backspace must delete the selected character"
     );
 
     // Delete removes forward.
     cx.simulate_keystrokes("delete");
-    draw(&mut cx);
+    draw(cx);
     assert_eq!(
-        text(&editor, &mut cx),
+        text(&editor, cx),
         "",
         "Delete must dispatch through its action binding"
     );
 
     // Ctrl+A selects everything, proving the modified shortcut path works.
     cx.simulate_input("hello");
-    draw(&mut cx);
+    draw(cx);
     cx.simulate_keystrokes("ctrl-a");
-    draw(&mut cx);
+    draw(cx);
     assert_eq!(
         cx.update(|_, cx| editor.read(cx).selection().range()),
         chaus_core::position::CharRange::new(
@@ -101,18 +101,18 @@ fn root_editor_dispatches_deletion_selection_and_shortcuts() {
 
     // Ctrl+F opens the find bar, another bound action.
     cx.simulate_keystrokes("ctrl-f");
-    draw(&mut cx);
+    draw(cx);
     assert!(
         cx.debug_bounds("chaus-find-bar").is_some(),
         "Ctrl+F must open the find bar"
     );
     cx.simulate_keystrokes("escape");
-    draw(&mut cx);
+    draw(cx);
 
     // Ctrl+Shift+V toggles the modal engine.
     assert!(!cx.update(|_, cx| editor.read(cx).vim_enabled()));
     cx.simulate_keystrokes("ctrl-shift-v");
-    draw(&mut cx);
+    draw(cx);
     assert!(
         cx.update(|_, cx| editor.read(cx).vim_enabled()),
         "Ctrl+Shift+V must toggle Vim mode"

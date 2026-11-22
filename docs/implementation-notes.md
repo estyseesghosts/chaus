@@ -62,9 +62,13 @@ and every measured size stay unchanged.
 
 ## Known gaps in this increment
 
-- No native menu bar yet. `Ctrl+,` opens a Preferences window for the theme and
-  the Vim default applied to new windows. Other settings still come from
-  `_chausrc`.
+- The titlebar carries File/Edit/View menus built from Silvestris's
+  `CommandRegistry` and `PopupMenu`. Each window owns its registry, so the
+  checked Vim Mode/Wrap items and disabled Undo/Redo/Cut/Copy come from that
+  window's state; the document canvas has no toolbar or tabs. `Ctrl+Shift+V`
+  toggles Vim in both modes and is inert while a sheet, find bar or menu owns
+  the keyboard. `Ctrl+,` opens a Preferences window for the theme and the Vim
+  default applied to new windows. Other settings still come from `_chausrc`.
 - Find and replace support literal search only; regular expressions are not
   implemented. Vim `/` and `?` remain separate.
 - Tree-sitter highlighting is not linked. External formatters are explicit and

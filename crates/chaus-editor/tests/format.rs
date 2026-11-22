@@ -37,15 +37,15 @@ fn run(path_name: &str, text: &str, test: impl FnOnce(Entity<Editor>, &mut Visua
     let path = directory.path().join(path_name);
     std::fs::write(&path, text).unwrap();
     let loaded = chaus_io::load(&path).unwrap();
-    let (harness, mut cx) = app.add_window_view(|window, cx| {
+    let (harness, cx) = app.add_window_view(|window, cx| {
         let editor = cx.new(|cx| Editor::new(cx, Some(loaded), Settings::default()));
         let focus = editor.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         Harness { editor }
     });
     let editor = cx.update(|_, app| harness.read(app).editor.clone());
-    draw(&mut cx);
-    test(editor, &mut cx);
+    draw(cx);
+    test(editor, cx);
 }
 
 fn text(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {
@@ -61,16 +61,16 @@ fn formatting_an_untitled_document_explains_what_is_required() {
             cx,
         );
     });
-    let (harness, mut cx) = app.add_window_view(|window, cx| {
+    let (harness, cx) = app.add_window_view(|window, cx| {
         let editor = cx.new(|cx| Editor::new(cx, None, Settings::default()));
         let focus = editor.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         Harness { editor }
     });
     let editor = cx.update(|_, app| harness.read(app).editor.clone());
-    draw(&mut cx);
+    draw(cx);
     cx.update(|_, cx| editor.update(cx, |editor, cx| editor.format_document(cx)));
-    draw(&mut cx);
+    draw(cx);
     assert_eq!(
         cx.update(|_, cx| editor.read(cx).status_text().map(str::to_owned)),
         Some("Save the file before formatting".to_owned())

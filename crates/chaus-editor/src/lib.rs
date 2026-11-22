@@ -7,6 +7,7 @@
 mod editor;
 mod editor_blink;
 mod editor_close;
+mod editor_commands;
 mod editor_conflict;
 mod editor_cursor;
 mod editor_edit;

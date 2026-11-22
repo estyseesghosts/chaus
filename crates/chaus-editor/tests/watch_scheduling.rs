@@ -41,21 +41,21 @@ fn a_same_size_external_edit_is_caught_by_the_hash() {
     let path = directory.path().join("same-size.txt");
     std::fs::write(&path, "one\n").unwrap();
     let loaded = chaus_io::load(&path).unwrap();
-    let (harness, mut cx) = app.add_window_view(|window, cx| {
+    let (harness, cx) = app.add_window_view(|window, cx| {
         let editor = cx.new(|cx| Editor::new(cx, Some(loaded), Settings::default()));
         let focus = editor.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         Harness { editor }
     });
     let editor = cx.update(|_, app| harness.read(app).editor.clone());
-    draw(&mut cx);
+    draw(cx);
 
     // Same byte count as "one\n": only a content hash can notice this.
     std::fs::write(&path, "two\n").unwrap();
     cx.update(|_, cx| {
         editor.update(cx, |editor, cx| editor.check_disk_now(cx));
     });
-    draw(&mut cx);
+    draw(cx);
 
     assert!(
         cx.debug_bounds("chaus-disk-banner").is_some(),
@@ -71,14 +71,14 @@ fn a_check_in_flight_is_not_stacked_or_duplicated() {
     let path = directory.path().join("stack.txt");
     std::fs::write(&path, "one\n").unwrap();
     let loaded = chaus_io::load(&path).unwrap();
-    let (harness, mut cx) = app.add_window_view(|window, cx| {
+    let (harness, cx) = app.add_window_view(|window, cx| {
         let editor = cx.new(|cx| Editor::new(cx, Some(loaded), Settings::default()));
         let focus = editor.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         Harness { editor }
     });
     let editor = cx.update(|_, app| harness.read(app).editor.clone());
-    draw(&mut cx);
+    draw(cx);
 
     std::fs::write(&path, "changed\n").unwrap();
     cx.update(|_, cx| {
@@ -91,7 +91,7 @@ fn a_check_in_flight_is_not_stacked_or_duplicated() {
             assert!(editor.is_checking_disk());
         });
     });
-    draw(&mut cx);
+    draw(cx);
 
     cx.update(|_, cx| {
         assert!(

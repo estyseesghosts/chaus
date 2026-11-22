@@ -240,6 +240,15 @@ impl Editor {
     }
 
     pub(crate) fn toggle_vim(&mut self, _: &ToggleVim, _: &mut Window, cx: &mut Context<Self>) {
+        // A modal sheet, find bar or menu owns the keyboard; do not toggle the
+        // document mode behind it.
+        if self.find_bar.is_some()
+            || self.close_prompt
+            || self.conflict_prompt.is_some()
+            || !self.recovery_queue.is_empty()
+        {
+            return;
+        }
         self.vim = !self.vim;
         self.document.cancel_user_operation();
         self.vim_engine.reset();

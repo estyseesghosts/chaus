@@ -37,15 +37,15 @@ fn run(text: &str, settings: Settings, test: impl FnOnce(Entity<Editor>, &mut Vi
     let path = directory.path().join("indent.txt");
     std::fs::write(&path, text).unwrap();
     let loaded = chaus_io::load(&path).unwrap();
-    let (harness, mut cx) = app.add_window_view(|window, cx| {
+    let (harness, cx) = app.add_window_view(|window, cx| {
         let editor = cx.new(|cx| Editor::new(cx, Some(loaded), settings));
         let focus = editor.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         Harness { editor }
     });
     let editor = cx.update(|_, app| harness.read(app).editor.clone());
-    draw(&mut cx);
-    test(editor, &mut cx);
+    draw(cx);
+    test(editor, cx);
 }
 
 fn text(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {

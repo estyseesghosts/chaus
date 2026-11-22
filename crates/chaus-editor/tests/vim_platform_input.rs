@@ -63,7 +63,7 @@ fn run(text: &str, test: impl FnOnce(Entity<Editor>, &mut VisualTestContext)) {
     let path = directory.path().join("vim.txt");
     std::fs::write(&path, text).unwrap();
     let loaded = chaus_io::load(&path).unwrap();
-    let (harness, mut cx) = app.add_window_view(|window, cx| {
+    let (harness, cx) = app.add_window_view(|window, cx| {
         let mut settings = Settings::default();
         settings.vim = true;
         let editor = cx.new(|cx| Editor::new(cx, Some(loaded), settings));
@@ -72,8 +72,8 @@ fn run(text: &str, test: impl FnOnce(Entity<Editor>, &mut VisualTestContext)) {
         Harness { editor }
     });
     let editor = cx.update(|_, app| harness.read(app).editor.clone());
-    draw(&mut cx);
-    test(editor, &mut cx);
+    draw(cx);
+    test(editor, cx);
 }
 
 fn text(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {

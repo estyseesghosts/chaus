@@ -14,7 +14,7 @@ use chaus_io::LoadedFile;
 use chaus_vim::Engine;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, px, App, Context, CursorStyle, FocusHandle, Focusable, InteractiveElement as _,
+    div, px, App, Context, CursorStyle, Entity, FocusHandle, Focusable, InteractiveElement as _,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement as _, Pixels, Render, ScrollEvent, Styled as _, Window,
 };
@@ -97,6 +97,10 @@ pub struct Editor {
     /// the next text-input callback must be ignored to avoid inserting the
     /// command itself (`j`, `i`, `:`).
     pub(crate) suppress_text_input: bool,
+    /// Per-window command registry shared by menus and Silvestris controls.
+    pub(crate) commands: Entity<silvestris::command::CommandRegistry>,
+    /// Popup menu overlay, created on the first render when a window exists.
+    pub(crate) menu: Option<Entity<silvestris::menu::PopupMenu>>,
 }
 
 impl Editor {
@@ -123,6 +127,7 @@ impl Editor {
         let close_focus = ClosePromptFocus::new(cx);
         let conflict_focus = ConflictPromptFocus::new(cx);
         let recovery_focus = RecoveryPromptFocus::new(cx);
+        let commands = Self::create_command_registry(cx);
         let mut editor = Self {
             document,
             file,
@@ -168,7 +173,11 @@ impl Editor {
             saving: false,
             opening: false,
             suppress_text_input: false,
+            commands,
+            menu: None,
         };
+        let weak = cx.weak_entity();
+        editor.register_editor_commands(weak, cx);
         editor.rebuild_rows();
         editor.start_disk_watch(cx);
         editor
@@ -212,6 +221,13 @@ impl Editor {
     #[must_use]
     pub fn is_checking_disk(&self) -> bool {
         self.disk_check_in_flight
+    }
+
+    /// This window's command registry. Application-level commands (New, Open,
+    /// Preferences) are registered on it by the app so the menu uses one tree.
+    #[must_use]
+    pub fn commands(&self) -> &Entity<silvestris::command::CommandRegistry> {
+        &self.commands
     }
 
     pub fn set_settings(&mut self, settings: Settings) {
@@ -455,6 +471,9 @@ impl Focusable for Editor {
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_blink(cx);
+        self.ensure_menu(window, cx);
+        self.sync_command_state(cx);
+        let menu_bar = self.render_menu_bar(cx);
         let theme = cx.theme().clone();
         let title = self.title();
         window.set_window_title(&title);
@@ -711,6 +730,13 @@ impl Render for Editor {
             .when_some(close_prompt, |element, sheet| element.child(sheet))
             .when_some(conflict_prompt, |element, sheet| element.child(sheet))
             .when_some(recovery_prompt, |element, sheet| element.child(sheet));
-        silvestris::chrome::WindowFrame::new(title).child(content)
+        let frame = silvestris::chrome::WindowFrame::new(title)
+            .toolbar(menu_bar, theme.metrics.toolbar_height)
+            .child(content);
+        let mut root = div().size_full().child(frame);
+        if let Some(menu) = self.menu.clone() {
+            root = root.child(gpui::deferred(menu).priority(1));
+        }
+        root
     }
 }

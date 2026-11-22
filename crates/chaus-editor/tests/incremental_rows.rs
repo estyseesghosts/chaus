@@ -54,7 +54,7 @@ fn incremental_rows_match_a_fresh_rebuild_after_an_edit() {
         .join("\n");
     std::fs::write(&path, &contents).unwrap();
     let loaded = chaus_io::load(&path).unwrap();
-    let (harness, mut cx) = app.add_window_view(|window, cx| {
+    let (harness, cx) = app.add_window_view(|window, cx| {
         let mut settings = Settings::default();
         settings.vim = true;
         let editor = cx.new(|cx| Editor::new(cx, Some(loaded), settings));
@@ -63,15 +63,15 @@ fn incremental_rows_match_a_fresh_rebuild_after_an_edit() {
         Harness { editor }
     });
     let editor = cx.update(|_, app| harness.read(app).editor.clone());
-    draw(&mut cx);
-    let rows_before = editor_rows(&editor, &mut cx);
+    draw(cx);
+    let rows_before = editor_rows(&editor, cx);
 
     // Append enough text to the first line to add several wrapped rows.
     cx.simulate_keystrokes("shift-a");
     cx.simulate_input(&"b".repeat(500));
-    draw(&mut cx);
+    draw(cx);
 
-    let rows_after = editor_rows(&editor, &mut cx);
+    let rows_after = editor_rows(&editor, cx);
     assert!(
         rows_after > rows_before,
         "the edit must actually change the wrapped row total ({rows_before} -> {rows_after})"
@@ -83,15 +83,15 @@ fn incremental_rows_match_a_fresh_rebuild_after_an_edit() {
     let fresh_path = directory.path().join("fresh.txt");
     std::fs::write(&fresh_path, &final_text).unwrap();
     let fresh_loaded = chaus_io::load(&fresh_path).unwrap();
-    let (fresh_harness, mut fresh_cx) = app.add_window_view(|window, cx| {
+    let (fresh_harness, fresh_cx) = app.add_window_view(|window, cx| {
         let editor = cx.new(|cx| Editor::new(cx, Some(fresh_loaded), Settings::default()));
         let focus = editor.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         Harness { editor }
     });
     let fresh = fresh_cx.update(|_, app| fresh_harness.read(app).editor.clone());
-    draw(&mut fresh_cx);
-    let fresh_rows = editor_rows(&fresh, &mut fresh_cx);
+    draw(fresh_cx);
+    let fresh_rows = editor_rows(&fresh, fresh_cx);
 
     assert_eq!(
         rows_after, fresh_rows,

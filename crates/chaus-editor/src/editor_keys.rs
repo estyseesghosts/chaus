@@ -121,6 +121,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(primary!("h"), Replace, context),
         KeyBinding::new("f3", FindNext, context),
         KeyBinding::new("shift-f3", FindPrevious, context),
+        // Bound in both modes: the toggle must be usable to leave Normal mode.
         KeyBinding::new("ctrl-shift-v", ToggleVim, context),
         KeyBinding::new(primary!("="), ZoomIn, context),
         KeyBinding::new(primary!("shift-="), ZoomIn, context),
