@@ -191,21 +191,17 @@ fn expand_tabs(prefix: &str, tab_stop: usize) -> String {
     expanded
 }
 
-/// Replace whole tab stops of spaces with tabs, keeping alignment.
+/// Replace leading whitespace with the shortest tab/space spelling of the
+/// same visual width. Remainder spaces and mixed prefixes are preserved as
+/// columns rather than dropped.
 fn compact_spaces(prefix: &str, tab_stop: usize) -> String {
-    let mut column = 0usize;
-    let mut compacted = String::with_capacity(prefix.len());
-    for character in prefix.chars() {
-        if character == ' ' {
-            column += 1;
-            if column.is_multiple_of(tab_stop) {
-                compacted.push('\t');
-            }
-        } else {
-            compacted.push(character);
-            column += tab_stop - (column % tab_stop);
-        }
-    }
+    let tab_stop = tab_stop.max(1);
+    let width = expand_tabs(prefix, tab_stop).chars().count();
+    let tabs = width / tab_stop;
+    let spaces = width % tab_stop;
+    let mut compacted = String::with_capacity(tabs + spaces);
+    compacted.extend(std::iter::repeat_n('\t', tabs));
+    compacted.extend(std::iter::repeat_n(' ', spaces));
     compacted
 }
 
