@@ -46,6 +46,8 @@ the process aborted before `main` — even for `chaus --help`. `chaus-app` now
 embeds `resources/windows/chaus.manifest.xml` from `build.rs`, passing
 forward-slash paths to avoid the same devkitPro `windres` bug. Both `--help` and
 `--version` print and exit 0, and the manifest resource is present in the PE.
+MSVC has no `windres`, so there `build.rs` passes `/MANIFEST:EMBED` and
+`/MANIFESTINPUT:` to `link.exe` and uses the same XML.
 
 ## Licensing
 

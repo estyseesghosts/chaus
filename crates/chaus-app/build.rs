@@ -22,21 +22,26 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("gnu") {
-        println!(
-            "cargo:warning=chaus embeds its Windows manifest with windres; \
-             the {} environment has no manifest step yet",
-            env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default()
-        );
-        return;
-    }
-
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     let resources = manifest_dir.join("resources/windows");
     let resource_file = resources.join("chaus.rc");
     let manifest_file = resources.join("chaus.manifest.xml");
+
+    // MSVC has no windres. Hand the manifest straight to link.exe, which
+    // embeds it into the executable's resource section. Skipping this is the
+    // STATUS_ENTRYPOINT_NOT_FOUND failure described above.
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rerun-if-changed={}", manifest_file.display());
+        println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg-bins=/MANIFESTINPUT:{}",
+            forward_slashes(&manifest_file)
+        );
+        return;
+    }
+
     let object_file = out_dir.join("chaus-manifest.o");
 
     println!("cargo:rerun-if-changed={}", resource_file.display());
