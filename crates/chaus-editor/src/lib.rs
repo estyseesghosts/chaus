@@ -27,6 +27,7 @@ mod editor_watch;
 mod editor_zoom;
 mod geometry;
 mod paint_row;
+mod row_index;
 
 pub use editor::Editor;
 pub use editor_file::FileState;

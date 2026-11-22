@@ -53,9 +53,7 @@ impl Editor {
     }
 
     fn move_vertical(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
-        self.ensure_prefix();
-        let (line, row_in_line) = self.row_of_offset(self.selection.head);
-        let base_row = self.prefix_rows.get(line.0).copied().unwrap_or(0) + row_in_line;
+        let (_, base_row) = self.row_of_offset(self.selection.head);
         let total = self.total_rows();
         let target_row = (base_row as isize + delta).clamp(0, total as isize - 1) as usize;
 
@@ -81,13 +79,8 @@ impl Editor {
         cx.notify();
     }
 
-    pub(crate) fn line_at_row(&mut self, row: usize) -> LineIndex {
-        self.ensure_prefix();
-        let index = match self.prefix_rows.binary_search(&row) {
-            Ok(index) => index,
-            Err(index) => index.saturating_sub(1),
-        };
-        LineIndex(index.min(self.line_rows.len().saturating_sub(1)))
+    pub(crate) fn line_at_row(&self, row: usize) -> LineIndex {
+        self.rows.line_at_row(row)
     }
 
     fn move_line_boundary(&mut self, end: bool, extend: bool, cx: &mut Context<Self>) {

@@ -66,9 +66,8 @@ pub struct Editor {
     pub(crate) preedit_active: bool,
     pub(crate) selecting: bool,
     pub(crate) geometry: Option<Geometry>,
-    pub(crate) line_rows: Vec<usize>,
-    pub(crate) prefix_rows: Vec<usize>,
-    pub(crate) prefix_valid: bool,
+    /// Per-line visual-row counts with an `O(log lines)` prefix index.
+    pub(crate) rows: crate::row_index::RowIndex,
     pub(crate) rows_columns: Option<usize>,
     /// Break policy used by the row cache. Kept next to the width so a change
     /// between word and character wrapping invalidates the rows even when the
@@ -178,9 +177,7 @@ impl Editor {
             preedit_active: false,
             selecting: false,
             geometry: None,
-            line_rows: Vec::new(),
-            prefix_rows: Vec::new(),
-            prefix_valid: false,
+            rows: crate::row_index::RowIndex::default(),
             rows_columns: None,
             rows_policy: chaus_layout::WrapPolicy::Word,
             settings,
@@ -387,91 +384,55 @@ impl Editor {
     // ---- line/row caches --------------------------------------------------
 
     pub(crate) fn rebuild_rows(&mut self) {
-        let columns = self.rows_columns;
-        let policy = self.rows_policy;
         let line_count = self.document.len_lines();
-        self.line_rows.clear();
-        self.line_rows.reserve(line_count);
-        self.prefix_rows.clear();
-        self.prefix_rows.reserve(line_count + 1);
-        let mut total = 0;
+        let mut counts = Vec::with_capacity(line_count);
         for line in 0..line_count {
-            let text = self.document.line_text(LineIndex(line));
-            let rows = chaus_layout::row_count_with(&text, columns, self.settings.tab_stop, policy);
-            self.prefix_rows.push(total);
-            total += rows;
-            self.line_rows.push(rows);
+            counts.push(self.measure_line(line));
         }
-        self.prefix_rows.push(total);
-        self.prefix_valid = true;
+        self.rows.rebuild(counts);
+    }
+
+    fn measure_line(&self, line: usize) -> usize {
+        let text = self.document.line_text(LineIndex(line));
+        chaus_layout::row_count_with(
+            &text,
+            self.rows_columns,
+            self.settings.tab_stop,
+            self.rows_policy,
+        )
     }
 
     /// Update wrap metadata for only the touched hard lines.
     ///
-    /// The row prefix is adjusted by the total delta instead of being rebuilt,
-    /// so an ordinary edit inside one line costs O(affected lines), not
-    /// O(document). A change in hard-line count still falls back to a rebuild.
+    /// A point edit updates one Fenwick leaf in `O(log lines)`. When the edit
+    /// inserts or removes hard lines, only the affected range is re-wrapped and
+    /// spliced into the measured counts for the rest; the tree is rebuilt from
+    /// integers, never from Unicode layout work for untouched lines.
     pub(crate) fn refresh_rows(&mut self, affected: LineRange) {
         let line_count = self.document.len_lines();
-        if self.line_rows.len() != line_count || self.prefix_rows.len() != line_count + 1 {
-            self.rebuild_rows();
-            return;
-        }
         let start = affected.start.0.min(line_count);
         let end = affected.end.0.min(line_count);
         if start >= end {
+            if self.rows.len() != line_count {
+                self.rebuild_rows();
+            }
             return;
         }
-        let prefix_was_valid = self.prefix_valid;
-        let mut cumulative: i64 = 0;
+        if self.rows.len() != line_count {
+            let delta = line_count as i64 - self.rows.len() as i64;
+            let old_end = (end as i64 - delta).max(start as i64) as usize;
+            let counts: Vec<usize> = (start..end).map(|line| self.measure_line(line)).collect();
+            self.rows.splice(start, old_end, counts);
+            return;
+        }
         for line in start..end {
-            let text = self.document.line_text(LineIndex(line));
-            let rows = chaus_layout::row_count_with(
-                &text,
-                self.rows_columns,
-                self.settings.tab_stop,
-                self.rows_policy,
-            );
-            let old = self.line_rows[line];
-            if rows != old {
-                cumulative += rows as i64 - old as i64;
-                self.line_rows[line] = rows;
-            }
-            if prefix_was_valid {
-                // `prefix_rows[line + 1]` is the old sum through this line.
-                // Add only the change accumulated up to here, so a later line
-                // that shrinks does not cancel an earlier line's growth.
-                self.prefix_rows[line + 1] =
-                    (self.prefix_rows[line + 1] as i64 + cumulative).max(0) as usize;
-            }
+            let rows = self.measure_line(line);
+            self.rows.set(LineIndex(line), rows);
         }
-        if !prefix_was_valid {
-            self.prefix_valid = false;
-        } else if cumulative != 0 {
-            for value in &mut self.prefix_rows[end + 1..] {
-                *value = (*value as i64 + cumulative).max(0) as usize;
-            }
-        }
-    }
-
-    pub(crate) fn ensure_prefix(&mut self) {
-        if self.prefix_valid && self.prefix_rows.len() == self.line_rows.len() + 1 {
-            return;
-        }
-        self.prefix_rows.clear();
-        self.prefix_rows.reserve(self.line_rows.len() + 1);
-        let mut total = 0;
-        for rows in &self.line_rows {
-            self.prefix_rows.push(total);
-            total += rows;
-        }
-        self.prefix_rows.push(total);
-        self.prefix_valid = true;
     }
 
     pub(crate) fn total_rows(&mut self) -> usize {
-        self.ensure_prefix();
-        self.prefix_rows.last().copied().unwrap_or(1).max(1)
+        self.rows.total().max(1)
     }
 
     /// Total visual rows at the current wrap width, for diagnostics and tests.
@@ -489,9 +450,7 @@ impl Editor {
     /// lines is the invariant the incremental prefix must preserve.
     #[must_use]
     pub fn visual_row_start(&mut self, line: LineIndex) -> usize {
-        self.ensure_prefix();
-        let index = line.0.min(self.prefix_rows.len().saturating_sub(1));
-        self.prefix_rows.get(index).copied().unwrap_or(0)
+        self.rows.prefix(line.0)
     }
 
     /// Break policy implied by the current wrap mode.
@@ -548,17 +507,15 @@ impl Editor {
 
     pub(crate) fn row_of_offset(&mut self, offset: CharOffset) -> (LineIndex, usize) {
         let line = self.document.line_of(offset);
-        self.ensure_prefix();
         let row_in_line = self.local_row_of(offset, line);
-        let row = self.prefix_rows.get(line.0).copied().unwrap_or(0) + row_in_line;
-        (line, row)
+        (line, self.rows.prefix(line.0) + row_in_line)
     }
 
     /// Resolve a document-wide visual row to its hard line and the visual
     /// columns covered by that row.
     pub(crate) fn row_span(&mut self, row: usize) -> (LineIndex, Range<usize>) {
         let line = self.line_at_row(row);
-        let local_row = row.saturating_sub(self.prefix_rows.get(line.0).copied().unwrap_or(0));
+        let local_row = row.saturating_sub(self.rows.prefix(line.0));
         let segments = self.segments_for(line);
         let span = segments
             .get(local_row)

@@ -69,7 +69,7 @@ impl Editor {
         let selection_color = hsla(theme.colors.accent).opacity(0.35);
         let mut rows = Vec::new();
         let mut selection_quads = Vec::new();
-        let mut row = self.prefix_rows.get(first_line.0).copied().unwrap_or(0);
+        let mut row = self.rows.prefix(first_line.0);
         let base_x = bounds.left() + px(PADDING) - self.scroll_x;
         let base_y = bounds.top() + px(PADDING);
 
