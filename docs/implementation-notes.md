@@ -58,32 +58,29 @@ app-owned. Bundled fonts come from Silvestris; do not add a second copy.
 - No native menu bar or preferences window yet. Theme and Vim defaults come from
   `_chausrc`; theme switching at runtime is not exposed in the UI.
 - Find and replace have no in-window UI. Vim `/` and `?` search exist.
-- `:e {path}` is not wired yet; `:w`, `:q`, `:wq` and `:q!` work. Opening a
-  file from the command line or `Ctrl+O` remains the supported path.
-- An ambiguous mapping prefix waits for the next key. The documented mapping
-  timeout is not implemented; losing focus cancels the prefix instead.
-- `cw`/`ciw` delete in one history entry and the text typed into Insert mode in
-  following entries, so one undo does not remove the whole change.
-- A count before `.` is discarded; the recorded command keeps its original
-  count, so `2.` does not repeat the change twice. Counts before Insert
-  commands (`3i…`) are also not repeated.
 - Tree-sitter highlighting and external formatters are not linked.
-- Native open/save dialogs are implemented on Windows only. Elsewhere the
-  command reports that no picker is available; pass paths on the command line.
-- `selection_bounds_for_range` delegates to the range geometry, so native
-  accessibility can query a selection rectangle; multi-row selections use the
-  same start/end box as `bounds_for_range`.
-- Save is still synchronous on the UI thread and serializes the whole document
-  into one allocation before writing. A large save can briefly stall the window.
+- Open/save dialogs use the Win32 common dialogs on Windows. Linux uses the
+  desktop's `zenity` or `kdialog` helper when one is installed; otherwise the
+  command reports that no picker is available, so pass paths on the command
+  line and use `Ctrl+S` for an already-open file. The Linux helper path has not
+  been smoke-tested in this Windows environment.
 - Save conflict handling reports a message and lets the next Save (including
   `:w`/`:wq`) overwrite; the full Reload / Save As / Overwrite / Cancel sheet is
   not implemented.
+- Closing a dirty window uses a two-step stopgap (warn, then discard) instead of a
+  Save / Discard / Cancel sheet.
+- No crash-recovery snapshots and no external file watcher.
+- Open and save run on the background executor, but a save still expands the
+  document into one string and one byte buffer before writing. Initial row
+  layout after a load runs on the UI thread. Large files are not yet measured.
 - Save refuses a target with additional hard links instead of silently
   breaking them. Windows uses `ReplaceFileW` and keeps the target's ACLs and
   attributes. Conflict checks are repeated immediately before replacement, but
   the check and replacement are still not one atomic operation.
-- Closing a dirty window uses a two-step stopgap (warn, then discard) instead of a
-  Save / Discard / Cancel sheet.
-- No crash-recovery snapshots and no external file watcher.
+- `selection_bounds_for_range` delegates to the existing range geometry.
+  Multi-row selections use the same start/end box as `bounds_for_range` rather
+  than per-row rectangles.
+- Word motions and line-boundary behaviour are tested against the in-memory
+  engine, not compared command-for-command with real Vim.
 - Tests live in `crates/*/tests/`; the native GUI still needs a real-OS smoke
   matrix on a clean machine.

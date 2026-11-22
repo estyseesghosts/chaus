@@ -14,6 +14,10 @@ use crate::Choice;
 
 const MAX_PATH_UNITS: usize = 32_768;
 
+pub(crate) fn is_available() -> bool {
+    true
+}
+
 pub(crate) fn choose_file(
     choice: Choice,
     title: &str,

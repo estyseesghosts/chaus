@@ -2,10 +2,12 @@
 //!
 //! The picker is synchronous on the UI thread: it is a modal OS dialog, so
 //! there is no document work to overlap with it. Paths are returned as
-//! `PathBuf` so non-UTF-8 Windows names survive.
+//! `PathBuf` so non-UTF-8 names survive.
 
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(windows)]
 mod windows;
 
@@ -23,7 +25,7 @@ pub enum Choice {
 /// no picker" is not reported to people as "you cancelled".
 #[must_use]
 pub fn is_available() -> bool {
-    cfg!(windows)
+    platform::is_available()
 }
 
 /// Show the platform's file picker. Returns `None` when the person cancels or
@@ -37,15 +39,24 @@ pub fn choose_file(choice: Choice, title: &str, suggested: Option<&Path>) -> Opt
 #[cfg(windows)]
 use windows as platform;
 
-#[cfg(not(windows))]
+/// Linux uses the desktop's command-line chooser when one is installed:
+/// `zenity` on GNOME-family desktops and `kdialog` on KDE. This keeps the
+/// dialog out of the process and works under both Wayland and X11 without
+/// linking GTK or a portal client.
+#[cfg(target_os = "linux")]
+use linux as platform;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod platform {
     use std::path::{Path, PathBuf};
 
     use crate::Choice;
 
+    pub(crate) fn is_available() -> bool {
+        false
+    }
+
     pub(crate) fn choose_file(_: Choice, _: &str, _: Option<&Path>) -> Option<PathBuf> {
-        // Linux v0.1 has no portable synchronous picker in GPUI's public API;
-        // the caller reports this instead of silently creating a file.
         None
     }
 }
