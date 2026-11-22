@@ -72,14 +72,14 @@ impl Editor {
         };
 
         let visible = (f32::from(bounds.size.height) / f32::from(line_height)).ceil() as usize + 2;
-        let first_row = self.scroll_row.floor().max(0.0) as usize;
         let last_row = self.total_rows().saturating_sub(1);
-        let first_line = self.line_at_row(first_row.min(last_row));
+        let first_row = (self.scroll_row.floor().max(0.0) as usize).min(last_row);
+        let first_line = self.line_at_row(first_row);
         let selection = self.selection.range();
         let selection_color = hsla(theme.colors.accent).opacity(0.35);
         let mut rows = Vec::new();
         let mut selection_quads = Vec::new();
-        let mut row = self.rows.prefix(first_line.0);
+        let mut row = first_row;
         let base_x = bounds.left() + px(PADDING) - self.scroll_x;
         let base_y = bounds.top() + px(PADDING);
 
@@ -87,11 +87,24 @@ impl Editor {
             let line = LineIndex(line_index);
             let line_start = self.document.line_start(line);
             let line_text = self.document.line_text(line);
-            for (segment_index, segment) in
-                chaus_layout::segments_with(&line_text, columns, self.settings.tab_stop, policy)
-                    .into_iter()
-                    .enumerate()
-            {
+            // Start at the first visible row of the first line and stop once
+            // the viewport is covered, so a giant wrapped line never builds
+            // every one of its rows just to draw a screenful.
+            let skip = if line_index == first_line.0 {
+                first_row.saturating_sub(self.rows.prefix(line_index))
+            } else {
+                0
+            };
+            let segments = chaus_layout::segments_window(
+                &line_text,
+                columns,
+                self.settings.tab_stop,
+                policy,
+                skip,
+                visible.saturating_add(4),
+            );
+            for (offset, segment) in segments.into_iter().enumerate() {
+                let segment_index = skip + offset;
                 let y = base_y + px((row as f32 - self.scroll_row) * f32::from(line_height));
                 row += 1;
                 if y + line_height < bounds.top() {

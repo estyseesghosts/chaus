@@ -479,9 +479,34 @@ pub fn segments_with(
     tab_stop: usize,
     policy: WrapPolicy,
 ) -> Vec<Segment> {
+    segments_window(text, max_columns, tab_stop, policy, 0, usize::MAX)
+}
+
+/// Visual rows `skip..skip + limit` of `text`, without materializing the rest.
+///
+/// A giant hard line can have thousands of rows; painting only needs the
+/// visible ones. The walker still scans the skipped rows (there is no random
+/// access into a soft-wrapped line), but no display strings are built for them.
+#[must_use]
+pub fn segments_window(
+    text: &str,
+    max_columns: Option<usize>,
+    tab_stop: usize,
+    policy: WrapPolicy,
+    skip: usize,
+    limit: usize,
+) -> Vec<Segment> {
     let mut iter = Rows::new(text, max_columns, tab_stop, policy);
+    let mut remaining = skip;
     let mut result = Vec::new();
+    if limit == 0 {
+        return result;
+    }
     while let Some(row) = iter.next() {
+        if remaining > 0 {
+            remaining -= 1;
+            continue;
+        }
         result.push(Segment {
             display: iter.display_for_last_row(row.start_column),
             char_start: row.char_start,
@@ -489,6 +514,9 @@ pub fn segments_with(
             start_column: row.start_column,
             columns: row.columns,
         });
+        if result.len() >= limit {
+            break;
+        }
     }
     result
 }
