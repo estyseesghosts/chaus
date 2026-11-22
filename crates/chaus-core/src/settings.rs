@@ -19,6 +19,14 @@ pub enum ThemeName {
 }
 
 impl ThemeName {
+    /// Every theme exposed by the preferences UI.
+    pub const ALL: [Self; 4] = [
+        Self::GeistDark,
+        Self::GeistLight,
+        Self::AquaLight,
+        Self::AquaDark,
+    ];
+
     /// Parse a `set theme=...` value.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
@@ -217,6 +225,59 @@ pub fn parse_rc(source: &str) -> ParsedRc {
         lines,
         diagnostics,
     }
+}
+
+/// Update the theme and Vim-default lines in an rc source while preserving
+/// comments, ordering and unrelated settings.
+///
+/// A line is rewritten only when it sets one of those values on its own;
+/// mixed `set` lines are left intact and an override line is appended.
+#[must_use]
+pub fn update_rc(source: &str, settings: &Settings) -> String {
+    let newline = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut lines: Vec<String> = source.lines().map(str::to_string).collect();
+    let mut theme_found = false;
+    let mut vim_found = false;
+    for line in &mut lines {
+        let mut words = line.split_whitespace();
+        if words.next() != Some("set") {
+            continue;
+        }
+        let Some(value) = words.next() else {
+            continue;
+        };
+        if words.next().is_some() {
+            continue;
+        }
+        if value.starts_with("theme=") {
+            *line = format!("set theme={}", settings.theme.as_str());
+            theme_found = true;
+        } else if matches!(value, "vim" | "novim") {
+            *line = if settings.vim {
+                "set vim".to_string()
+            } else {
+                "set novim".to_string()
+            };
+            vim_found = true;
+        }
+    }
+    if !theme_found {
+        lines.push(format!("set theme={}", settings.theme.as_str()));
+    }
+    if !vim_found {
+        lines.push(if settings.vim {
+            "set vim".to_string()
+        } else {
+            "set novim".to_string()
+        });
+    }
+    let mut result = lines.join(newline);
+    result.push_str(newline);
+    result
 }
 
 fn parse_line(

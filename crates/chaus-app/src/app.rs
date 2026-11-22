@@ -8,10 +8,11 @@ use chaus_io::LoadedFile;
 use gpui::{actions, px, size, App, AppContext, Bounds, Focusable, KeyBinding, WindowHandle};
 use silvestris::{chrome, ThemePreference};
 
+use crate::preferences::open_preferences;
 use crate::settings_global::SettingsGlobal;
 use crate::theme_choice::theme_id;
 
-actions!(chaus_app, [NewWindow, OpenFile]);
+actions!(chaus_app, [NewWindow, OpenFile, Preferences]);
 
 /// Parse the rc file from the conventional location, ignoring a missing file.
 #[must_use]
@@ -47,6 +48,21 @@ fn settings_path() -> Option<PathBuf> {
         .map(|home| home.join(".chausrc"))
 }
 
+/// Persist the theme and Vim default to the rc file, preserving comments and
+/// unrelated settings.
+pub(crate) fn save_settings(settings: &Settings) -> std::io::Result<()> {
+    let Some(path) = settings_path() else {
+        return Ok(());
+    };
+    let source = match std::fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let updated = chaus_core::settings::update_rc(&source, settings);
+    std::fs::write(path, updated)
+}
+
 /// Start the application. CLI-only flags are handled before this is called.
 pub fn run(paths: Vec<PathBuf>, new_window: bool) {
     let settings = load_settings();
@@ -62,10 +78,12 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) {
         cx.bind_keys([
             KeyBinding::new("ctrl-n", NewWindow, None),
             KeyBinding::new("ctrl-o", OpenFile, None),
+            KeyBinding::new("ctrl-,", Preferences, None),
         ]);
         cx.on_action(|_: &NewWindow, cx| {
             open_untitled(cx);
         });
+        cx.on_action(|_: &Preferences, cx| open_preferences(cx));
         cx.on_action(|_: &OpenFile, cx| {
             if !chaus_dialog::is_available() {
                 eprintln!("chaus: no native file picker is available on this platform yet");

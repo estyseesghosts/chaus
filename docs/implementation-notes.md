@@ -55,8 +55,9 @@ app-owned. Bundled fonts come from Silvestris; do not add a second copy.
 
 ## Known gaps in this increment
 
-- No native menu bar or preferences window yet. Theme and Vim defaults come from
-  `_chausrc`; theme switching at runtime is not exposed in the UI.
+- No native menu bar yet. `Ctrl+,` opens a Preferences window for the theme and
+  the Vim default applied to new windows. Other settings still come from
+  `_chausrc`.
 - Find and replace support literal search only; regular expressions are not
   implemented. Vim `/` and `?` remain separate.
 - Tree-sitter highlighting and external formatters are not linked.

@@ -2,6 +2,7 @@
 
 mod app;
 mod platform;
+mod preferences;
 mod settings_global;
 mod theme_choice;
 
