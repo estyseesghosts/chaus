@@ -68,13 +68,18 @@ and every measured size stay unchanged.
 `chaus-layout` implements UAX #14 word-preferred wrapping through
 `unicode-linebreak`: each row takes the last permitted break that fits; when no
 break fits (a long URL, path or token) it falls back to the furthest fitting
-grapheme. Byte offsets from the line-break crate are converted to char offsets
-and snapped to grapheme boundaries, so combining sequences, CJK and ZWJ emoji
-are never split. Trailing whitespace stays on the final row rather than making a
-blank one. Tabs keep their stops anchored to the logical line, continuation
-rows start at the normal left inset, and the source text and char offsets are
-untouched. A single `Rows` walker backs `row_count`, `segments` and the
-editor's painting, caret and hit-testing, so the caches cannot disagree.
+grapheme. Line-break opportunities are attached to graphemes as they are
+pulled rather than through a byte-offset table, and every break is snapped to a
+grapheme boundary, so combining sequences, CJK and ZWJ emoji are never split.
+A trailing whitespace run stays on its row while it fits one wrap width; a
+longer run wraps, and only the final row may absorb one extra width, which
+avoids a blank row without letting spaces widen a row without bound. Tabs keep
+their stops anchored to the logical line, continuation rows start at the normal
+left inset, and the source text and char offsets are untouched. A single `Rows`
+walker backs `row_count`, `segments` and the editor's painting, caret and
+hit-testing, so the caches cannot disagree. It buffers only the row being
+decided, so a multi-MiB unwrapped line costs memory proportional to one row, and
+`segments_window` builds display strings only for the visible rows.
 Changing the mode reflows the window without touching the document or undo
 history; `None` restores horizontal scrolling.
 
@@ -130,9 +135,13 @@ history; `None` restores horizontal scrolling.
   timestamps. A check in flight suppresses the next tick. Review opens the
   Reload / Save As / Overwrite / Cancel sheet. The watcher never reloads or
   overwrites the document automatically.
-- Edits refresh only the hard lines reported by `Document`, and the row prefix
-  is adjusted by the delta instead of rebuilt. Shape caches per visible row are
-  still recreated each frame; large-file paint cost is not yet measured.
+- Edits refresh only the hard lines reported by `Document`. A Fenwick tree
+  answers "rows above this line" and "which line owns this row" in
+  `O(log lines)`; a point edit updates one leaf, and a hard-line splice
+  re-wraps only the edited range. Visible rows are shaped once per
+  revision/highlight/font/theme/width and reused across text-preserving
+  repaints, with a 256-row bound. Frame-time measurements on real hardware are
+  still outstanding.
 - Save refuses a target with additional hard links instead of silently
   breaking them. Windows uses `ReplaceFileW` and keeps the target's ACLs and
   attributes. Conflict checks are repeated immediately before replacement, but
