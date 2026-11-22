@@ -17,8 +17,10 @@
 //! Wrapping is visual only: the source text and every char offset are kept
 //! exactly as they were.
 
+use std::collections::VecDeque;
+
 use unicode_linebreak::linebreaks;
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::{GraphemeIndices, UnicodeSegmentation};
 use unicode_width::UnicodeWidthStr;
 
 /// How a hard line is split when it does not fit the available width.
@@ -195,6 +197,7 @@ pub fn find_bar_width(available_width: f32) -> f32 {
     (available_width - 20.0).clamp(0.0, 470.0)
 }
 
+#[derive(Clone, Copy)]
 struct Grapheme<'a> {
     text: &'a str,
     char_start: usize,
@@ -204,59 +207,117 @@ struct Grapheme<'a> {
 }
 
 /// Iterator over the visual rows of one hard line.
+///
+/// Graphemes are pulled from the source one at a time and kept in a small
+/// buffer only for the row being decided, so a multi-MiB unwrapped line does
+/// not allocate a vector proportional to its length.
 pub struct Rows<'a> {
-    graphemes: Vec<Grapheme<'a>>,
+    source: GraphemeIndices<'a>,
+    breaks: Box<dyn Iterator<Item = usize> + 'a>,
+    next_break: Option<usize>,
+    /// Graphemes of the row most recently returned stay at the front until the
+    /// next call drains them, so [`Rows::display_for_last_row`] can build the
+    /// display string without copying.
+    buffer: VecDeque<Grapheme<'a>>,
+    consumed: usize,
+    char_cursor: usize,
     policy: WrapPolicy,
     max_columns: Option<usize>,
     tab_stop: usize,
-    next_grapheme: usize,
-    next_char: usize,
     column: usize,
+    source_done: bool,
     finished: bool,
 }
 
 impl<'a> Rows<'a> {
     fn new(text: &'a str, max_columns: Option<usize>, tab_stop: usize, policy: WrapPolicy) -> Self {
         let max_columns = max_columns.filter(|columns| *columns > 0);
-        let mut graphemes = Vec::new();
-        let mut char_index = 0usize;
-        for grapheme in text.graphemes(true) {
-            let char_start = char_index;
-            char_index += grapheme.chars().count();
-            graphemes.push(Grapheme {
-                text: grapheme,
-                char_start,
-                char_end: char_index,
-                break_before: false,
-            });
-        }
-        if policy == WrapPolicy::Word && !graphemes.is_empty() {
-            mark_break_opportunities(text, &mut graphemes);
-        }
+        let mut breaks: Box<dyn Iterator<Item = usize> + 'a> =
+            Box::new(linebreaks(text).map(|(byte, _)| byte));
+        let next_break = breaks.next();
         Self {
-            graphemes,
+            source: text.grapheme_indices(true),
+            breaks,
+            next_break,
+            buffer: VecDeque::new(),
+            consumed: 0,
+            char_cursor: 0,
             policy,
             max_columns,
             tab_stop,
-            next_grapheme: 0,
-            next_char: 0,
             column: 0,
+            source_done: false,
             finished: false,
         }
     }
 
+    /// Pull one grapheme and attach its line-break opportunity.
+    fn pull(&mut self) -> Option<Grapheme<'a>> {
+        if self.source_done {
+            return None;
+        }
+        let Some((byte_start, text)) = self.source.next() else {
+            self.source_done = true;
+            return None;
+        };
+        // `linebreaks` yields increasing byte offsets, the same order as the
+        // graphemes, so one forward cursor replaces a byte->char table.
+        while self.next_break.is_some_and(|at| at < byte_start) {
+            self.next_break = self.breaks.next();
+        }
+        let break_before = self.next_break == Some(byte_start);
+        if break_before {
+            self.next_break = self.breaks.next();
+        }
+        let char_start = self.char_cursor;
+        self.char_cursor += text.chars().count();
+        Some(Grapheme {
+            text,
+            char_start,
+            char_end: self.char_cursor,
+            break_before,
+        })
+    }
+
+    fn fill_to(&mut self, len: usize) {
+        while self.buffer.len() < len {
+            let Some(grapheme) = self.pull() else {
+                break;
+            };
+            self.buffer.push_back(grapheme);
+        }
+    }
+
+    fn fill_rest(&mut self) {
+        while let Some(grapheme) = self.pull() {
+            self.buffer.push_back(grapheme);
+        }
+    }
+
+    /// True when everything after the first `consumed` buffered graphemes,
+    /// including the source not pulled yet, is whitespace.
+    fn rest_is_whitespace(&self, consumed: usize) -> bool {
+        let is_space = |text: &str| text.chars().all(char::is_whitespace);
+        self.buffer
+            .iter()
+            .skip(consumed)
+            .all(|grapheme| is_space(grapheme.text))
+            && self.source.clone().all(|(_, text)| is_space(text))
+    }
+
     fn width_between(&self, start_column: usize, from: usize, to: usize) -> usize {
         let mut column = start_column;
-        for grapheme in &self.graphemes[from..to] {
+        for grapheme in self.buffer.iter().take(to).skip(from) {
             column += piece_width(grapheme.text, column, self.tab_stop);
         }
         column - start_column
     }
 
-    fn display_between(&self, from: usize, to: usize, start_column: usize) -> String {
+    /// Display string for the row most recently returned by [`Iterator::next`].
+    fn display_for_last_row(&self, start_column: usize) -> String {
         let mut display = String::new();
         let mut column = start_column;
-        for grapheme in &self.graphemes[from..to] {
+        for grapheme in self.buffer.iter().take(self.consumed) {
             let width = piece_width(grapheme.text, column, self.tab_stop);
             if grapheme.text == "\t" {
                 display.extend(std::iter::repeat_n(' ', width));
@@ -269,33 +330,6 @@ impl<'a> Rows<'a> {
     }
 }
 
-/// Map every UAX #14 break opportunity to a grapheme boundary.
-///
-/// `unicode-linebreak` reports UTF-8 byte offsets. A grapheme boundary is the
-/// only safe place to break, so an opportunity that falls inside a grapheme is
-/// ignored rather than splitting a combining sequence or ZWJ emoji.
-fn mark_break_opportunities(text: &str, graphemes: &mut [Grapheme<'_>]) {
-    // Byte offset -> char offset, valid at every char boundary.
-    let mut byte_to_char = vec![0usize; text.len() + 1];
-    let mut char_index = 0usize;
-    for (byte, _) in text.char_indices() {
-        byte_to_char[byte] = char_index;
-        char_index += 1;
-    }
-    byte_to_char[text.len()] = char_index;
-
-    let mut grapheme = 0usize;
-    for (byte, _) in linebreaks(text) {
-        let char_offset = byte_to_char[byte];
-        while grapheme + 1 < graphemes.len() && graphemes[grapheme + 1].char_start <= char_offset {
-            grapheme += 1;
-        }
-        if graphemes[grapheme].char_start == char_offset {
-            graphemes[grapheme].break_before = true;
-        }
-    }
-}
-
 impl Iterator for Rows<'_> {
     type Item = VisualRow;
 
@@ -303,7 +337,14 @@ impl Iterator for Rows<'_> {
         if self.finished {
             return None;
         }
-        if self.graphemes.is_empty() {
+        if self.consumed > 0 {
+            self.buffer.drain(..self.consumed);
+            self.consumed = 0;
+        }
+        if self.buffer.is_empty() {
+            self.fill_to(1);
+        }
+        if self.buffer.is_empty() {
             self.finished = true;
             return Some(VisualRow {
                 char_start: 0,
@@ -315,18 +356,19 @@ impl Iterator for Rows<'_> {
             });
         }
 
-        let start = self.next_grapheme;
-        let start_char = self.next_char;
         let start_column = self.column;
-        let mut end = start;
+        let mut end = 0usize;
         let mut last_break = None;
         let mut width = 0usize;
 
-        while end < self.graphemes.len() {
-            let grapheme = &self.graphemes[end];
+        loop {
+            self.fill_to(end + 1);
+            let Some(grapheme) = self.buffer.get(end).copied() else {
+                break;
+            };
             if self.policy == WrapPolicy::Word
                 && grapheme.break_before
-                && end > start
+                && end > 0
                 && self.max_columns.is_none_or(|max| width <= max)
             {
                 last_break = Some(end);
@@ -342,37 +384,31 @@ impl Iterator for Rows<'_> {
             end += 1;
         }
 
-        // Never emit a blank row made only of trailing whitespace: keep it on
-        // the final row so the visible document has no phantom line. All
-        // characters remain in row ranges and no source text is removed.
-        if self.policy == WrapPolicy::Word
-            && end < self.graphemes.len()
-            && end > start
-            && self.graphemes[end..]
-                .iter()
-                .all(|grapheme| grapheme.text.chars().all(char::is_whitespace))
-        {
-            end = self.graphemes.len();
+        // Keep a trailing whitespace run on the final row instead of emitting
+        // a blank row for it. The row ranges still cover every character.
+        if self.policy == WrapPolicy::Word && end > 0 && self.rest_is_whitespace(end) {
+            self.fill_rest();
+            end = self.buffer.len();
         }
-        if end == start {
+        if end == 0 {
             // Defensive: a zero-width first grapheme must still make progress.
-            end = start + 1;
+            end = 1;
         }
 
-        let end_char = self.graphemes[end - 1].char_end;
-        let columns = self.width_between(start_column, start, end);
-        self.next_grapheme = end;
-        self.next_char = end_char;
+        let char_start = self.buffer[0].char_start;
+        let char_end = self.buffer[end - 1].char_end;
+        let columns = self.width_between(start_column, 0, end);
+        self.consumed = end;
         self.column = start_column + columns;
-        if end >= self.graphemes.len() {
+        if self.buffer.len() == end && self.source_done {
             self.finished = true;
         }
         Some(VisualRow {
-            char_start: start_char,
-            char_end: end_char,
+            char_start,
+            char_end,
             start_column,
             columns,
-            grapheme_start: start,
+            grapheme_start: 0,
             grapheme_end: end,
         })
     }
@@ -402,7 +438,7 @@ pub fn segments_with(
     let mut result = Vec::new();
     while let Some(row) = iter.next() {
         result.push(Segment {
-            display: iter.display_between(row.grapheme_start, row.grapheme_end, row.start_column),
+            display: iter.display_for_last_row(row.start_column),
             char_start: row.char_start,
             char_end: row.char_end,
             start_column: row.start_column,
