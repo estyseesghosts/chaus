@@ -817,19 +817,37 @@ impl Render for Editor {
             .when_some(conflict_prompt, |element, sheet| element.child(sheet))
             .when_some(recovery_prompt, |element, sheet| element.child(sheet));
         // No toolbar: the window is deliberately just the titlebar and the
-        // document. Right-clicking the titlebar band opens the same commands
-        // that used to sit in a visible row.
+        // document. A transparent hit area over the title band opens the
+        // commands on right-click and forwards the drag/zoom gestures the
+        // frame's own titlebar would otherwise receive. The traffic lights and
+        // resize edges stay clear.
         let titlebar_height = theme.metrics.titlebar_height;
         let frame = silvestris::chrome::WindowFrame::new(title).child(content);
-        let mut root = div().size_full().child(frame).on_mouse_down(
-            MouseButton::Right,
-            cx.listener(move |editor, event: &MouseDownEvent, window, cx| {
-                if event.position.y <= px(titlebar_height) {
+        let titlebar_hit_area = div()
+            .absolute()
+            .top(px(6.))
+            .left(px(96.))
+            .right(px(8.))
+            .h(px((titlebar_height - 6.).max(1.)))
+            .on_mouse_down(MouseButton::Left, |event, window, _| {
+                if event.click_count == 2 {
+                    window.zoom_window();
+                } else {
+                    window.start_window_move();
+                }
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |editor, event: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     editor.open_menu(MenuKind::Root, event.position, window, cx);
-                }
-            }),
-        );
+                }),
+            );
+        let mut root = div()
+            .relative()
+            .size_full()
+            .child(frame)
+            .child(titlebar_hit_area);
         if let Some(menu) = self.menu.clone() {
             root = root.child(gpui::deferred(menu).priority(1));
         }

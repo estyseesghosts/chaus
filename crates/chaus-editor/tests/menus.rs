@@ -174,7 +174,11 @@ fn right_clicking_the_titlebar_opens_the_menus_without_a_toolbar() {
             "there must be no visible menu bar"
         );
 
-        cx.simulate_mouse_down(point(px(4.), px(4.)), MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_down(
+            point(px(450.), px(20.)),
+            MouseButton::Right,
+            Modifiers::none(),
+        );
         draw(cx);
         assert!(
             cx.debug_bounds("menu-shield").is_some(),
@@ -209,7 +213,7 @@ fn right_clicking_the_titlebar_opens_the_menus_without_a_toolbar() {
 fn right_clicking_the_document_does_not_open_the_menu() {
     run(false, |_editor, cx| {
         cx.simulate_mouse_down(
-            point(px(80.), px(200.)),
+            point(px(450.), px(200.)),
             MouseButton::Right,
             Modifiers::none(),
         );
