@@ -130,7 +130,7 @@ impl Editor {
                 cx.notify();
             }
             Outcome::Message(message) => {
-                self.set_status(message);
+                self.flash_status(message, cx);
                 cx.notify();
             }
             Outcome::Command(command) => self.run_ex_command(&command, window, cx),
@@ -244,7 +244,7 @@ impl Editor {
         }
         if changed {
             self.set_settings(settings);
-            self.set_status("Settings updated for this window");
+            self.flash_status("Settings updated for this window", cx);
         }
         cx.notify();
     }

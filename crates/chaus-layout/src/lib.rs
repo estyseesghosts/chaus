@@ -44,9 +44,38 @@ impl Segment {
     }
 }
 
+/// Clamp absolute logical-line selection columns to this segment and return
+/// segment-local columns. Returns `None` when the selection does not cover any
+/// cell on this visual row.
+#[must_use]
+pub fn local_selection_columns(
+    segment: &Segment,
+    start_column: usize,
+    end_column: usize,
+) -> Option<(usize, usize)> {
+    let start = start_column
+        .max(segment.start_column)
+        .min(segment.end_column())
+        .saturating_sub(segment.start_column);
+    let end = end_column
+        .max(segment.start_column)
+        .min(segment.end_column())
+        .saturating_sub(segment.start_column);
+    (end > start).then_some((start, end))
+}
+
 fn tab_width(column: usize, tab_stop: usize) -> usize {
     let tab_stop = tab_stop.max(1);
     tab_stop - (column % tab_stop)
+}
+
+/// Preferred floating find-bar width for a window of `available_width`.
+///
+/// The bar keeps a 10px inset on both sides and never grows past 470 logical
+/// pixels, so the 420px minimum window always leaves usable fields.
+#[must_use]
+pub fn find_bar_width(available_width: f32) -> f32 {
+    (available_width - 20.0).clamp(0.0, 470.0)
 }
 
 /// Split `text` into visual rows. `max_columns = None` means no soft wrap.

@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use chaus_core::document::{Document, LineRange};
 use chaus_core::eol::{Eol, EolMap};
@@ -34,6 +35,9 @@ use crate::editor_keys::{
 use crate::editor_recovery::{new_recovery_id, RecoveryPromptFocus};
 use crate::geometry::Geometry;
 
+/// Routine confirmations (`Saved`, `Copied`) disappear after this long.
+const TRANSIENT_STATUS: Duration = Duration::from_secs(4);
+
 /// One editor window.
 pub struct Editor {
     pub(crate) document: Document,
@@ -54,6 +58,7 @@ pub struct Editor {
     pub(crate) rows_columns: Option<usize>,
     pub(crate) settings: Settings,
     pub(crate) status: Option<String>,
+    pub(crate) status_epoch: u64,
     pub(crate) find_bar: Option<FindBar>,
     pub(crate) close_prompt: bool,
     pub(crate) close_focus: ClosePromptFocus,
@@ -124,6 +129,7 @@ impl Editor {
             rows_columns: None,
             settings,
             status: None,
+            status_epoch: 0,
             find_bar: None,
             close_prompt: false,
             close_focus,
@@ -200,11 +206,44 @@ impl Editor {
 
     pub(crate) fn set_status(&mut self, message: impl Into<String>) {
         self.status = Some(message.into());
+        self.status_epoch = self.status_epoch.wrapping_add(1);
+    }
+
+    /// Show a routine confirmation that disappears unless another message
+    /// replaces it first. The epoch prevents an old timer from clearing a newer
+    /// message, and persistent warnings set through [`Self::set_status`] bump
+    /// the epoch too.
+    pub(crate) fn flash_status(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.set_status(message);
+        let epoch = self.status_epoch;
+        cx.spawn(async move |editor, cx| {
+            cx.background_executor().timer(TRANSIENT_STATUS).await;
+            editor
+                .update(cx, |editor, cx| {
+                    if editor.status_epoch == epoch && editor.status.is_some() {
+                        editor.status = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Current corner message, if one is visible.
+    #[must_use]
+    pub fn status_text(&self) -> Option<&str> {
+        self.status.as_deref()
     }
 
     /// Show a transient message in the window corner.
     pub fn show_message(&mut self, message: impl Into<String>) {
         self.set_status(message);
+    }
+
+    /// Show a confirmation that disappears after a few seconds.
+    pub fn show_transient_message(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.flash_status(message, cx);
     }
 
     // ---- line/row caches --------------------------------------------------
@@ -348,7 +387,10 @@ impl Render for Editor {
             .disk_change
             .is_some()
             .then(|| self.render_disk_banner(cx));
-        let find_bar = self.find_bar.is_some().then(|| self.render_find_bar(cx));
+        let find_bar = self
+            .find_bar
+            .is_some()
+            .then(|| self.render_find_bar(window, cx));
         let close_prompt = self.close_prompt.then(|| self.render_close_prompt(cx));
         let conflict_prompt = self
             .conflict_prompt

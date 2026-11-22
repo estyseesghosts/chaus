@@ -8,7 +8,7 @@
 use std::ops::Range;
 
 use chaus_core::document::{EditCause, EditTransaction, TextEdit};
-use chaus_core::position::{CharOffset, CharRange, Selection};
+use chaus_core::position::{CharOffset, CharRange, LineIndex, Selection};
 use gpui::{
     Bounds, ClipboardItem, Context, EntityInputHandler, Pixels, Point, UTF16Selection, Window,
 };
@@ -108,7 +108,7 @@ impl EntityInputHandler for Editor {
         &mut self,
         range_utf16: Option<Range<usize>>,
         new_text: &str,
-        _new_selected_range_utf16: Option<Range<usize>>,
+        new_selected_range_utf16: Option<Range<usize>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -122,15 +122,29 @@ impl EntityInputHandler for Editor {
             .unwrap_or_else(|| self.selection.range().start);
         self.selection = Selection::caret(start);
         let range = CharRange::empty(start);
-        let after = Selection::caret(CharOffset(start.0 + text.chars().count()));
+        let character_count = text.chars().count();
+        let after = Selection::caret(CharOffset(start.0 + character_count));
+        // The native text service reports the selection within the marked
+        // text, not within the document. Convert it through UTF-16 boundaries
+        // so a composing window/segments selection is preserved.
+        let selected = new_selected_range_utf16
+            .and_then(|range| {
+                let from = char_index_for_utf16_offset(&text, range.start)?;
+                let to = char_index_for_utf16_offset(&text, range.end.max(range.start))?;
+                Some(Selection::new(
+                    CharOffset(start.0 + from),
+                    CharOffset(start.0 + to),
+                ))
+            })
+            .unwrap_or(after);
         let transaction = EditTransaction::new(
             EditCause::ImeCommit,
             TextEdit::new(range, text),
             self.selection,
-            after,
+            selected,
         );
         if let Ok(result) = self.document.apply(transaction) {
-            self.selection = after;
+            self.selection = selected;
             self.preedit_start = Some(start);
             self.preedit_active = true;
             self.marked = Some(CharRange::new(start, after.head));
@@ -164,12 +178,77 @@ impl EntityInputHandler for Editor {
         &mut self,
         range_utf16: Range<usize>,
         element_bounds: Bounds<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) -> Vec<Bounds<Pixels>> {
-        self.bounds_for_range(range_utf16, element_bounds, window, cx)
-            .into_iter()
-            .collect()
+        let Some(geometry) = self.geometry else {
+            return Vec::new();
+        };
+        let range = self.document.utf16_range_to_char(range_utf16);
+        if range.is_empty() {
+            return Vec::new();
+        }
+        let first_line = self.document.line_of(range.start);
+        let last_line = self
+            .document
+            .line_of(CharOffset(range.end.0.saturating_sub(1)));
+        let origin = geometry.text_origin();
+        let mut rectangles = Vec::new();
+        for line_number in first_line.0..=last_line.0 {
+            let line = LineIndex(line_number);
+            let line_start = self.document.line_start(line);
+            let line_text = self.document.line_text(line);
+            let segments = self.segments_for(line);
+            for segment in &segments {
+                let segment_start = CharOffset(line_start.0 + segment.char_start);
+                let segment_end = CharOffset(line_start.0 + segment.char_end);
+                let start = range.start.max(segment_start);
+                let end = range.end.min(segment_end);
+                if start >= end {
+                    continue;
+                }
+                let (_, row) = self.row_of_offset(segment_start);
+                let y = origin.y
+                    + gpui::px((row as f32 - self.scroll_row) * f32::from(geometry.line_height));
+                if y + geometry.line_height < element_bounds.top() || y > element_bounds.bottom() {
+                    continue;
+                }
+                let absolute_start = chaus_layout::column_at(
+                    &line_text,
+                    start.0.saturating_sub(line_start.0),
+                    self.settings.tab_stop,
+                )
+                .max(segment.start_column);
+                let absolute_end = if range.end >= segment_end {
+                    segment.end_column()
+                } else {
+                    chaus_layout::column_at(
+                        &line_text,
+                        end.0.saturating_sub(line_start.0),
+                        self.settings.tab_stop,
+                    )
+                }
+                .max(segment.start_column)
+                .min(segment.end_column());
+                let Some((start_column, end_column)) =
+                    chaus_layout::local_selection_columns(segment, absolute_start, absolute_end)
+                else {
+                    continue;
+                };
+                let x = origin.x - self.scroll_x
+                    + gpui::px(start_column as f32 * f32::from(geometry.char_width));
+                let width =
+                    gpui::px((end_column - start_column) as f32 * f32::from(geometry.char_width));
+                rectangles.push(Bounds::from_corners(
+                    Point { x, y },
+                    Point {
+                        x: x + width.max(gpui::px(1.0)),
+                        y: y + geometry.line_height,
+                    },
+                ));
+            }
+        }
+        rectangles
     }
 
     fn character_index_for_point(
@@ -222,4 +301,21 @@ impl Editor {
                 + gpui::px((row as f32 - self.scroll_row) * f32::from(geometry.line_height)),
         }
     }
+}
+
+/// Convert a UTF-16 offset within `text` to a char index. Offsets that land
+/// inside a surrogate pair round down to that scalar's start.
+fn char_index_for_utf16_offset(text: &str, offset: usize) -> Option<usize> {
+    let mut utf16 = 0;
+    for (index, character) in text.chars().enumerate() {
+        if utf16 >= offset {
+            return Some(index);
+        }
+        let next = utf16 + character.len_utf16();
+        if offset < next {
+            return Some(index);
+        }
+        utf16 = next;
+    }
+    (utf16 >= offset).then_some(text.chars().count())
 }

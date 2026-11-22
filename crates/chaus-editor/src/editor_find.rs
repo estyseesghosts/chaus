@@ -96,7 +96,8 @@ impl Editor {
         self.selection = Selection::new(start, end);
         self.preferred_column = None;
         self.scroll_to_caret();
-        self.set_status(format!("Match at {}", self.describe_offset(start)));
+        let offset = self.describe_offset(start);
+        self.flash_status(format!("Match at {offset}"), cx);
         cx.notify();
     }
 
@@ -147,7 +148,8 @@ impl Editor {
                 self.selection = after.clamp(self.document.len_chars());
                 self.after_change(result.affected_lines, cx);
                 self.find_next(true, cx);
-                self.set_status(format!("Replaced match at {}", self.describe_offset(start)));
+                let offset = self.describe_offset(start);
+                self.flash_status(format!("Replaced match at {offset}"), cx);
             }
             Err(error) => self.set_status(format!("Replace failed: {error}")),
         }
@@ -169,7 +171,7 @@ impl Editor {
         if replaced == 0 {
             self.set_status("No matches");
         } else {
-            self.set_status(format!("Replaced {replaced} occurrences"));
+            self.flash_status(format!("Replaced {replaced} occurrences"), cx);
         }
         cx.notify();
     }
@@ -242,18 +244,19 @@ impl Editor {
         }
     }
 
-    pub(crate) fn render_find_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_find_bar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let Some(bar) = self.find_bar.as_ref() else {
             return div().into_any_element();
         };
+        let width = chaus_layout::find_bar_width(f32::from(window.bounds().size.width));
         div()
             .id("chaus-find-bar")
             .debug_selector(|| "chaus-find-bar".to_string())
             .absolute()
             .top(px(8.0))
             .right(px(10.0))
-            .w(px(470.0))
+            .w(px(width))
             .p(px(8.0))
             .rounded(px(6.0))
             .border_1()
@@ -269,11 +272,13 @@ impl Editor {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(6.0))
                     .child(
                         div()
                             .flex_1()
+                            .min_w(px(120.0))
                             .debug_selector(|| "find-field".to_string())
                             .child(bar.find.clone()),
                     )
@@ -311,11 +316,13 @@ impl Editor {
                 element.child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .gap(px(6.0))
                         .child(
                             div()
                                 .flex_1()
+                                .min_w(px(120.0))
                                 .debug_selector(|| "replace-field".to_string())
                                 .child(bar.replace.clone()),
                         )

@@ -187,7 +187,7 @@ impl Editor {
         if !self.selection.is_empty() {
             let text = self.document.slice(self.selection.range());
             cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            self.set_status("Copied");
+            self.flash_status("Copied", cx);
             cx.notify();
         }
     }
@@ -243,7 +243,7 @@ impl Editor {
         } else {
             "Vim mode off"
         };
-        self.set_status(message);
+        self.flash_status(message, cx);
         cx.notify();
     }
 

@@ -101,13 +101,13 @@ impl Editor {
                 {
                     let start = selection.start.max(segment_start);
                     let end = selection.end.min(segment_end);
-                    let start_column = chaus_layout::column_at(
+                    let absolute_start = chaus_layout::column_at(
                         &line_text,
                         start.0.saturating_sub(line_start.0),
                         self.settings.tab_stop,
                     )
                     .max(segment.start_column);
-                    let end_column = if selection.end >= segment_end {
+                    let absolute_end = if selection.end >= segment_end {
                         segment.end_column()
                     } else {
                         chaus_layout::column_at(
@@ -115,8 +115,17 @@ impl Editor {
                             end.0.saturating_sub(line_start.0),
                             self.settings.tab_stop,
                         )
-                    };
-                    if end_column > start_column {
+                    }
+                    .max(segment.start_column)
+                    .min(segment.end_column());
+                    // Segments begin at the left edge of their visual row, so
+                    // selection columns must be segment-local. Using absolute
+                    // logical-line columns shifts wrapped rows right.
+                    if let Some((start_column, end_column)) = chaus_layout::local_selection_columns(
+                        &segment,
+                        absolute_start,
+                        absolute_end,
+                    ) {
                         let left = base_x + px(start_column as f32 * f32::from(char_width));
                         let right = base_x + px(end_column as f32 * f32::from(char_width));
                         selection_quads.push(fill(
