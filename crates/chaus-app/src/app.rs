@@ -17,30 +17,69 @@ use crate::theme_choice::theme_id;
 
 actions!(chaus_app, [NewWindow, OpenFile, Preferences]);
 
-/// Parse the rc file from the conventional location, ignoring a missing file.
+/// Result of reading and validating the rc file.
+pub(crate) struct SettingsRead {
+    pub(crate) settings: Settings,
+    /// Human-readable `line N: message` warnings for the Preferences window.
+    pub(crate) diagnostics: Vec<String>,
+    pub(crate) path: Option<PathBuf>,
+}
+
+/// Parse the rc file from the conventional location, reporting diagnostics.
+/// A missing file is not an error; it yields defaults and the path where the
+/// file would be created.
 #[must_use]
-pub fn load_settings() -> Settings {
+pub(crate) fn read_settings() -> SettingsRead {
     let Some(path) = settings_path() else {
-        return Settings::default();
+        return SettingsRead {
+            settings: Settings::default(),
+            diagnostics: Vec::new(),
+            path: None,
+        };
     };
     let source = match std::fs::read_to_string(&path) {
         Ok(source) => source,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Settings::default();
+            return SettingsRead {
+                settings: Settings::default(),
+                diagnostics: Vec::new(),
+                path: Some(path),
+            };
         }
         Err(error) => {
-            eprintln!("chaus: could not read {}: {error}", path.display());
-            return Settings::default();
+            return SettingsRead {
+                settings: Settings::default(),
+                diagnostics: vec![format!("Could not read {}: {error}", path.display())],
+                path: Some(path),
+            };
         }
     };
     let parsed = chaus_core::settings::parse_rc(&source);
-    for diagnostic in &parsed.diagnostics {
-        eprintln!("chaus: {}: {diagnostic}", path.display());
+    let diagnostics = parsed
+        .diagnostics
+        .iter()
+        .map(|diagnostic| format!("line {}: {}", diagnostic.line, diagnostic.message))
+        .collect();
+    SettingsRead {
+        settings: parsed.settings,
+        diagnostics,
+        path: Some(path),
     }
-    parsed.settings
 }
 
-fn settings_path() -> Option<PathBuf> {
+/// Parse the rc file from the conventional location, ignoring a missing file.
+#[must_use]
+pub fn load_settings() -> Settings {
+    let read = read_settings();
+    if let Some(path) = &read.path {
+        for diagnostic in &read.diagnostics {
+            eprintln!("chaus: {}: {diagnostic}", path.display());
+        }
+    }
+    read.settings
+}
+
+pub(crate) fn settings_path() -> Option<PathBuf> {
     if cfg!(windows) {
         return std::env::var_os("USERPROFILE")
             .map(PathBuf::from)
@@ -51,13 +90,33 @@ fn settings_path() -> Option<PathBuf> {
         .map(|home| home.join(".chausrc"))
 }
 
-/// Persist the theme and Vim default to the rc file, preserving comments and
+/// Persist Preferences-owned settings to the rc file, preserving comments and
 /// unrelated settings.
 pub(crate) fn save_settings(settings: &Settings) -> std::io::Result<()> {
     let Some(path) = settings_path() else {
         return Ok(());
     };
     chaus_io::write_settings_rc(&path, settings)
+}
+
+/// Push a settings snapshot to every open editor window.
+///
+/// Preferences changes must not recreate document entities: `set_settings`
+/// only replaces layout/typography settings and rebuilds the row cache, so the
+/// document, selection, undo history, focus and file metadata stay put. The
+/// live Vim mode is intentionally not touched; `settings.vim` is only the
+/// default for future windows.
+pub(crate) fn apply_to_open_editors(settings: &Settings, cx: &mut App) {
+    for window in cx.windows() {
+        let Some(handle) = window.downcast::<Editor>() else {
+            continue;
+        };
+        let settings = settings.clone();
+        let _ = handle.update(cx, |editor, _, cx| {
+            editor.set_settings(settings);
+            cx.notify();
+        });
+    }
 }
 
 /// Start the application and return the process exit status.

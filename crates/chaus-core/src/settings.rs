@@ -263,11 +263,25 @@ pub fn parse_rc(source: &str) -> ParsedRc {
     }
 }
 
-/// Update the theme and Vim-default lines in an rc source while preserving
-/// comments, ordering and unrelated settings.
+/// Render a `set font=` line, quoting a family that contains spaces so the
+/// parser keeps it as one value.
+fn font_line(font: &str) -> String {
+    if font.chars().any(char::is_whitespace) {
+        format!("set font=\"{font}\"")
+    } else {
+        format!("set font={font}")
+    }
+}
+
+/// Update the settings the Preferences window owns in an rc source while
+/// preserving comments, ordering and unrelated settings (including mappings
+/// and unsupported lines).
 ///
 /// A line is rewritten only when it sets one of those values on its own;
-/// mixed `set` lines are left intact and an override line is appended.
+/// mixed `set` lines are left intact and an override line is appended. Legacy
+/// `set wrap` / `set nowrap` lines are kept verbatim when they still describe
+/// the chosen mode. Values left at their default are not appended, so loading
+/// and saving a hand-written file does not grow it with noise.
 #[must_use]
 pub fn update_rc(source: &str, settings: &Settings) -> String {
     let newline = if source.contains("\r\n") {
@@ -275,32 +289,80 @@ pub fn update_rc(source: &str, settings: &Settings) -> String {
     } else {
         "\n"
     };
-    let mut lines: Vec<String> = source.lines().map(str::to_string).collect();
+    let mut lines = Vec::new();
     let mut theme_found = false;
     let mut vim_found = false;
-    for line in &mut lines {
-        let mut words = line.split_whitespace();
-        if words.next() != Some("set") {
+    let mut font_found = false;
+    let mut font_size_found = false;
+    let mut line_height_found = false;
+    let mut wrap_found = false;
+    let mut tab_stop_found = false;
+    let mut expand_tabs_found = false;
+
+    for original in source.lines() {
+        let mut line = original.to_string();
+        let mut words = split_set_arguments(&line).into_iter();
+        if words.next().as_deref() != Some("set") {
+            lines.push(line);
             continue;
         }
         let Some(value) = words.next() else {
+            lines.push(line);
             continue;
         };
         if words.next().is_some() {
+            lines.push(line);
             continue;
         }
         if value.starts_with("theme=") {
-            *line = format!("set theme={}", settings.theme.as_str());
+            line = format!("set theme={}", settings.theme.as_str());
             theme_found = true;
-        } else if matches!(value, "vim" | "novim") {
-            *line = if settings.vim {
+        } else if matches!(value.as_str(), "vim" | "novim") {
+            line = if settings.vim {
                 "set vim".to_string()
             } else {
                 "set novim".to_string()
             };
             vim_found = true;
+        } else if value.starts_with("font=") {
+            match &settings.font_family {
+                Some(font) => {
+                    line = font_line(font);
+                    font_found = true;
+                }
+                None => {
+                    // No explicit face: the theme supplies one. Drop the
+                    // standalone line rather than leaving a stale override.
+                    continue;
+                }
+            }
+        } else if value.starts_with("fontsize=") {
+            line = format!("set fontsize={}", settings.font_size);
+            font_size_found = true;
+        } else if value.starts_with("lineheight=") {
+            line = format!("set lineheight={}", settings.line_height);
+            line_height_found = true;
+        } else if value.starts_with("tabstop=") {
+            line = format!("set tabstop={}", settings.tab_stop);
+            tab_stop_found = true;
+        } else if matches!(value.as_str(), "expandtab" | "noexpandtab") {
+            line = if settings.expand_tabs {
+                "set expandtab".to_string()
+            } else {
+                "set noexpandtab".to_string()
+            };
+            expand_tabs_found = true;
+        } else if matches!(value.as_str(), "wrap" | "nowrap") || value.starts_with("wrap=") {
+            let legacy_is_current = (value == "wrap" && settings.wrap == WrapMode::Word)
+                || (value == "nowrap" && settings.wrap == WrapMode::None);
+            if !legacy_is_current {
+                line = format!("set wrap={}", settings.wrap.as_str());
+            }
+            wrap_found = true;
         }
+        lines.push(line);
     }
+
     if !theme_found {
         lines.push(format!("set theme={}", settings.theme.as_str()));
     }
@@ -310,6 +372,27 @@ pub fn update_rc(source: &str, settings: &Settings) -> String {
         } else {
             "set novim".to_string()
         });
+    }
+    if !font_found {
+        if let Some(font) = &settings.font_family {
+            lines.push(font_line(font));
+        }
+    }
+    let defaults = Settings::default();
+    if !font_size_found && settings.font_size != defaults.font_size {
+        lines.push(format!("set fontsize={}", settings.font_size));
+    }
+    if !line_height_found && settings.line_height != defaults.line_height {
+        lines.push(format!("set lineheight={}", settings.line_height));
+    }
+    if !wrap_found && settings.wrap != defaults.wrap {
+        lines.push(format!("set wrap={}", settings.wrap.as_str()));
+    }
+    if !tab_stop_found && settings.tab_stop != defaults.tab_stop {
+        lines.push(format!("set tabstop={}", settings.tab_stop));
+    }
+    if !expand_tabs_found && !settings.expand_tabs {
+        lines.push("set noexpandtab".to_string());
     }
     let mut result = lines.join(newline);
     result.push_str(newline);
@@ -357,6 +440,32 @@ fn parse_line(
     }
 }
 
+/// Split a `set` argument on whitespace while keeping quoted values such as
+/// `font="Geist Mono"` together. Comments are already stripped by the caller.
+fn split_set_arguments(argument: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for character in argument.chars() {
+        match character {
+            '"' => {
+                quoted = !quoted;
+                current.push(character);
+            }
+            character if character.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            character => current.push(character),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
 fn parse_set(
     line: &str,
     line_number: usize,
@@ -372,9 +481,9 @@ fn parse_set(
         });
         return LineRole::Invalid;
     }
-    let words: Vec<&str> = argument.split_whitespace().collect();
+    let words = split_set_arguments(argument);
     let mut role = LineRole::Unknown;
-    for word in words {
+    for word in &words {
         let result = if let Some((key, value)) = word.split_once('=') {
             apply_key_value(key, value, settings)
         } else {

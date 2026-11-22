@@ -85,8 +85,15 @@ history; `None` restores horizontal scrolling.
   checked Vim Mode/Wrap items and disabled Undo/Redo/Cut/Copy come from that
   window's state; the document canvas has no toolbar or tabs. `Ctrl+Shift+V`
   toggles Vim in both modes and is inert while a sheet, find bar or menu owns
-  the keyboard. `Ctrl+,` opens a Preferences window for the theme and the Vim
-  default applied to new windows. Other settings still come from `_chausrc`.
+  the keyboard. `Ctrl+,` opens a Preferences window for theme, font family,
+  font size, line height, wrap mode, tab stop, spaces-vs-tabs and the Vim
+  default applied to new windows. Applying a value updates every open editor
+  in place through `Editor::set_settings` (document, selection, undo, focus and
+  file state are preserved), writes the same validated `Settings` value to the
+  rc file, and keeps comments, mappings and unsupported lines intact. `Reload`
+  re-reads an externally edited file and lists invalid lines instead of
+  overwriting them. The Vim checkbox is not the live mode; `Ctrl+Shift+V` and
+  View → Vim Mode remain per-window.
 - Find and replace support literal search only; regular expressions are not
   implemented. Vim `/` and `?` remain separate.
 - Tree-sitter highlighting is not linked. External formatters are explicit and

@@ -666,7 +666,7 @@ pub fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     replace_path(&temporary_path, target)
 }
 
-/// Persist theme and Vim-default settings to an rc file.
+/// Persist the Preferences-owned settings to an rc file.
 ///
 /// Comments, unrelated directives and the file's line-ending convention are
 /// preserved. The existing file is re-read immediately before the atomic
