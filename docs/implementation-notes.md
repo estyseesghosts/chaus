@@ -70,16 +70,18 @@ app-owned. Bundled fonts come from Silvestris; do not add a second copy.
 - Tree-sitter highlighting and external formatters are not linked.
 - Native open/save dialogs are implemented on Windows only. Elsewhere the
   command reports that no picker is available; pass paths on the command line.
-- `selection_bounds_for_range` is not implemented, so native accessibility can
-  read text but cannot query the pixel bounds of a selection.
+- `selection_bounds_for_range` delegates to the range geometry, so native
+  accessibility can query a selection rectangle; multi-row selections use the
+  same start/end box as `bounds_for_range`.
 - Save is still synchronous on the UI thread and serializes the whole document
   into one allocation before writing. A large save can briefly stall the window.
 - Save conflict handling reports a message and lets the next Save (including
   `:w`/`:wq`) overwrite; the full Reload / Save As / Overwrite / Cancel sheet is
   not implemented.
-- POSIX save uses `rename` over the target, which does not preserve additional
-  hard links; Windows uses `ReplaceFileW` and keeps the target's ACLs and
-  attributes.
+- Save refuses a target with additional hard links instead of silently
+  breaking them. Windows uses `ReplaceFileW` and keeps the target's ACLs and
+  attributes. Conflict checks are repeated immediately before replacement, but
+  the check and replacement are still not one atomic operation.
 - Closing a dirty window uses a two-step stopgap (warn, then discard) instead of a
   Save / Discard / Cancel sheet.
 - No crash-recovery snapshots and no external file watcher.

@@ -421,9 +421,7 @@ impl Engine {
         self.insert_repeat = repeat.max(1);
     }
 
-    pub(crate) fn take_insert_session(
-        &mut self,
-    ) -> Option<(CharOffset, Vec<Key>, bool, usize)> {
+    pub(crate) fn take_insert_session(&mut self) -> Option<(CharOffset, Vec<Key>, bool, usize)> {
         let start = self.insert_start.take()?;
         let keys = self.insert_keys.take().unwrap_or_default();
         let always_record = std::mem::take(&mut self.insert_always_records);

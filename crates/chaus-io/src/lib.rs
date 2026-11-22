@@ -410,9 +410,7 @@ pub fn save(request: SaveRequest<'_>) -> Result<FileMeta, SaveError> {
         }
         match check_conflict(baseline) {
             Ok(()) => Ok(()),
-            Err(ConflictCheckError::Conflict(conflict)) => {
-                Err(SaveError::Conflict(conflict))
-            }
+            Err(ConflictCheckError::Conflict(conflict)) => Err(SaveError::Conflict(conflict)),
             Err(ConflictCheckError::Io { path, source }) => Err(SaveError::Io { path, source }),
         }
     };
@@ -528,8 +526,9 @@ mod windows_replace {
         let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
         // SAFETY: the file handle is valid for the duration of the call, and
         // the output pointer refers to writable storage for the structure.
-        let success =
-            unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, information.as_mut_ptr()) };
+        let success = unsafe {
+            GetFileInformationByHandle(file.as_raw_handle() as _, information.as_mut_ptr())
+        };
         if success == 0 {
             None
         } else {

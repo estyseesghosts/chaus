@@ -185,7 +185,10 @@ fn saving_inside_a_group_does_not_make_later_grouped_text_clean() {
     document.end_user_operation();
 
     assert_eq!(document.text(), "abc");
-    assert!(document.is_dirty(), "text appended after the save is unsaved");
+    assert!(
+        document.is_dirty(),
+        "text appended after the save is unsaved"
+    );
     document.undo();
     assert_eq!(document.text(), "ab");
     assert!(!document.is_dirty(), "one undo returns to the saved branch");

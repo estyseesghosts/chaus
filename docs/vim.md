@@ -39,7 +39,7 @@ Counts: `3j`, `2dw`, `d3w` and `2d3w` should have documented multiplication sema
 | Paste | `p`, `P` | Distinguish charwise/linewise yank; internal unnamed register + system clipboard policy |
 | Search | `/`, `?`, `n`, `N`, `*` optionally | Literal substring first; highlight match temporarily; cancel returns to old selection |
 | Changes | `u`, `Ctrl+R`, `.`, `x`, `r{char}` optionally | `.` replays semantic last change, not raw key bytes; avoid history corruption |
-| Ex subset | `:w`, `:q`, `:wq`, `:q!` (implemented); `:e {path}`, `:set {supported}` (target, not wired yet) | No arbitrary Ex, `:!`, `:source`, register expressions or shell |
+| Ex subset | `:w`, `:q`, `:wq`, `:q!`; `:e {path}` / `:e! {path}`; `:set wrap`, `nowrap`, `expandtab`, `noexpandtab`, `tabstop=N` | No arbitrary Ex, `:!`, `:source`, register expressions or shell |
 
 **Scope limits:** no macro recording, named registers, jump lists, marks, complex search regex, substitutions, splits/tabs, full Vim text-object language, Vimscript evaluation, `:global`, `:normal`, `:help` compatibility, or plugin ABI. If a key is unimplemented, show a concise nonblocking indicator rather than pretending success.
 
@@ -56,7 +56,7 @@ nnoremap <leader>w :w<CR>
 nnoremap <leader>e :e<Space>
 ```
 
-`<leader>`, `<CR>`, `<Esc>`, `<Space>`, `<C-x>` tokens are interpreted by our parser only if explicitly supported. Map targets to recognized **editor intents or Vim token sequences**; validate them before activation. For v0.1 limit to **non-recursive Normal-mode mappings**, with an explicit maximum sequence length and ambiguity timeout (e.g. configurable 500 ms for user mappings only). Reject cycles, duplicates and collisions with the mandatory toggle/OS shortcuts. For a mapping from `a` to `b`, resolve once; don't recursively expand into a second remapping. Surface diagnostics with filename and line.
+`<leader>`, `<CR>`, `<Esc>`, `<Space>`, `<C-x>` tokens are interpreted by our parser only if explicitly supported. Map targets to recognized **editor intents or Vim token sequences**; validate them before activation. For v0.1 limit to **non-recursive Normal-mode mappings**, with an explicit maximum sequence length and a 500 ms ambiguity timeout for user mappings only. Reject cycles, duplicates and collisions with the mandatory toggle/OS shortcuts. For a mapping from `a` to `b`, resolve once; don't recursively expand into a second remapping. Surface diagnostics with filename and line.
 
 Keep mapping registry separate from GPUI global keymap. Silvestris's command binding snapshots cannot safely be rewritten by changing a descriptor at runtime; dispatch Vim mapping chords within the focused editor state. When config reloads, replace the mapping table atomically, abort current pending prefixes, and keep the current editing mode unless the user explicitly toggles it.
 

@@ -80,8 +80,7 @@ impl Editor {
             cx.background_executor().timer(MAPPING_TIMEOUT).await;
             editor
                 .update(cx, |editor, cx| {
-                    if editor.mapping_epoch != epoch
-                        || !editor.vim_engine.mapping_prefix_pending()
+                    if editor.mapping_epoch != epoch || !editor.vim_engine.mapping_prefix_pending()
                     {
                         return;
                     }
@@ -157,9 +156,7 @@ impl Editor {
     }
 
     fn run_ex_command(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let name_end = command
-            .find(char::is_whitespace)
-            .unwrap_or(command.len());
+        let name_end = command.find(char::is_whitespace).unwrap_or(command.len());
         let name = &command[..name_end];
         let rest = command[name_end..].trim();
         match name {
