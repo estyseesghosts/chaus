@@ -62,6 +62,8 @@ pub struct Editor {
     pub(crate) recovery_focus: RecoveryPromptFocus,
     pub(crate) recovery_key: u64,
     pub(crate) recovery_epoch: u64,
+    pub(crate) disk_change: Option<chaus_io::SaveConflict>,
+    pub(crate) disk_epoch: u64,
     pub(crate) force_next_save: bool,
     pub(crate) vim: bool,
     pub(crate) vim_engine: Engine,
@@ -125,6 +127,8 @@ impl Editor {
             recovery_focus,
             recovery_key: new_recovery_id(),
             recovery_epoch: 0,
+            disk_change: None,
+            disk_epoch: 0,
             force_next_save: false,
             vim,
             vim_engine: Engine::new(mappings),
@@ -136,6 +140,7 @@ impl Editor {
             opening: false,
         };
         editor.rebuild_rows();
+        editor.start_disk_watch(cx);
         editor
     }
 
@@ -331,6 +336,10 @@ impl Render for Editor {
         window.set_window_title(&title);
         let background = silvestris::convert::hsla(theme.colors.content);
         let status = self.status.clone();
+        let disk_banner = self
+            .disk_change
+            .is_some()
+            .then(|| self.render_disk_banner(cx));
         let find_bar = self.find_bar.is_some().then(|| self.render_find_bar(cx));
         let close_prompt = self.close_prompt.then(|| self.render_close_prompt(cx));
         let conflict_prompt = self
@@ -535,6 +544,7 @@ impl Render for Editor {
                         .child(message),
                 )
             })
+            .when_some(disk_banner, |element, banner| element.child(banner))
             .when_some(find_bar, |element, bar| element.child(bar))
             .when_some(close_prompt, |element, sheet| element.child(sheet))
             .when_some(conflict_prompt, |element, sheet| element.child(sheet))

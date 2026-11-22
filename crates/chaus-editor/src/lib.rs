@@ -19,6 +19,7 @@ mod editor_paint;
 mod editor_pointer;
 mod editor_recovery;
 mod editor_vim;
+mod editor_watch;
 mod geometry;
 mod paint_row;
 
