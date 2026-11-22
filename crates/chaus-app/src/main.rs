@@ -1,10 +1,6 @@
 //! chaus entry point. CLI parsing happens before GPUI and the GPU initialize.
 
-mod app;
-mod platform;
-mod preferences;
-mod settings_global;
-mod theme_choice;
+use chaus_app::app;
 
 fn main() {
     let command = match chaus_cli::parse(std::env::args_os().skip(1)) {
@@ -18,7 +14,12 @@ fn main() {
     match command {
         chaus_cli::Command::Help => print!("{}", chaus_cli::help_text()),
         chaus_cli::Command::Version => println!("chaus {}", env!("CARGO_PKG_VERSION")),
-        chaus_cli::Command::Run { paths, new_window } => app::run(paths, new_window),
+        chaus_cli::Command::Run { paths, new_window } => {
+            let code = app::run(paths, new_window);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         _ => {}
     }
 }

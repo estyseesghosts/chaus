@@ -39,6 +39,13 @@ fn main() {
             "cargo:rustc-link-arg-bins=/MANIFESTINPUT:{}",
             forward_slashes(&manifest_file)
         );
+        // Integration tests link the application library directly and need the
+        // same Common-Controls 6 manifest as the binary.
+        println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}",
+            forward_slashes(&manifest_file)
+        );
         return;
     }
 

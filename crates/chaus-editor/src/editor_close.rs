@@ -55,6 +55,15 @@ impl Editor {
         cx.notify();
     }
 
+    /// Re-show the dirty-close sheet after a cancelled or failed save. The
+    /// window stays open and keyboard focus returns to a reachable button.
+    pub(crate) fn restore_close_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_prompt = true;
+        self.vim_engine.cancel_prefix();
+        window.focus(&self.close_focus.save, cx);
+        cx.notify();
+    }
+
     pub(crate) fn discard_and_close(&mut self, window: &mut Window) {
         self.close_prompt = false;
         self.remove_recovery_snapshot();
@@ -63,10 +72,13 @@ impl Editor {
 
     pub(crate) fn save_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_prompt = false;
-        if self.file.is_some() {
-            self.save_inner(true, cx);
+        let started = if self.file.is_some() {
+            self.save_inner(true, cx)
         } else {
-            self.save_as_inner(true, window, cx);
+            self.save_as_inner(true, window, cx)
+        };
+        if !started {
+            self.restore_close_prompt(window, cx);
         }
     }
 

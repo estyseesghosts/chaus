@@ -85,7 +85,7 @@ impl Editor {
                 self.document.cancel_user_operation();
                 self.vim_engine.reset();
                 self.rebuild_rows();
-                self.set_status(format!("Opened {}", path.display()));
+                self.flash_status(format!("Opened {}", path.display()), cx);
             }
             Err(error) => self.set_status(format!("Open failed: {error}")),
         }
@@ -106,24 +106,32 @@ impl Editor {
     }
 
     pub(crate) fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
-        self.save_as_inner(false, window, cx);
+        let _ = self.save_as_inner(false, window, cx);
     }
 
     pub(crate) fn save_as_inner(
         &mut self,
         close_after: bool,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.saving {
             self.set_status("Save already in progress");
-            cx.notify();
-            return;
+            if close_after {
+                self.restore_close_prompt(window, cx);
+            } else {
+                cx.notify();
+            }
+            return false;
         }
         if !chaus_dialog::is_available() {
             self.set_status("Save As needs a native file picker, which is not available yet");
-            cx.notify();
-            return;
+            if close_after {
+                self.restore_close_prompt(window, cx);
+            } else {
+                cx.notify();
+            }
+            return false;
         }
         // Choosing a new target abandons a pending conflict overwrite; a
         // cancelled picker must not leave the old force armed either.
@@ -136,14 +144,18 @@ impl Editor {
             chaus_dialog::choose_file(chaus_dialog::Choice::Save, "Save As", suggested.as_deref())
         else {
             self.set_status("Save cancelled");
-            cx.notify();
-            return;
+            if close_after {
+                self.restore_close_prompt(window, cx);
+            } else {
+                cx.notify();
+            }
+            return false;
         };
         let had_utf8_bom = self
             .file
             .as_ref()
             .is_some_and(|file| file.meta.had_utf8_bom);
-        self.start_save(path.clone(), path, had_utf8_bom, None, close_after, cx);
+        self.start_save(path.clone(), path, had_utf8_bom, None, close_after, cx)
     }
 
     /// Save the current document through the normal conflict-checked path.
@@ -253,16 +265,25 @@ impl Editor {
                 }
                 if close_after {
                     self.set_status("Saved the previous revision; save again to quit");
+                    self.restore_close_prompt(window, cx);
                 } else {
-                    self.set_status("Saved");
+                    self.flash_status("Saved", cx);
                 }
             }
             Err(SaveError::Conflict(conflict)) => {
                 self.disk_change = Some(conflict);
                 self.show_conflict_prompt(conflict, window, cx);
                 self.set_status(format!("{conflict}"));
+                if close_after {
+                    self.close_prompt = true;
+                }
             }
-            Err(error) => self.set_status(format!("Save failed: {error}")),
+            Err(error) => {
+                self.set_status(format!("Save failed: {error}"));
+                if close_after {
+                    self.restore_close_prompt(window, cx);
+                }
+            }
         }
         cx.notify();
     }

@@ -1,13 +1,15 @@
 //! Preferences window for app-wide defaults.
 
 use chaus_core::settings::{Settings, ThemeName};
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, px, size, App, AppContext as _, Bounds, Context, Global, IntoElement, ParentElement as _,
-    Render, Styled as _, Window, WindowHandle,
+    div, px, size, App, AppContext as _, Bounds, Context, Global, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window,
+    WindowHandle,
 };
 use silvestris::controls::{Button, CheckState, Checkbox, Segment, SegmentedControl};
 use silvestris::preferences::{Form, FormRow};
-use silvestris::{chrome, ThemePreference};
+use silvestris::{chrome, ActiveTheme, ThemePreference};
 
 use crate::app::save_settings;
 use crate::settings_global::SettingsGlobal;
@@ -41,12 +43,14 @@ pub(crate) fn open_preferences(cx: &mut App) {
 
 struct Preferences {
     settings: Settings,
+    save_error: Option<String>,
 }
 
 impl Preferences {
     fn new(cx: &mut Context<Self>) -> Self {
         Self {
             settings: cx.global::<SettingsGlobal>().0.clone(),
+            save_error: None,
         }
     }
 
@@ -56,9 +60,9 @@ impl Preferences {
             ThemePreference::explicit(theme_id(self.settings.theme)),
             cx,
         );
-        if let Err(error) = save_settings(&self.settings) {
-            eprintln!("chaus: could not save preferences: {error}");
-        }
+        self.save_error = save_settings(&self.settings)
+            .err()
+            .map(|error| format!("Could not save preferences: {error}"));
         cx.notify();
     }
 }
@@ -105,6 +109,17 @@ impl Render for Preferences {
                         .row(FormRow::new("Theme", theme_control))
                         .row(FormRow::control(vim)),
                 )
+                .when_some(self.save_error.clone(), |element, error| {
+                    element.child(
+                        div()
+                            .id("preferences-save-error")
+                            .debug_selector(|| "preferences-save-error".to_string())
+                            .role(gpui::Role::AlertDialog)
+                            .text_size(px(12.0))
+                            .text_color(silvestris::convert::hsla(cx.theme().colors.error))
+                            .child(error),
+                    )
+                })
                 .child(
                     div().flex().justify_end().child(
                         Button::new("preferences-close", "Close")

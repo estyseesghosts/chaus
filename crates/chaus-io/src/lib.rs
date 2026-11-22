@@ -13,6 +13,7 @@ use std::time::SystemTime;
 pub mod recovery;
 
 use chaus_core::eol::{Eol, EolMap};
+use chaus_core::settings::Settings;
 use tempfile::Builder;
 
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
@@ -615,6 +616,49 @@ fn commit(temporary: &Path, target: &Path) -> Result<(), SaveError> {
         path: target.to_path_buf(),
         source,
     })
+}
+
+/// Replace `target` with `bytes` atomically.
+///
+/// The temporary file lives in the target's directory and is synced before the
+/// OS-appropriate replacement. A failed write leaves the previous file intact.
+pub fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut temporary = Builder::new().prefix(".chaus-write-").tempfile_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    if let Ok(existing) = fs::metadata(target) {
+        let _ = fs::set_permissions(temporary.path(), existing.permissions());
+    }
+    let temporary_path = temporary.into_temp_path();
+    replace_path(&temporary_path, target)
+}
+
+/// Persist theme and Vim-default settings to an rc file.
+///
+/// Comments, unrelated directives and the file's line-ending convention are
+/// preserved. The existing file is re-read immediately before the atomic
+/// commit; a concurrent external edit is reported instead of overwritten.
+pub fn write_settings_rc(path: &Path, settings: &Settings) -> std::io::Result<()> {
+    let source = match fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let updated = chaus_core::settings::update_rc(&source, settings);
+    let current = match fs::read_to_string(path) {
+        Ok(current) => current,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    if current != source {
+        return Err(std::io::Error::other(format!(
+            "{} changed on disk; reopen Preferences and try again",
+            path.display()
+        )));
+    }
+    write_atomic(path, updated.as_bytes())
 }
 
 /// Serialize canonical document text to save bytes, re-adding a UTF-8 BOM when

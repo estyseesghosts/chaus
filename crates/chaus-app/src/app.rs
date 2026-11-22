@@ -54,18 +54,35 @@ pub(crate) fn save_settings(settings: &Settings) -> std::io::Result<()> {
     let Some(path) = settings_path() else {
         return Ok(());
     };
-    let source = match std::fs::read_to_string(&path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error),
-    };
-    let updated = chaus_core::settings::update_rc(&source, settings);
-    std::fs::write(path, updated)
+    chaus_io::write_settings_rc(&path, settings)
 }
 
-/// Start the application. CLI-only flags are handled before this is called.
-pub fn run(paths: Vec<PathBuf>, new_window: bool) {
+/// Start the application and return the process exit status.
+///
+/// Positional files are loaded before GPUI starts. That makes failures visible
+/// with a nonzero status instead of opening a misleading untitled window, and
+/// it removes the startup race where every window could fail and the process
+/// still looked successful.
+pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
     let settings = load_settings();
+    let mut failures = 0;
+    let mut loaded = Vec::new();
+    for path in paths {
+        match chaus_io::load(&path) {
+            Ok(file) => loaded.push((path, Some(file))),
+            Err(error) => {
+                failures += 1;
+                eprintln!("chaus: {error}");
+                loaded.push((path, None));
+            }
+        }
+    }
+    let opened_files = loaded.iter().filter(|(_, file)| file.is_some()).count();
+    if opened_files == 0 && !new_window && failures > 0 {
+        return 1;
+    }
+    let exit_code = i32::from(failures > 0);
+    let has_paths = !loaded.is_empty();
     crate::platform::application().run(move |cx| {
         let preference = ThemePreference::explicit(theme_id(settings.theme));
         if let Err(error) = silvestris::init(preference, cx) {
@@ -111,53 +128,40 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) {
         .detach();
 
         let recovery_records = chaus_io::recovery::list();
-        if paths.is_empty() {
+        if !has_paths {
             if let Some(handle) = open_untitled(cx) {
                 if !recovery_records.is_empty() {
                     let _ = handle.update(cx, |editor, window, cx| {
-                        editor.queue_recovery(recovery_records.clone(), window, cx);
+                        editor.queue_recovery(recovery_records, window, cx);
                     });
                 }
             }
             cx.activate(true);
             return;
         }
-        let load_paths = paths.clone();
-        let task = cx.background_executor().spawn(async move {
-            load_paths
-                .into_iter()
-                .map(|path| {
-                    let result = chaus_io::load(&path);
-                    (path, result)
-                })
-                .collect::<Vec<_>>()
-        });
-        cx.spawn(async move |cx| {
-            let loaded = task.await;
-            let mut opened = 0;
-            let mut first = None;
-            for (path, result) in loaded {
-                let handle = cx.update(|cx| open_loaded_result(&path, result, cx));
-                if let Some(handle) = handle {
-                    opened += 1;
-                    if first.is_none() {
-                        first = Some(handle);
-                    }
+
+        let mut first = None;
+        for (path, file) in loaded {
+            let Some(file) = file else {
+                continue;
+            };
+            if let Some(handle) = window_for(&display_name(&path), Some(file), None, cx) {
+                if first.is_none() {
+                    first = Some(handle);
                 }
             }
-            if new_window || opened == 0 {
-                let _ = cx.update(open_untitled);
-            }
-            if let Some(handle) = first {
-                let records = recovery_records.clone();
-                let _ = handle.update(cx, |editor, window, cx| {
-                    editor.queue_recovery(records, window, cx);
-                });
-            }
-            cx.update(|cx| cx.activate(true));
-        })
-        .detach();
+        }
+        if new_window {
+            open_untitled(cx);
+        }
+        if let Some(handle) = first {
+            let _ = handle.update(cx, |editor, window, cx| {
+                editor.queue_recovery(recovery_records, window, cx);
+            });
+        }
+        cx.activate(true);
     });
+    exit_code
 }
 
 fn window_for(

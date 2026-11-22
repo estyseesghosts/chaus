@@ -43,7 +43,11 @@ impl Editor {
 
     pub(crate) fn cancel_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.conflict_prompt = None;
-        window.focus(&self.focus, cx);
+        if self.close_prompt {
+            window.focus(&self.close_focus.save, cx);
+        } else {
+            window.focus(&self.focus, cx);
+        }
         cx.notify();
     }
 
@@ -64,7 +68,7 @@ impl Editor {
 
     pub(crate) fn save_as_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.conflict_prompt = None;
-        self.save_as_inner(false, window, cx);
+        let _ = self.save_as_inner(false, window, cx);
     }
 
     pub(crate) fn overwrite_conflict(&mut self, cx: &mut Context<Self>) {
