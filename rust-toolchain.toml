@@ -1,0 +1,5 @@
+[toolchain]
+# Matches Silvestris (config/pins.toml [rust]).
+channel = "1.98.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

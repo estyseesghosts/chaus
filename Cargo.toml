@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/chaus-core",
+    "crates/chaus-layout",
+    "crates/chaus-io",
+    "crates/chaus-cli",
+    "crates/chaus-vim",
+    "crates/chaus-dialog",
+    "crates/chaus-editor",
+    "crates/chaus-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+authors = ["terezi <jules@foxtails.me>"]
+
+[workspace.dependencies]
+chaus-core = { path = "crates/chaus-core" }
+chaus-layout = { path = "crates/chaus-layout" }
+chaus-io = { path = "crates/chaus-io" }
+chaus-cli = { path = "crates/chaus-cli" }
+chaus-vim = { path = "crates/chaus-vim" }
+chaus-dialog = { path = "crates/chaus-dialog" }
+chaus-editor = { path = "crates/chaus-editor" }
+
+# Silvestris is consumed as a path dependency during development so that the
+# exact GPUI revision below is shared with the framework checkout.
+silvestris = { path = "../silvestris/crates/silvestris" }
+
+# Pinned to the same Zed commit as Silvestris (config/pins.toml [gpui]).
+gpui = { git = "https://github.com/zed-industries/zed", rev = "6b720973027999bae402df23d469026f4cced988", default-features = false }
+
+ropey = "1.6"
+unicode-segmentation = "1.13"
+unicode-width = "0.2"
+tempfile = "3"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

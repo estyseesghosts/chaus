@@ -1,0 +1,12 @@
+[package]
+name = "chaus-vim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+description = "Deterministic modal editing state machine for chaus."
+
+[dependencies]
+chaus-core = { workspace = true }
+ropey = { workspace = true }

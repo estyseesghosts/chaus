@@ -1,0 +1,27 @@
+[package]
+name = "chaus-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+description = "Native plaintext editor built on GPUI and Silvestris."
+
+[[bin]]
+name = "chaus"
+path = "src/main.rs"
+
+[dependencies]
+chaus-cli = { workspace = true }
+chaus-core = { workspace = true }
+chaus-dialog = { workspace = true }
+chaus-editor = { workspace = true }
+chaus-io = { workspace = true }
+silvestris = { workspace = true }
+gpui = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+gpui_windows = { git = "https://github.com/zed-industries/zed", rev = "6b720973027999bae402df23d469026f4cced988", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_linux = { git = "https://github.com/zed-industries/zed", rev = "6b720973027999bae402df23d469026f4cced988", default-features = false, features = ["wayland", "x11"] }

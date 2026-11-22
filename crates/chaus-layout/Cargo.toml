@@ -1,0 +1,12 @@
+[package]
+name = "chaus-layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+description = "Soft-wrap column geometry for chaus."
+
+[dependencies]
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }

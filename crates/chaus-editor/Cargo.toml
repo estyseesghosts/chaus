@@ -1,0 +1,17 @@
+[package]
+name = "chaus-editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+description = "GPUI editor view, input bridge and file session for chaus."
+
+[dependencies]
+chaus-core = { workspace = true }
+chaus-dialog = { workspace = true }
+chaus-io = { workspace = true }
+chaus-layout = { workspace = true }
+chaus-vim = { workspace = true }
+gpui = { workspace = true }
+silvestris = { workspace = true }

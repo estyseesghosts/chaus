@@ -1,0 +1,12 @@
+[package]
+name = "chaus-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+description = "Document model, positions, transactions and history for chaus."
+
+[dependencies]
+ropey = { workspace = true }
+unicode-segmentation = { workspace = true }

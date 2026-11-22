@@ -1,0 +1,5 @@
+# The Windows GNU target otherwise links the MinGW runtime dynamically, which
+# makes the binary depend on DLLs that are only present on the build machine.
+# A static CRT keeps the shipped executable self-contained.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-feature=+crt-static"]

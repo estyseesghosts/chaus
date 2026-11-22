@@ -1,0 +1,10 @@
+[package]
+name = "chaus-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+description = "Terminal argument parsing for chaus, testable without GPUI."
+
+[dependencies]
