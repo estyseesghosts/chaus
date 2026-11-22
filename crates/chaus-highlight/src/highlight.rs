@@ -227,23 +227,12 @@ fn collect_spans(query: &Query, root: tree_sitter::Node<'_>, text: &str, rope: &
         }
         ranges.push((node.start_byte()..node.end_byte(), kind));
     }
-    // Inner captures (string escapes, interpolation) are more specific than
-    // the outer string/comment capture, so insert the shortest ranges first
-    // and drop anything that would overlap.
-    ranges.sort_by_key(|(range, _)| (range.end - range.start, range.start));
-    let mut accepted: Vec<(Range<usize>, TokenKind)> = Vec::new();
-    for (range, kind) in ranges {
-        if accepted
-            .iter()
-            .any(|(existing, _)| range.start < existing.end && existing.start < range.end)
-        {
-            continue;
-        }
-        accepted.push((range, kind));
-    }
-    accepted.sort_by_key(|(range, _)| range.start);
-    let mut spans: Vec<Span> = Vec::with_capacity(accepted.len());
-    for (bytes, kind) in accepted {
+    let resolved = resolve_overlapping_captures(ranges);
+    // Byte→char conversion is deliberately last: the interval algorithm works
+    // in Tree-sitter's native UTF-8 byte space and only finalized boundaries
+    // touch the Rope index.
+    let mut spans: Vec<Span> = Vec::with_capacity(resolved.len());
+    for (bytes, kind) in resolved {
         let start = rope.byte_to_char(bytes.start);
         let end = rope.byte_to_char(bytes.end);
         if start >= end {
@@ -261,6 +250,103 @@ fn collect_spans(query: &Query, root: tree_sitter::Node<'_>, text: &str, rope: &
         });
     }
     spans
+}
+
+/// Resolve possibly overlapping captures into sorted, non-overlapping spans.
+///
+/// Precedence is deterministic: the shortest capture wins the portion it
+/// covers, then the earlier start, then (for identical ranges) the capture
+/// order produced by the query cursor. This keeps an inner string escape or
+/// interpolation coloured without discarding the surrounding string capture;
+/// the outer capture keeps only the bytes the inner one did not claim.
+///
+/// The implementation sweeps capture boundaries and keeps active captures in a
+/// heap keyed by that precedence, so it is `O(n log n)` in the capture count
+/// instead of comparing every capture with every accepted span. Adjacent
+/// pieces with the same kind are coalesced.
+#[must_use]
+pub fn resolve_overlapping_captures(
+    captures: Vec<(Range<usize>, TokenKind)>,
+) -> Vec<(Range<usize>, TokenKind)> {
+    struct Active {
+        start: usize,
+        end: usize,
+        order: usize,
+    }
+
+    let kinds: Vec<TokenKind> = captures.iter().map(|(_, kind)| *kind).collect();
+    let mut items: Vec<Active> = captures
+        .iter()
+        .enumerate()
+        .filter(|(_, (range, _))| range.start < range.end)
+        .map(|(order, (range, _))| Active {
+            start: range.start,
+            end: range.end,
+            order,
+        })
+        .collect();
+    if items.is_empty() {
+        return Vec::new();
+    }
+    // Start order lets the sweep add every capture whose start is at or before
+    // the current boundary without rescanning the input.
+    items.sort_by_key(|item| item.start);
+
+    let mut boundaries: Vec<usize> = Vec::with_capacity(items.len() * 2);
+    for item in &items {
+        boundaries.push(item.start);
+        boundaries.push(item.end);
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    // (length, start, capture order, end). The first three form the documented
+    // precedence; the end is carried so expired entries can be skipped without
+    // looking them up in a second structure.
+    type ActiveKey = std::cmp::Reverse<(usize, usize, usize, usize)>;
+    let mut heap: std::collections::BinaryHeap<ActiveKey> = std::collections::BinaryHeap::new();
+    let mut next_item = 0usize;
+    let mut resolved: Vec<(Range<usize>, TokenKind)> = Vec::new();
+    for (position, boundary) in boundaries.iter().copied().enumerate() {
+        while next_item < items.len() && items[next_item].start <= boundary {
+            let item = &items[next_item];
+            heap.push(std::cmp::Reverse((
+                item.end - item.start,
+                item.start,
+                item.order,
+                item.end,
+            )));
+            next_item += 1;
+        }
+        // Captures that end at this boundary are no longer active. They stay
+        // in the heap until they reach the top, which keeps stale removal out
+        // of the hot path.
+        while let Some(std::cmp::Reverse((_, _, _, end))) = heap.peek() {
+            if *end <= boundary {
+                heap.pop();
+            } else {
+                break;
+            }
+        }
+        let Some(next_boundary) = boundaries.get(position + 1).copied() else {
+            break;
+        };
+        if next_boundary <= boundary {
+            continue;
+        }
+        let Some(std::cmp::Reverse((_, _, order, _))) = heap.peek().copied() else {
+            continue;
+        };
+        let kind = kinds[order];
+        if let Some((last, last_kind)) = resolved.last_mut() {
+            if last.end == boundary && *last_kind == kind {
+                last.end = next_boundary;
+                continue;
+            }
+        }
+        resolved.push((boundary..next_boundary, kind));
+    }
+    resolved
 }
 
 /// Build the single edit for a transaction, or `None` when incremental
