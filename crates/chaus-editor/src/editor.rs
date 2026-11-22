@@ -68,6 +68,10 @@ pub struct Editor {
     pub(crate) geometry: Option<Geometry>,
     /// Per-line visual-row counts with an `O(log lines)` prefix index.
     pub(crate) rows: crate::row_index::RowIndex,
+    /// Shaped visible rows reused across text-preserving repaints.
+    pub(crate) shaped_rows: crate::paint_cache::ShapedRowCache,
+    /// Number of `shape_line` calls made for document rows, for diagnostics.
+    pub(crate) shaped_row_calls: u64,
     pub(crate) rows_columns: Option<usize>,
     /// Break policy used by the row cache. Kept next to the width so a change
     /// between word and character wrapping invalidates the rows even when the
@@ -178,6 +182,8 @@ impl Editor {
             selecting: false,
             geometry: None,
             rows: crate::row_index::RowIndex::default(),
+            shaped_rows: crate::paint_cache::ShapedRowCache::default(),
+            shaped_row_calls: 0,
             rows_columns: None,
             rows_policy: chaus_layout::WrapPolicy::Word,
             settings,
@@ -451,6 +457,15 @@ impl Editor {
     #[must_use]
     pub fn visual_row_start(&mut self, line: LineIndex) -> usize {
         self.rows.prefix(line.0)
+    }
+
+    /// How many document rows have been shaped for painting so far.
+    ///
+    /// Diagnostics only: a repaint that changes no text, font, theme or wrap
+    /// width should leave this unchanged after the first frame.
+    #[must_use]
+    pub fn shaped_row_calls(&self) -> u64 {
+        self.shaped_row_calls
     }
 
     /// Break policy implied by the current wrap mode.

@@ -38,7 +38,7 @@ impl Editor {
             .font_family
             .clone()
             .unwrap_or_else(|| theme.type_.mono.to_string());
-        let font = gpui::font(font_family);
+        let font = gpui::font(font_family.clone());
         let sample = "MMMMMMMM";
         let text_run = TextRun {
             len: sample.len(),
@@ -60,6 +60,16 @@ impl Editor {
         });
         let policy = Editor::wrap_policy(mode);
         self.set_wrap_layout(columns, policy);
+        let paint_key = crate::paint_cache::PaintKey {
+            revision: self.document.revision(),
+            highlight: self.highlight_applied_generation,
+            columns,
+            policy,
+            tab_stop: self.settings.tab_stop,
+            font_size_bits: f32::from(font_size).to_bits(),
+            font_family,
+            theme: theme.id,
+        };
 
         let visible = (f32::from(bounds.size.height) / f32::from(line_height)).ceil() as usize + 2;
         let first_row = self.scroll_row.floor().max(0.0) as usize;
@@ -77,8 +87,10 @@ impl Editor {
             let line = LineIndex(line_index);
             let line_start = self.document.line_start(line);
             let line_text = self.document.line_text(line);
-            for segment in
+            for (segment_index, segment) in
                 chaus_layout::segments_with(&line_text, columns, self.settings.tab_stop, policy)
+                    .into_iter()
+                    .enumerate()
             {
                 let y = base_y + px((row as f32 - self.scroll_row) * f32::from(line_height));
                 row += 1;
@@ -140,14 +152,32 @@ impl Editor {
                     }
                 }
 
-                let runs =
-                    self.highlighted_runs(&line_text, line_start.0, &segment, &text_run, theme);
-                let shaped = window.text_system().shape_line(
-                    SharedString::new(segment.display),
-                    font_size,
-                    &runs,
-                    None,
-                );
+                let shaped = match self.shaped_rows.get(&paint_key, line_index, segment_index) {
+                    Some(shaped) => shaped,
+                    None => {
+                        let runs = self.highlighted_runs(
+                            &line_text,
+                            line_start.0,
+                            &segment,
+                            &text_run,
+                            theme,
+                        );
+                        let shaped = window.text_system().shape_line(
+                            SharedString::new(segment.display),
+                            font_size,
+                            &runs,
+                            None,
+                        );
+                        self.shaped_rows.insert(
+                            &paint_key,
+                            line_index,
+                            segment_index,
+                            shaped.clone(),
+                        );
+                        self.shaped_row_calls += 1;
+                        shaped
+                    }
+                };
                 rows.push(PaintRow {
                     line: shaped,
                     origin: point(base_x, y),

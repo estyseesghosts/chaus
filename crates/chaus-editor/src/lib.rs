@@ -26,6 +26,7 @@ mod editor_vim;
 mod editor_watch;
 mod editor_zoom;
 mod geometry;
+mod paint_cache;
 mod paint_row;
 mod row_index;
 
