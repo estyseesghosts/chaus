@@ -5,7 +5,7 @@
 //! results for a stale revision and applies the replacement as one undo step.
 
 use chaus_core::document::{EditCause, EditTransaction, TextEdit};
-use chaus_core::position::{CharOffset, CharRange, DocumentRevision};
+use chaus_core::position::{CharOffset, CharRange, DocumentRevision, Selection};
 use gpui::{Context, Window};
 
 use crate::editor::Editor;
@@ -97,18 +97,33 @@ impl Editor {
             cx.notify();
             return false;
         }
-        if formatted == self.document.text() {
+        let current = self.document.text();
+        let Some(mut change) = chaus_core::diff::common_change(&current, formatted) else {
             self.flash_status("Already formatted", cx);
             cx.notify();
             return false;
+        };
+        // Never start the edit inside a grapheme cluster. The common prefix is
+        // identical in both texts, so widening it by whole characters and
+        // re-inserting them keeps the output byte-for-byte the same while
+        // keeping the caret and invalidation on a cluster boundary.
+        let boundary = self.document.prev_grapheme_boundary(change.old.start);
+        if boundary < change.old.start {
+            let keep = change.old.start.0 - boundary.0;
+            let mut prefix = String::with_capacity(change.insert.len() + keep);
+            prefix.extend(current.chars().skip(boundary.0).take(keep));
+            prefix.push_str(&change.insert);
+            change.insert = prefix;
+            change.old.start = boundary;
         }
+
         let before = self.selection;
-        let len = self.document.len_chars();
-        let range = CharRange::new(CharOffset::ZERO, CharOffset(len));
-        let after = before.clamp(formatted.chars().count());
+        let old_len = self.document.len_chars();
+        let new_len = change.new_len(old_len);
+        let after = remap_selection(before, change.old, change.inserted_len(), new_len);
         let transaction = EditTransaction::new(
             EditCause::Formatter,
-            TextEdit::new(range, formatted.to_owned()),
+            TextEdit::new(change.old, change.insert),
             before,
             after,
         );
@@ -123,4 +138,26 @@ impl Editor {
             false
         }
     }
+}
+
+/// Keep the selection anchored to the text it was on when only a middle span
+/// changes: offsets before the span stay put, offsets after it move by the
+/// length delta, and offsets inside it land at the end of the replacement.
+fn remap_selection(
+    before: Selection,
+    replaced: CharRange,
+    inserted: usize,
+    new_len: usize,
+) -> Selection {
+    let map = |offset: CharOffset| {
+        let mapped = if offset <= replaced.start {
+            offset
+        } else if offset >= replaced.end {
+            CharOffset(offset.0 + inserted - replaced.len())
+        } else {
+            CharOffset(replaced.start.0 + inserted)
+        };
+        CharOffset(mapped.0.min(new_len))
+    };
+    Selection::new(map(before.anchor), map(before.head))
 }

@@ -4,6 +4,7 @@
 //! This crate has no GPUI dependency. The view layer owns pixels, focus and
 //! platform input; it mutates text only through [`document::Document::apply`].
 
+pub mod diff;
 pub mod document;
 pub mod eol;
 pub mod position;
