@@ -47,6 +47,9 @@ pub struct Editor {
     pub(crate) document: Document,
     pub(crate) file: Option<FileState>,
     pub(crate) selection: Selection,
+    /// Preferred horizontal offset within the current visual row, in display
+    /// columns. Cleared by horizontal movement and edits that relocate the
+    /// caret.
     pub(crate) preferred_column: Option<usize>,
     pub(crate) scroll_row: f32,
     pub(crate) scroll_x: Pixels,
@@ -394,7 +397,7 @@ impl Editor {
             return;
         }
         let prefix_was_valid = self.prefix_valid;
-        let mut delta: i64 = 0;
+        let mut cumulative: i64 = 0;
         for line in start..end {
             let text = self.document.line_text(LineIndex(line));
             let rows = chaus_layout::row_count_with(
@@ -405,15 +408,22 @@ impl Editor {
             );
             let old = self.line_rows[line];
             if rows != old {
-                delta += rows as i64 - old as i64;
+                cumulative += rows as i64 - old as i64;
                 self.line_rows[line] = rows;
+            }
+            if prefix_was_valid {
+                // `prefix_rows[line + 1]` is the old sum through this line.
+                // Add only the change accumulated up to here, so a later line
+                // that shrinks does not cancel an earlier line's growth.
+                self.prefix_rows[line + 1] =
+                    (self.prefix_rows[line + 1] as i64 + cumulative).max(0) as usize;
             }
         }
         if !prefix_was_valid {
             self.prefix_valid = false;
-        } else if delta != 0 {
-            for value in &mut self.prefix_rows[start + 1..] {
-                *value = (*value as i64 + delta).max(0) as usize;
+        } else if cumulative != 0 {
+            for value in &mut self.prefix_rows[end + 1..] {
+                *value = (*value as i64 + cumulative).max(0) as usize;
             }
         }
     }
@@ -445,6 +455,17 @@ impl Editor {
     #[must_use]
     pub fn visual_row_count(&mut self) -> usize {
         self.total_rows()
+    }
+
+    /// First visual row of `line`, for diagnostics and tests.
+    ///
+    /// Comparing this against the summed `visual_segments` of the preceding
+    /// lines is the invariant the incremental prefix must preserve.
+    #[must_use]
+    pub fn visual_row_start(&mut self, line: LineIndex) -> usize {
+        self.ensure_prefix();
+        let index = line.0.min(self.prefix_rows.len().saturating_sub(1));
+        self.prefix_rows.get(index).copied().unwrap_or(0)
     }
 
     /// Break policy implied by the current wrap mode.
