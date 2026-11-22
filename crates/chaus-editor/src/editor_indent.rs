@@ -198,7 +198,7 @@ fn compact_spaces(prefix: &str, tab_stop: usize) -> String {
     for character in prefix.chars() {
         if character == ' ' {
             column += 1;
-            if column % tab_stop == 0 {
+            if column.is_multiple_of(tab_stop) {
                 compacted.push('\t');
             }
         } else {

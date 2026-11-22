@@ -44,7 +44,7 @@ impl Editor {
                     continue;
                 };
                 ticks = ticks.wrapping_add(1);
-                let force_hash = ticks % FORCED_HASH_TICKS == 0;
+                let force_hash = ticks.is_multiple_of(FORCED_HASH_TICKS);
                 if editor
                     .update(cx, |editor, _| {
                         editor.disk_check_in_flight = true;

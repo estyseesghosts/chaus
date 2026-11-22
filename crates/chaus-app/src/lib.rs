@@ -5,6 +5,7 @@
 
 pub mod app;
 
+pub mod fonts;
 mod platform;
 mod preferences;
 mod settings_global;

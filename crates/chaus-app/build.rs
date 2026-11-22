@@ -79,6 +79,9 @@ fn main() {
     }
 
     println!("cargo:rustc-link-arg-bins={output}");
+    // GPUI-linked integration tests need the same Common-Controls 6 resource;
+    // without it they abort before the harness with STATUS_ENTRYPOINT_NOT_FOUND.
+    println!("cargo:rustc-link-arg-tests={output}");
 }
 
 fn forward_slashes(path: &Path) -> String {

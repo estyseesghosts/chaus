@@ -53,7 +53,12 @@ MSVC has no `windres`, so there `build.rs` passes `/MANIFEST:EMBED` and
 
 Silvestris and GPUI are consumed under their upstream licenses (Apache-2.0 for
 GPUI; see the Silvestris repository for its declared license). chaus source is
-app-owned. Bundled fonts come from Silvestris; do not add a second copy.
+app-owned. Silvestris fonts are not duplicated. Geist Sans is bundled separately
+because Silvestris ships Geist Mono but not Geist Sans: see
+`crates/chaus-app/assets/fonts/geist-sans/README.md` for the source commit,
+OFL-1.1 text and SHA-256 of each face. It is registered with GPUI and selected
+through Silvestris's public per-theme `FontOverrides` API, so Aqua typography
+and every measured size stay unchanged.
 
 ## Known gaps in this increment
 
@@ -95,8 +100,11 @@ app-owned. Bundled fonts come from Silvestris; do not add a second copy.
   (9-48px, documented stops). The override is never written to `_chausrc`.
 - Tab and Shift+Tab indent or outdent every selected hard line as one undo
   entry; `:trim`, `:retab` and the whitespace shortcuts act on the whole
-  document. Geist themes still map UI text to Inter because Silvestris bundles
-  no Geist Sans face and exposes no public typography override.
+  document.
+- Geist themes use bundled Geist Sans for application UI and Geist Mono for the
+  document; Aqua keeps Lato and Source Code Pro. The app installs Geist Sans
+  through Silvestris's per-theme font-override API. A user `set font=` still
+  overrides the document face.
 - Word motions and line-boundary behaviour are tested against the in-memory
   engine, not compared command-for-command with real Vim.
 - Tests live in `crates/*/tests/`; the native GUI still needs a real-OS smoke

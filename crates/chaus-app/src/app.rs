@@ -90,6 +90,24 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
             cx.quit();
             return;
         }
+        // Geist themes want Geist Sans for application chrome. It is not part
+        // of Silvestris, so chaus bundles it and installs it through the public
+        // per-theme font-override API. Aqua keeps Lato.
+        match crate::fonts::register(cx) {
+            Ok(()) => {
+                for id in [
+                    silvestris::ThemeId::GEIST_LIGHT,
+                    silvestris::ThemeId::GEIST_DARK,
+                ] {
+                    silvestris::set_font_overrides(
+                        id,
+                        silvestris::FontOverrides::new().ui(crate::fonts::GEIST_SANS),
+                        cx,
+                    );
+                }
+            }
+            Err(error) => eprintln!("chaus: {error}; using the theme's default UI font"),
+        }
         cx.set_global(SettingsGlobal(settings.clone()));
         chaus_editor::bind_keys(cx);
         cx.bind_keys([

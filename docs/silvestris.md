@@ -66,7 +66,10 @@ GUI editing must **not replace the whole file**. Parse to a line-preserving repr
 - Do not use the framework `Shell` because the sample explorer uses it; chaus needs only `WindowFrame`.
 - Do not claim the existing Silvestris settings UI already persists user preferences.
 - Do not treat a command descriptor shortcut update as a live GPUI keymap update; source explicitly says it is not.
-- Do not ship a second set of private Geist or Aqua assets or fetch fonts from a network.
+- Do not ship a second copy of fonts Silvestris already bundles, and do not
+  fetch fonts from a network at runtime. If an app needs a face Silvestris does
+  not carry, bundle it with its license and provenance and select it through the
+  public font-override API rather than editing theme internals.
 - Do not infer native macOS/Linux behavior from Windows mock/render tests.
 
 ## Verification
