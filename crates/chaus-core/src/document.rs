@@ -198,14 +198,17 @@ fn utf16_len(characters: impl Iterator<Item = char>) -> usize {
     characters.map(char::len_utf16).sum()
 }
 
-/// Per-line UTF-16 lengths with a lazily rebuilt prefix sum. Edits patch only
-/// the affected lines; the prefix is recomputed on demand (O(lines), not
-/// O(text)).
+/// Per-line UTF-16 lengths with a Fenwick tree over line totals.
+///
+/// Point updates from ordinary typing are `O(log lines)` and prefix queries are
+/// `O(log lines)`, so a conversion after an edit near the start of a 100k-line
+/// document no longer walks every preceding line. A splice that changes the
+/// line count rebuilds the tree from the already-patched length vector; the
+/// text itself is never rescanned by that rebuild.
 #[derive(Debug, Default)]
 struct Utf16Index {
     line_lengths: Vec<usize>,
-    prefix: Vec<usize>,
-    prefix_valid: bool,
+    tree: Vec<usize>,
 }
 
 impl Utf16Index {
@@ -214,30 +217,90 @@ impl Utf16Index {
         for line in rope.lines() {
             self.line_lengths.push(utf16_len(line.chars()));
         }
-        self.prefix_valid = false;
+        self.rebuild_tree();
     }
 
-    fn ensure_prefix(&mut self) {
-        if self.prefix_valid {
+    fn rebuild_tree(&mut self) {
+        let count = self.line_lengths.len();
+        self.tree.clear();
+        self.tree.resize(count + 1, 0);
+        for (line, length) in self.line_lengths.iter().copied().enumerate() {
+            let mut index = line + 1;
+            while index <= count {
+                self.tree[index] += length;
+                index += index & index.wrapping_neg();
+            }
+        }
+    }
+
+    fn set_length(&mut self, line: usize, length: usize) {
+        let Some(old) = self.line_lengths.get(line).copied() else {
+            return;
+        };
+        if old == length {
             return;
         }
-        self.prefix.clear();
-        self.prefix.reserve(self.line_lengths.len() + 1);
-        let mut total = 0;
-        for len in &self.line_lengths {
-            self.prefix.push(total);
-            total += len;
+        self.line_lengths[line] = length;
+        let count = self.line_lengths.len();
+        let mut index = line + 1;
+        while index <= count {
+            if length >= old {
+                self.tree[index] += length - old;
+            } else {
+                self.tree[index] -= old - length;
+            }
+            index += index & index.wrapping_neg();
         }
-        self.prefix.push(total);
-        self.prefix_valid = true;
+    }
+
+    /// Sum of UTF-16 lengths for lines `0..line`.
+    fn prefix(&self, line: usize) -> usize {
+        let mut index = line.min(self.line_lengths.len());
+        let mut total = 0usize;
+        while index > 0 {
+            total += self.tree[index];
+            index &= index - 1;
+        }
+        total
+    }
+
+    fn total(&self) -> usize {
+        self.prefix(self.line_lengths.len())
+    }
+
+    /// First line index whose prefix is at least `target`.
+    ///
+    /// For `target == 0` this is line zero; otherwise the result is the
+    /// smallest count whose cumulative UTF-16 length reaches the target.
+    /// `target` must not exceed [`Self::total`].
+    fn first_line_at_or_after(&self, target: usize) -> usize {
+        if target == 0 {
+            return 0;
+        }
+        let count = self.line_lengths.len();
+        let mut index = 0usize;
+        let mut remaining = target;
+        let mut step = 1usize;
+        while step <= count {
+            step = step.saturating_mul(2);
+        }
+        step >>= 1;
+        while step > 0 {
+            let next = index + step;
+            if next <= count && self.tree[next] < remaining {
+                index = next;
+                remaining -= self.tree[next];
+            }
+            step >>= 1;
+        }
+        (index + 1).min(count)
     }
 
     fn char_to_utf16(&mut self, rope: &Rope, offset: CharOffset) -> Utf16Offset {
-        self.ensure_prefix();
-        let line = rope.char_to_line(offset.0.min(rope.len_chars()));
+        let offset = offset.min(CharOffset(rope.len_chars()));
+        let line = rope.char_to_line(offset.0);
         let line_start = rope.line_to_char(line);
-        let prefix = self.prefix.get(line).copied().unwrap_or(0);
-        let mut units = prefix;
+        let mut units = self.prefix(line);
         for ch in rope.line(line).chars().take(offset.0 - line_start) {
             units += ch.len_utf16();
         }
@@ -245,24 +308,22 @@ impl Utf16Index {
     }
 
     fn utf16_to_char(&mut self, rope: &Rope, offset: Utf16Offset) -> CharOffset {
-        self.ensure_prefix();
         let length = rope.len_lines();
-        let total = self.prefix.last().copied().unwrap_or(0);
-        let target = offset.0.min(total);
         if length == 0 {
             return CharOffset::ZERO;
         }
+        let target = offset.0.min(self.total());
         // Several lines can start at the same UTF-16 offset when blank lines
         // precede the target. Pick the *first* matching line; otherwise a
         // lookup at offset zero would land after the leading newline.
-        let first_at_or_after = self.prefix.partition_point(|start| *start < target);
-        let line = match self.prefix.get(first_at_or_after) {
-            Some(start) if *start == target => first_at_or_after,
+        let first_at_or_after = self.first_line_at_or_after(target);
+        let line = match self.prefix(first_at_or_after) {
+            start if start == target => first_at_or_after,
             _ => first_at_or_after.saturating_sub(1),
         }
         .min(length - 1);
         let line_start = rope.line_to_char(line);
-        let mut units = self.prefix.get(line).copied().unwrap_or(0);
+        let mut units = self.prefix(line);
         let mut chars = 0;
         for ch in rope.line(line).chars() {
             if units >= target {
@@ -500,97 +561,96 @@ impl Document {
         forward: bool,
         case_sensitive: bool,
     ) -> Option<CharOffset> {
-        if needle.is_empty() {
+        let needle_chars: Vec<char> = needle.chars().collect();
+        let length = self.len_chars();
+        if needle_chars.is_empty() || needle_chars.len() > length {
             return None;
         }
-        let text = self.text();
-        let from_byte = self.char_to_byte(from).0.min(text.len());
-        if case_sensitive {
-            let found = if forward {
-                text[from_byte..]
-                    .find(needle)
-                    .map(|offset| from_byte + offset)
-                    .or_else(|| text.find(needle))
-            } else {
-                text[..from_byte]
-                    .rfind(needle)
-                    .or_else(|| text.rfind(needle))
-            };
-            return found.map(|byte| CharOffset(self.rope().byte_to_char(byte)));
-        }
-
-        let needle_chars: Vec<char> = needle.chars().collect();
-        let matches_at = |byte: usize| {
-            let mut candidates = text[byte..].chars();
-            needle_chars.iter().all(|needle| {
-                candidates
-                    .next()
-                    .is_some_and(|candidate| candidate.to_lowercase().eq(needle.to_lowercase()))
-            })
-        };
-        let found = if forward {
-            text[from_byte..]
-                .char_indices()
-                .find(|(offset, _)| matches_at(from_byte + offset))
-                .map(|(offset, _)| from_byte + offset)
-                .or_else(|| {
-                    text.char_indices()
-                        .find(|(offset, _)| matches_at(*offset))
-                        .map(|(offset, _)| offset)
-                })
+        let last_start = length - needle_chars.len();
+        if forward {
+            let start = from.0.min(length);
+            for candidate in start..=last_start {
+                if self.literal_matches_at(CharOffset(candidate), &needle_chars, case_sensitive) {
+                    return Some(CharOffset(candidate));
+                }
+            }
+            // Wraparound. Candidates at or after `start` were already checked.
+            let wrap_end = start.min(last_start + 1);
+            for candidate in 0..wrap_end {
+                if self.literal_matches_at(CharOffset(candidate), &needle_chars, case_sensitive) {
+                    return Some(CharOffset(candidate));
+                }
+            }
+            None
         } else {
-            text[..from_byte]
-                .char_indices()
-                .rev()
-                .find(|(offset, _)| matches_at(*offset))
-                .map(|(offset, _)| offset)
-                .or_else(|| {
-                    text.char_indices()
-                        .rev()
-                        .find(|(offset, _)| matches_at(*offset))
-                        .map(|(offset, _)| offset)
-                })
-        };
-        found.map(|byte| CharOffset(self.rope().byte_to_char(byte)))
+            let from = from.0.min(length);
+            // Backward search requires the whole match to end at or before
+            // `from`, matching the previous prefix-search semantics.
+            if from >= needle_chars.len() {
+                for candidate in (0..=from - needle_chars.len()).rev() {
+                    if self.literal_matches_at(CharOffset(candidate), &needle_chars, case_sensitive)
+                    {
+                        return Some(CharOffset(candidate));
+                    }
+                }
+            }
+            for candidate in (0..=last_start).rev() {
+                if self.literal_matches_at(CharOffset(candidate), &needle_chars, case_sensitive) {
+                    return Some(CharOffset(candidate));
+                }
+            }
+            None
+        }
     }
 
     /// Every non-overlapping literal match in document order.
+    ///
+    /// The search streams through Rope chars at each candidate offset. It never
+    /// materializes the full document, so Replace All on a large buffer does
+    /// not allocate a whole-text copy before editing.
     #[must_use]
     pub fn literal_ranges(&self, needle: &str, case_sensitive: bool) -> Vec<CharRange> {
-        if needle.is_empty() {
+        let needle_chars: Vec<char> = needle.chars().collect();
+        let length = self.len_chars();
+        if needle_chars.is_empty() || needle_chars.len() > length {
             return Vec::new();
         }
-        let text = self.text();
-        let needle_chars: Vec<char> = needle.chars().collect();
-        let matches_at = |byte: usize| {
-            let mut candidates = text[byte..].chars();
-            needle_chars.iter().all(|needle| {
-                if case_sensitive {
-                    candidates.next() == Some(*needle)
-                } else {
-                    candidates
-                        .next()
-                        .is_some_and(|candidate| candidate.to_lowercase().eq(needle.to_lowercase()))
-                }
-            })
-        };
+        let last_start = length - needle_chars.len();
         let mut ranges = Vec::new();
-        let mut offset = 0;
-        while offset < text.len() {
-            if matches_at(offset) {
-                let start = CharOffset(self.rope().byte_to_char(offset));
-                let end = CharOffset(start.0 + needle_chars.len());
-                ranges.push(CharRange::new(start, end));
-                offset += text[offset..]
-                    .chars()
-                    .take(needle_chars.len())
-                    .map(char::len_utf8)
-                    .sum::<usize>();
+        let mut candidate = 0usize;
+        while candidate <= last_start {
+            if self.literal_matches_at(CharOffset(candidate), &needle_chars, case_sensitive) {
+                ranges.push(CharRange::new(
+                    CharOffset(candidate),
+                    CharOffset(candidate + needle_chars.len()),
+                ));
+                candidate += needle_chars.len();
             } else {
-                offset += text[offset..].chars().next().map_or(1, char::len_utf8);
+                candidate += 1;
             }
         }
         ranges
+    }
+
+    /// Compare `needle` at `start` without allocating a document copy.
+    ///
+    /// Case-insensitive matching intentionally preserves the previous
+    /// per-scalar lowercase comparison rather than switching to full casefold.
+    fn literal_matches_at(&self, start: CharOffset, needle: &[char], case_sensitive: bool) -> bool {
+        let mut candidates = self.rope.chars_at(start.0.min(self.len_chars()));
+        for expected in needle {
+            let Some(candidate) = candidates.next() else {
+                return false;
+            };
+            if case_sensitive {
+                if candidate != *expected {
+                    return false;
+                }
+            } else if !candidate.to_lowercase().eq(expected.to_lowercase()) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Text of a line, excluding its trailing hard break.
@@ -650,7 +710,32 @@ impl Document {
         CharRange::new(start, end)
     }
 
+    /// Grapheme ranges in a bounded char window, relative to `start`.
+    ///
+    /// At most the window is copied, never the whole hard line. The first and
+    /// last ranges may be partial clusters; callers expand the window until the
+    /// boundary they need is interior.
+    fn grapheme_ranges(&self, start: CharOffset, end: CharOffset) -> Vec<(usize, usize)> {
+        let start = start.0.min(self.len_chars());
+        let end = end.0.min(self.len_chars()).max(start);
+        let text = self.rope.slice(start..end).to_string();
+        let mut ranges = Vec::new();
+        let mut index = 0usize;
+        for grapheme in text.graphemes(true) {
+            let next = index + grapheme.chars().count();
+            ranges.push((index, next));
+            index = next;
+        }
+        ranges
+    }
+
     /// Previous grapheme boundary strictly before `offset`.
+    ///
+    /// The line is inspected through a small window that doubles only when the
+    /// candidate boundary is at an edge where grapheme context could change.
+    /// Ordinary movement therefore copies a few dozen chars, not a megabyte
+    /// line, and a pathological cluster that spans the line still resolves
+    /// correctly by expanding to the line start.
     #[must_use]
     pub fn prev_grapheme_boundary(&self, offset: CharOffset) -> CharOffset {
         let offset = offset.min(CharOffset(self.len_chars()));
@@ -663,21 +748,37 @@ impl Document {
             return line_start.saturating_sub(1);
         }
         let content_end = self.line_content_end(line);
-        let text = self.rope.slice(line_start.0..content_end.0).to_string();
-        let mut previous = line_start;
-        let mut char_index = 0;
-        for grapheme in text.graphemes(true) {
-            let start = CharOffset(line_start.0 + char_index);
-            if start >= offset {
-                break;
-            }
-            previous = start;
-            char_index += grapheme.chars().count();
+        let line_len = content_end.0.saturating_sub(line_start.0);
+        let local = (offset.0 - line_start.0).min(line_len);
+        if local == 0 {
+            return line_start;
         }
-        previous
+        let mut radius = 64usize;
+        loop {
+            let window_start = local.saturating_sub(radius);
+            let window_end = local;
+            let ranges = self.grapheme_ranges(
+                CharOffset(line_start.0 + window_start),
+                CharOffset(line_start.0 + window_end),
+            );
+            if let Some((index, (grapheme_start, _))) = ranges.iter().enumerate().next_back() {
+                let reliable = index > 0 || window_start == 0;
+                if reliable {
+                    return CharOffset(line_start.0 + window_start + *grapheme_start);
+                }
+            }
+            if window_start == 0 {
+                return line_start;
+            }
+            radius = radius.saturating_mul(2);
+        }
     }
 
     /// Next grapheme boundary strictly after `offset`.
+    ///
+    /// Mirrors [`Self::prev_grapheme_boundary`]: the window is local, and the
+    /// result is used only when both ends of the candidate cluster are known
+    /// rather than being artefacts of the window cut.
     #[must_use]
     pub fn next_grapheme_boundary(&self, offset: CharOffset) -> CharOffset {
         let length = self.len_chars();
@@ -691,16 +792,33 @@ impl Document {
         if offset >= content_end {
             return CharOffset((offset.0 + 1).min(length));
         }
-        let text = self.rope.slice(line_start.0..content_end.0).to_string();
-        let mut char_index = 0;
-        for grapheme in text.graphemes(true) {
-            let end = CharOffset(line_start.0 + char_index + grapheme.chars().count());
-            if end > offset {
-                return end;
+        let line_len = content_end.0.saturating_sub(line_start.0);
+        let local = offset.0 - line_start.0;
+        let mut radius = 64usize;
+        loop {
+            let window_start = local.saturating_sub(radius);
+            let window_end = local.saturating_add(radius).min(line_len);
+            let ranges = self.grapheme_ranges(
+                CharOffset(line_start.0 + window_start),
+                CharOffset(line_start.0 + window_end),
+            );
+            for (index, (_, grapheme_end)) in ranges.iter().enumerate() {
+                let absolute_end = window_start + grapheme_end;
+                if absolute_end <= local {
+                    continue;
+                }
+                let reliable_start = index > 0 || window_start == 0;
+                let reliable_end = index + 1 < ranges.len() || window_end == line_len;
+                if reliable_start && reliable_end {
+                    return CharOffset(line_start.0 + absolute_end);
+                }
+                break;
             }
-            char_index += grapheme.chars().count();
+            if window_start == 0 && window_end == line_len {
+                return content_end;
+            }
+            radius = radius.saturating_mul(2);
         }
-        content_end
     }
 
     /// Line/UTF-8-byte-column point for Tree-sitter.
@@ -922,10 +1040,18 @@ impl Document {
             .collect();
         let remove_end = (old_end_line.0 + 1).min(utf16.line_lengths.len());
         let remove_start = old_start_line.0.min(remove_end);
-        utf16
-            .line_lengths
-            .splice(remove_start..remove_end, new_lengths);
-        utf16.prefix_valid = false;
+        if remove_end - remove_start == new_lengths.len() {
+            // Typing inside existing lines: update only the affected Fenwick
+            // leaves instead of touching every later line.
+            for (offset, length) in new_lengths.into_iter().enumerate() {
+                utf16.set_length(remove_start + offset, length);
+            }
+        } else {
+            utf16
+                .line_lengths
+                .splice(remove_start..remove_end, new_lengths);
+            utf16.rebuild_tree();
+        }
     }
 
     fn apply_inverse(&mut self, step: &UndoStep) -> LineRange {
