@@ -22,9 +22,9 @@ fn assert_matches_reference(doc: &Document) {
     let text = doc.rope().to_string();
     let prefix = utf16_prefix(&text);
     let len = text.chars().count();
-    for offset in 0..=len {
+    for (offset, &expected) in prefix.iter().enumerate() {
         let units = doc.char_to_utf16(CharOffset(offset)).0;
-        assert_eq!(units, prefix[offset], "char {offset} -> UTF-16");
+        assert_eq!(units, expected, "char {offset} -> UTF-16");
         assert_eq!(
             doc.utf16_to_char(Utf16Offset(units)).0,
             offset,
@@ -33,9 +33,9 @@ fn assert_matches_reference(doc: &Document) {
     }
     assert_eq!(doc.utf16_to_char(Utf16Offset(usize::MAX)).0, len);
     // Interior surrogate offsets clamp to the scalar start.
-    for offset in 0..len {
-        let start = prefix[offset];
-        let next = prefix[offset + 1];
+    for (offset, pair) in prefix.windows(2).enumerate() {
+        let start = pair[0];
+        let next = pair[1];
         if next > start + 1 {
             assert_eq!(
                 doc.utf16_to_char(Utf16Offset(start + 1)).0,

@@ -228,7 +228,7 @@ impl Utf16Index {
             let mut index = line + 1;
             while index <= count {
                 self.tree[index] += length;
-                index += index & index.wrapping_neg();
+                index += index.isolate_lowest_one();
             }
         }
     }
@@ -249,7 +249,7 @@ impl Utf16Index {
             } else {
                 self.tree[index] -= old - length;
             }
-            index += index & index.wrapping_neg();
+            index += index.isolate_lowest_one();
         }
     }
 

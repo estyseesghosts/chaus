@@ -97,7 +97,7 @@ fn repeated_up_and_down_stay_on_successive_visual_rows_at_constant_x() {
             "each Down must advance one visual row: {rows:?}"
         );
         assert!(
-            xs.iter().all(|x| *x == start_x || *x < start_x),
+            xs.iter().all(|x| *x <= start_x),
             "x must stay at the preferred column when the row is wide enough: {xs:?}"
         );
         assert!(
