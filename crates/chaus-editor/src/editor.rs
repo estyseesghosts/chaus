@@ -16,6 +16,7 @@ use gpui::{
 };
 use silvestris::ActiveTheme;
 
+use crate::editor_close::ClosePromptFocus;
 use crate::editor_element::EditorElement;
 use crate::editor_file::FileState;
 use crate::editor_keys::{
@@ -47,7 +48,8 @@ pub struct Editor {
     pub(crate) rows_columns: Option<usize>,
     pub(crate) settings: Settings,
     pub(crate) status: Option<String>,
-    pub(crate) close_confirmed: bool,
+    pub(crate) close_prompt: bool,
+    pub(crate) close_focus: ClosePromptFocus,
     pub(crate) force_next_save: bool,
     pub(crate) vim: bool,
     pub(crate) vim_engine: Engine,
@@ -80,6 +82,7 @@ impl Editor {
         for diagnostic in diagnostics {
             eprintln!("chaus: {diagnostic}");
         }
+        let close_focus = ClosePromptFocus::new(cx);
         let mut editor = Self {
             document,
             file,
@@ -99,7 +102,8 @@ impl Editor {
             rows_columns: None,
             settings,
             status: None,
-            close_confirmed: false,
+            close_prompt: false,
+            close_focus,
             force_next_save: false,
             vim,
             vim_engine: Engine::new(mappings),
@@ -301,6 +305,7 @@ impl Render for Editor {
         window.set_window_title(&title);
         let background = silvestris::convert::hsla(theme.colors.content);
         let status = self.status.clone();
+        let close_prompt = self.close_prompt.then(|| self.render_close_prompt(cx));
         let vim_label = self.vim_mode_label();
         let content = div()
             .id("chaus-editor")
@@ -484,7 +489,8 @@ impl Render for Editor {
                         .text_size(px(11.))
                         .child(message),
                 )
-            });
+            })
+            .when_some(close_prompt, |element, sheet| element.child(sheet));
         silvestris::chrome::WindowFrame::new(title).child(content)
     }
 }

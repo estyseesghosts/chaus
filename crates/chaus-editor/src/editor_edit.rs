@@ -12,10 +12,9 @@ use crate::editor_keys::{
 
 impl Editor {
     /// Invalidate layout after a document change. Any change invalidates a
-    /// pending "close again to discard" confirmation and a conflict-overwrite
-    /// decision, because the next save now contains different content.
+    /// conflict-overwrite decision because the next save now contains
+    /// different content.
     pub(crate) fn after_change(&mut self, affected: LineRange) {
-        self.close_confirmed = false;
         self.force_next_save = false;
         self.refresh_rows(affected);
         self.marked = None;
@@ -214,7 +213,6 @@ impl Editor {
             self.scroll_to_caret();
             self.preferred_column = None;
             self.marked = None;
-            self.close_confirmed = false;
             self.force_next_save = false;
             cx.notify();
         }
@@ -227,7 +225,6 @@ impl Editor {
             self.scroll_to_caret();
             self.preferred_column = None;
             self.marked = None;
-            self.close_confirmed = false;
             self.force_next_save = false;
             cx.notify();
         }

@@ -77,7 +77,6 @@ impl Editor {
                 self.marked = None;
                 self.preedit_start = None;
                 self.preedit_active = false;
-                self.close_confirmed = false;
                 self.force_next_save = false;
                 self.document.cancel_user_operation();
                 self.vim_engine.reset();
@@ -102,7 +101,16 @@ impl Editor {
         self.save_inner(false, cx);
     }
 
-    pub(crate) fn save_as(&mut self, _: &SaveAs, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_as_inner(false, window, cx);
+    }
+
+    pub(crate) fn save_as_inner(
+        &mut self,
+        close_after: bool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.saving {
             self.set_status("Save already in progress");
             cx.notify();
@@ -131,7 +139,7 @@ impl Editor {
             .file
             .as_ref()
             .is_some_and(|file| file.meta.had_utf8_bom);
-        self.start_save(path.clone(), path, had_utf8_bom, None, false, cx);
+        self.start_save(path.clone(), path, had_utf8_bom, None, close_after, cx);
     }
 
     /// Save the document, or overwrite a known external change on the second
@@ -221,7 +229,6 @@ impl Editor {
                 self.file = Some(FileState { meta });
                 self.force_next_save = false;
                 self.document.mark_saved_at(state);
-                self.close_confirmed = false;
                 if close_after && !self.document.is_dirty() {
                     window.remove_window();
                     return;
@@ -239,21 +246,5 @@ impl Editor {
             Err(error) => self.set_status(format!("Save failed: {error}")),
         }
         cx.notify();
-    }
-
-    /// Whether closing needs an explicit confirmation because of unsaved
-    /// edits. The first attempt reports; a second attempt discards.
-    #[must_use]
-    pub fn confirm_close(&mut self) -> bool {
-        if self.saving || self.opening {
-            self.set_status("A file operation is in progress");
-            return false;
-        }
-        if !self.document.is_dirty() || self.close_confirmed {
-            return true;
-        }
-        self.close_confirmed = true;
-        self.set_status("Unsaved changes: close again to discard");
-        false
     }
 }

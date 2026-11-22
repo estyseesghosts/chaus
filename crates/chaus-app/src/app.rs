@@ -151,13 +151,7 @@ fn window_for(
         window.on_window_should_close(cx, {
             let editor = editor.clone();
             move |window, cx| {
-                let allow = editor.update(cx, |editor, cx| {
-                    let allow = editor.confirm_close();
-                    if !allow {
-                        cx.notify();
-                    }
-                    allow
-                });
+                let allow = editor.update(cx, |editor, cx| editor.confirm_close(window, cx));
                 if !allow {
                     window.activate_window();
                 }

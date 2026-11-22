@@ -114,7 +114,6 @@ impl Editor {
             Outcome::Changed => {
                 self.rebuild_rows();
                 self.scroll_to_caret();
-                self.close_confirmed = false;
                 self.force_next_save = false;
                 cx.notify();
             }
@@ -164,10 +163,8 @@ impl Editor {
                 self.save_inner(false, cx);
             }
             "q" => {
-                if self.confirm_close() {
+                if self.confirm_close(window, cx) {
                     window.remove_window();
-                } else {
-                    cx.notify();
                 }
             }
             "q!" => window.remove_window(),

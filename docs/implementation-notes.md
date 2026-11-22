@@ -67,8 +67,9 @@ app-owned. Bundled fonts come from Silvestris; do not add a second copy.
 - Save conflict handling reports a message and lets the next Save (including
   `:w`/`:wq`) overwrite; the full Reload / Save As / Overwrite / Cancel sheet is
   not implemented.
-- Closing a dirty window uses a two-step stopgap (warn, then discard) instead of a
-  Save / Discard / Cancel sheet.
+- Closing a dirty window shows a document-modal Save / Discard / Cancel sheet.
+  Save starts the normal save path (including Save As for an untitled document);
+  a failed or cancelled save leaves the window open.
 - No crash-recovery snapshots and no external file watcher.
 - Open and save run on the background executor, but a save still expands the
   document into one string and one byte buffer before writing. Initial row
