@@ -324,6 +324,24 @@ impl HistoryEntry {
     }
 }
 
+/// A cheap, immutable snapshot of document text and newline metadata for a
+/// background save. History and selection are deliberately excluded.
+#[derive(Clone, Debug)]
+pub struct DocumentSnapshot {
+    rope: Rope,
+    eol: EolMap,
+    preferred_eol: Eol,
+}
+
+impl DocumentSnapshot {
+    /// Reconstruct the original newline kinds without touching the live
+    /// document.
+    #[must_use]
+    pub fn text_with_eol(&self) -> String {
+        self.eol.expand(self.rope.chars(), self.preferred_eol)
+    }
+}
+
 /// A text document with one window's editing state.
 #[derive(Debug)]
 pub struct Document {
@@ -859,6 +877,30 @@ impl Document {
     /// Mark the current history position as the on-disk baseline.
     pub fn mark_saved(&mut self) {
         self.saved_state = self.current_state;
+    }
+
+    /// Mark a previously captured history state as the on-disk baseline. A
+    /// background save uses this so edits made while it was in flight stay
+    /// dirty.
+    pub fn mark_saved_at(&mut self, state: u64) {
+        self.saved_state = state;
+    }
+
+    /// Opaque identity of the current history state, for a late save result.
+    #[must_use]
+    pub fn state_token(&self) -> u64 {
+        self.current_state
+    }
+
+    /// Capture text and newline metadata for a background save. Cloning the
+    /// Rope is cheap and does not copy its text.
+    #[must_use]
+    pub fn snapshot(&self) -> DocumentSnapshot {
+        DocumentSnapshot {
+            rope: self.rope.clone(),
+            eol: self.eol.clone(),
+            preferred_eol: self.preferred_eol,
+        }
     }
 
     fn fresh_state(&mut self) -> u64 {

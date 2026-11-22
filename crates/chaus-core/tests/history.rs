@@ -193,3 +193,27 @@ fn saving_inside_a_group_does_not_make_later_grouped_text_clean() {
     assert_eq!(document.text(), "ab");
     assert!(!document.is_dirty(), "one undo returns to the saved branch");
 }
+
+#[test]
+fn a_snapshot_save_token_keeps_later_edits_dirty() {
+    let mut document = Document::from_source_text("a");
+    let snapshot = document.snapshot();
+    let token = document.state_token();
+
+    type_char(&mut document, 1, "b");
+    document.mark_saved_at(token);
+
+    assert_eq!(snapshot.text_with_eol(), "a");
+    assert_eq!(document.text(), "ab");
+    assert!(
+        document.is_dirty(),
+        "the saved file contains the earlier text"
+    );
+
+    document.undo();
+    assert_eq!(document.text(), "a");
+    assert!(
+        !document.is_dirty(),
+        "undo returns to the saved history state"
+    );
+}

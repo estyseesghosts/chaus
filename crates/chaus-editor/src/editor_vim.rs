@@ -161,7 +161,7 @@ impl Editor {
         let rest = command[name_end..].trim();
         match name {
             "w" => {
-                self.save_inner(cx);
+                self.save_inner(false, cx);
             }
             "q" => {
                 if self.confirm_close() {
@@ -172,9 +172,7 @@ impl Editor {
             }
             "q!" => window.remove_window(),
             "wq" => {
-                if self.save_inner(cx) {
-                    window.remove_window();
-                }
+                self.save_inner(true, cx);
             }
             "e" | "e!" => {
                 if rest.is_empty() {
