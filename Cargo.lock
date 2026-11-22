@@ -818,6 +818,7 @@ dependencies = [
  "chaus-layout",
  "chaus-vim",
  "gpui",
+ "ropey",
  "silvestris",
  "tempfile",
  "unicode-width",

@@ -118,7 +118,14 @@ pub struct Editor {
     pub(crate) highlights: std::sync::Arc<Vec<Span>>,
     pub(crate) highlights_revision: Option<chaus_core::position::DocumentRevision>,
     pub(crate) highlight_tree: Option<chaus_highlight::Tree>,
+    /// Revision the accepted tree was parsed from. Incremental reuse is only
+    /// valid when this is exactly the revision before the pending edit.
+    pub(crate) highlight_tree_revision: Option<chaus_core::position::DocumentRevision>,
     pub(crate) highlight_generation: u64,
+    pub(crate) highlight_applied_generation: u64,
+    pub(crate) highlight_worker_running: bool,
+    pub(crate) highlight_pending_edit: Option<crate::editor_highlight::PendingHighlightEdit>,
+    pub(crate) highlight_statistics: crate::editor_highlight::HighlightStatistics,
 }
 
 impl Editor {
@@ -203,7 +210,12 @@ impl Editor {
             highlights: std::sync::Arc::new(Vec::new()),
             highlights_revision: None,
             highlight_tree: None,
+            highlight_tree_revision: None,
             highlight_generation: 0,
+            highlight_applied_generation: 0,
+            highlight_worker_running: false,
+            highlight_pending_edit: None,
+            highlight_statistics: crate::editor_highlight::HighlightStatistics::default(),
         };
         let weak = cx.weak_entity();
         editor.register_editor_commands(weak, cx);

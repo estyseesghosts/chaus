@@ -30,5 +30,6 @@ mod paint_row;
 
 pub use editor::Editor;
 pub use editor_file::FileState;
+pub use editor_highlight::HighlightStatistics;
 pub use editor_keys::{bind_keys, KEY_CONTEXT};
 pub use geometry::Geometry;

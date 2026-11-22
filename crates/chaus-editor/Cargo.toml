@@ -20,5 +20,6 @@ chaus-io = { workspace = true }
 chaus-layout = { workspace = true }
 chaus-vim = { workspace = true }
 gpui = { workspace = true }
+ropey = { workspace = true }
 silvestris = { workspace = true }
 unicode-width = { workspace = true }
