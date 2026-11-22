@@ -76,7 +76,7 @@ app-owned. Bundled fonts come from Silvestris; do not add a second copy.
 - A 2-second background watcher re-reads the open file and shows a
   changed-on-disk banner. Review opens the Reload / Save As / Overwrite /
   Cancel sheet. The watcher never reloads or overwrites the document
-  automatically.
+  automatically. Its polling cost on very large files is not yet measured.
 - Open and save run on the background executor, but a save still expands the
   document into one string and one byte buffer before writing. Initial row
   layout after a load runs on the UI thread. Large files are not yet measured.
