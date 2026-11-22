@@ -1,9 +1,11 @@
 //! Crash-recovery snapshots and the launch-time Recover/Discard sheet.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chaus_core::eol::EolMap;
+use chaus_core::document::DocumentSnapshot;
+use chaus_core::eol::{Eol, EolMap};
 use chaus_core::position::{CharOffset, Selection};
 use chaus_io::recovery::RecoveryRecord;
 use gpui::{
@@ -43,6 +45,32 @@ pub(crate) fn new_recovery_id() -> u64 {
     nanos ^ (u64::from(std::process::id()) << 32) ^ sequence
 }
 
+/// Everything a recovery record needs, captured cheaply on the UI thread.
+///
+/// The expanded text and the on-disk encoding are produced later on the
+/// background executor by [`RecoverySnapshot::into_record`].
+struct RecoverySnapshot {
+    id: u64,
+    original_path: Option<PathBuf>,
+    document: DocumentSnapshot,
+    preferred_eol: Eol,
+    had_utf8_bom: bool,
+    revision: u64,
+}
+
+impl RecoverySnapshot {
+    fn into_record(self) -> RecoveryRecord {
+        RecoveryRecord::new(
+            self.id,
+            self.original_path,
+            self.document.text_with_eol(),
+            self.preferred_eol,
+            self.had_utf8_bom,
+            self.revision,
+        )
+    }
+}
+
 impl Editor {
     /// Queue snapshots found at launch. The sheet shows them one at a time.
     pub fn queue_recovery(
@@ -73,13 +101,14 @@ impl Editor {
                         editor.retire_recovery_snapshot(epoch);
                         return None;
                     }
-                    Some(editor.recovery_record())
+                    Some(editor.recovery_snapshot())
                 })
                 .ok()
                 .flatten();
-            if let Some(record) = record {
+            if let Some(snapshot) = record {
                 cx.background_executor()
                     .spawn(async move {
+                        let record = snapshot.into_record();
                         if let Err(error) = chaus_io::recovery::write_with_epoch(&record, epoch) {
                             eprintln!("chaus: could not write recovery snapshot: {error}");
                         }
@@ -99,9 +128,10 @@ impl Editor {
             self.retire_recovery_snapshot(epoch);
             return;
         }
-        let record = self.recovery_record();
+        let snapshot = self.recovery_snapshot();
         cx.background_executor()
             .spawn(async move {
+                let record = snapshot.into_record();
                 if let Err(error) = chaus_io::recovery::write_with_epoch(&record, epoch) {
                     eprintln!("chaus: could not write recovery snapshot: {error}");
                 }
@@ -128,7 +158,10 @@ impl Editor {
         self.recovery_had_utf8_bom = false;
     }
 
-    fn recovery_record(&self) -> RecoveryRecord {
+    /// Cheap capture for the background writer. Cloning the Rope and the EOL
+    /// map does not copy the text, so the debounce callback never expands a
+    /// multi-MiB document on the UI thread.
+    fn recovery_snapshot(&self) -> RecoverySnapshot {
         let (original_path, had_utf8_bom) = self.file.as_ref().map_or(
             (
                 self.recovery_original_path.clone(),
@@ -141,14 +174,14 @@ impl Editor {
                 )
             },
         );
-        RecoveryRecord::new(
-            self.recovery_key,
+        RecoverySnapshot {
+            id: self.recovery_key,
             original_path,
-            self.document.text_with_eol(),
-            self.document.preferred_eol(),
+            document: self.document.snapshot(),
+            preferred_eol: self.document.preferred_eol(),
             had_utf8_bom,
-            self.document.state_token(),
-        )
+            revision: self.document.state_token(),
+        }
     }
 
     fn recover_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
