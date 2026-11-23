@@ -1,10 +1,10 @@
-# Chaus — native plaintext editor implementation packet
+![chaus](chaus.png)
 
-> **Working name:** the product name is not final; the implemented binary, Rust packages and config files use `chaus`. Rename consistently before the first release. The specification below describes the target application; the implemented increment and its known gaps are recorded in `docs/implementation-notes.md`.
+a rust+gpui+[silvestris](https://github.com/estyseesghosts/silvestris) plaintext editor
 
-## Product contract
+very deliberately minimal on features. i just wanted a faster scratchpad because notepad and textedit are frustratingly slow to me. 
 
-Build a small native plaintext/code editor with **Rust + pinned GPUI + Silvestris**. It should resemble a plain-text Apple TextEdit window: **one document per window, no tabs, file explorer, minimap, toolbars, or permanent status bar**. Default appearance is **Geist Dark + bundled Geist Mono**. Allow Geist Light, Aqua Light, and Aqua Dark. Windows and Linux are the first release targets; retain a portable architecture for macOS later.
+##
 
 Two ways of editing the *same document*: conventional point-and-click/keyboard editing by default and an optional, intentionally bounded Vim mode, toggled at runtime with **Ctrl+Shift+V on Windows/Linux** (proposed default). Menu item: **View → Vim Mode**, with checked state. When on, show an unobtrusive `NORMAL` / `INSERT` / `VISUAL` / `COMMAND` indicator (bottom corner, not a persistent full-width bar). Toggling Vim mode off must immediately restore ordinary text entry and cancel pending modal operators safely. The shortcut must work even when the cursor is in the document, but not intercept a modal dialog, menu, or settings field.
 

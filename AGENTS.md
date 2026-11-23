@@ -21,11 +21,28 @@ Always follow the style as outlined in rust_style_guide.md. Always read that doc
 - Never silently convert all file encodings or newline types. Never write a document merely because its preview/formatter/parser changed.
 - No global mutable `static` document state; key state and cursors are per-window/per-document. Settings can be app-global but applied to each window without replacing the view/focus handles.
 
-## Build order
+## Writing Style Rules
 
-Follow M0–M7 in README. Within M2: (a) one-line typing, (b) newline and click positions, (c) scrolling/wrapping, (d) selections and clipboard, (e) IME, (f) history. Do not begin Vim until the shared transactions, history and text positions are tested. Do not begin syntax highlighting until line layout has stable visible-range APIs.
+These rules apply to both chat responses, and to written documentation.
 
-Each milestone PR must include: behavior summary; changed modules; screenshots/video only where visual validation matters; tests run + results; measured performance/regressions; explicit known gaps; docs updated. Avoid claiming issues fixed based solely on compilation.
+- **Be direct.** Answer the question immediately. No introductions, filler, or unnecessary conclusions.
+- **Use natural language.** Write like a competent engineer, not a marketer, consultant, or chatbot.
+- **Be concise, not shallow.** Keep explanations short where possible, but never sacrifice technical detail, accuracy, or important nuance.
+- **Avoid AI-sounding prose.** No artificial contrasts, dramatic fragments, forced profundity, rhetorical questions, or rules of three.
+- **Don't flatter or validate.** Skip praise, excessive agreement, performative empathy, and conversational pleasantries.
+- **Be specific.** Prefer concrete facts, mechanisms, measurements, examples, and actionable steps over vague abstractions.
+- **Don't overstructure.** Use headings, lists, and tables only when they genuinely improve readability.
+- **Be honest about uncertainty.** Distinguish verified facts, reasonable inferences, and speculation. Don't manufacture confidence.
+- **Think critically.** Challenge incorrect assumptions, identify tradeoffs, and explain disagreements without hedging unnecessarily.
+- **Prioritize substance.** Every sentence should contribute useful information. If removing it changes nothing, remove it.
+
+## Truth and Citations 
+
+You are encouraged to come up with creative solutions for the obscure and arcane problems you might face while working in this folder. This does not mean you just throw shit at the wall to see what sticks. Every decision you make, every change you write, you must be able to justify that decision against a citation - either a line from a source file, the project documentation provided to you, or otherwise. Do not pull shit out of your ass.
+
+## Half Steps 
+
+Having a task's deliverables fully achieved on paper does not always mean those deliverables were completed correctly. Something like, being asked to complete a port, and outputting a technically complete port - that brute forces rendering in software, and as such runs terribly on real hardware. That's awful, benefits nobody, and wastes the users time and money. Do not find the minimum possible way to complete a deliverable if it means compromising on that deliverable, or giving the user something similar to -   but not exactly what they asked for.
 
 ## Technical invariants
 
@@ -65,3 +82,26 @@ Mandatory automated quality gates, as available: `cargo fmt --check`, `cargo tes
 ## Completion definition
 
 A person can copy `scratchpad.exe` (Windows) or the Linux executable to a clean supported machine, run `scratchpad` from terminal to open a responsive window, open/edit/save a UTF-8 file without corruption, switch Vim mode with Ctrl+Shift+V, switch themes in preferences, and exit without data loss. All bundled fonts, grammars and queries work with no development checkout. External formatters are optional and explicitly identified as external.
+
+## Git identity
+
+The only git identity an agent may use in this repository is:
+
+```text
+terezi <jules@foxtails.me>
+```
+
+Set it in the repository itself before the first commit, and do not rely on a
+machine-wide default or invent a placeholder:
+
+```sh
+git config user.name terezi
+git config user.email jules@foxtails.me
+```
+
+Every agent commit carries both fields. Do not use `A4`,
+`a4@example.invalid`, the host's auto-detected address, or any other
+identity, and do not author on someone else's behalf. If a commit already
+exists under another identity, report it to the lead rather than rewriting
+history: an artifact's `build-info` names the commit it was built from, and
+re-authoring a commit changes that name.
