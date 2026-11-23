@@ -30,6 +30,32 @@ fn report_recovery_failure(editor: &WeakEntity<Editor>, cx: &mut AsyncApp, error
     });
 }
 
+/// Retire on the background executor. The epoch watermark in `chaus-io` is the
+/// ordering barrier: a stale write that reaches the lock after retirement is
+/// discarded instead of recreating the record. The editor update returns
+/// before any filesystem work happens.
+fn spawn_recovery_retire(
+    key: u64,
+    epoch: u64,
+    editor: &WeakEntity<Editor>,
+    cx: &mut Context<Editor>,
+) {
+    let weak = editor.clone();
+    cx.spawn(async move |_, cx| {
+        let retire = cx
+            .background_executor()
+            .spawn(async move { chaus_io::recovery::retire(key, epoch) });
+        if let Err(error) = retire.await {
+            let mut async_cx = cx.clone();
+            let _ = weak.update(&mut async_cx, |editor, cx| {
+                editor.set_status(format!("Recovery cleanup failed: {error}"));
+                cx.notify();
+            });
+        }
+    })
+    .detach();
+}
+
 #[derive(Clone)]
 pub(crate) struct RecoveryPromptFocus {
     pub(crate) recover: FocusHandle,
@@ -102,12 +128,13 @@ impl Editor {
         cx.spawn(async move |editor, cx| {
             cx.background_executor().timer(SNAPSHOT_DELAY).await;
             let record = editor
-                .update(cx, |editor, _| {
+                .update(cx, |editor, cx| {
                     if editor.recovery_epoch != epoch {
                         return None;
                     }
                     if !editor.document.is_dirty() {
-                        editor.retire_recovery_snapshot(epoch);
+                        let key = editor.recovery_key;
+                        spawn_recovery_retire(key, epoch, &cx.weak_entity(), cx);
                         return None;
                     }
                     Some(editor.recovery_snapshot())
@@ -134,7 +161,7 @@ impl Editor {
         self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
         let epoch = self.recovery_epoch;
         if !self.document.is_dirty() {
-            self.retire_recovery_snapshot(epoch);
+            self.retire_recovery_snapshot(epoch, cx);
             return;
         }
         let snapshot = self.recovery_snapshot();
@@ -152,16 +179,31 @@ impl Editor {
         .detach();
     }
 
-    pub(crate) fn retire_recovery_snapshot(&self, epoch: u64) {
-        if let Err(error) = chaus_io::recovery::retire(self.recovery_key, epoch) {
-            eprintln!("chaus: could not retire recovery snapshot: {error}");
-        }
+    pub(crate) fn retire_recovery_snapshot(&self, epoch: u64, cx: &mut Context<Self>) {
+        spawn_recovery_retire(self.recovery_key, epoch, &cx.weak_entity(), cx);
     }
 
-    pub(crate) fn remove_recovery_snapshot(&self) {
-        if let Err(error) = chaus_io::recovery::remove(self.recovery_key) {
-            eprintln!("chaus: could not remove recovery snapshot: {error}");
-        }
+    /// Remove the snapshot for the current document. Bumping the epoch first
+    /// invalidates any write already in flight for the old revision.
+    pub(crate) fn remove_recovery_snapshot(&mut self, cx: &mut Context<Self>) {
+        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
+        spawn_recovery_retire(
+            self.recovery_key,
+            self.recovery_epoch,
+            &cx.weak_entity(),
+            cx,
+        );
+    }
+
+    /// Test entry point for the retirement path used by close/clear handlers.
+    pub fn retire_snapshot_for_test(&mut self, cx: &mut Context<Self>) {
+        self.remove_recovery_snapshot(cx);
+    }
+
+    /// Snapshot key of this window, for deterministic filesystem fixtures.
+    #[must_use]
+    pub fn recovery_key_for_test(&self) -> u64 {
+        self.recovery_key
     }
 
     pub(crate) fn reset_recovery_key(&mut self) {
@@ -253,9 +295,8 @@ impl Editor {
         let Some(record) = self.recovery_queue.pop_front() else {
             return;
         };
-        if let Err(error) = chaus_io::recovery::remove(record.id) {
-            eprintln!("chaus: could not remove discarded snapshot: {error}");
-        }
+        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
+        spawn_recovery_retire(record.id, self.recovery_epoch, &cx.weak_entity(), cx);
         self.finish_recovery_choice(window, cx);
     }
 

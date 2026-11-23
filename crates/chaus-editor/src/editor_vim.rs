@@ -209,7 +209,7 @@ impl Editor {
                     window.remove_window();
                 }
             }
-            "q!" => self.discard_and_close(window),
+            "q!" => self.discard_and_close(window, cx),
             "wq" => {
                 self.save_inner(true, cx);
             }

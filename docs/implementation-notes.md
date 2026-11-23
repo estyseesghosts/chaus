@@ -148,8 +148,10 @@ history; `None` restores horizontal scrolling.
   listable; exceeding it returns a typed error and a visible editor status
   instead of replacing a usable snapshot with an unreadable one. Legacy records
   larger than the cap are still skipped at startup. Launch offers
-  Recover/Discard per snapshot, and saving or discarding removes it. Recovery
-  is best-effort and does not replace a power-failure test.
+  Recover/Discard per snapshot, and saving or discarding removes it. Snapshot
+  retirement and removal run on the background executor; the epoch watermark
+  remains the ordering barrier, and cleanup failures become a visible editor
+  status. Recovery is best-effort and does not replace a power-failure test.
 - A 2-second background watcher checks identity, size and mtime first and only
   hashes when one changed, with a forced hash every 30 seconds for coarse
   timestamps. A check in flight suppresses the next tick. Review opens the

@@ -134,7 +134,7 @@ impl Editor {
                 self.force_next_save = false;
                 self.disk_change = None;
                 self.disk_epoch = self.disk_epoch.wrapping_add(1);
-                self.remove_recovery_snapshot();
+                self.remove_recovery_snapshot(cx);
                 self.reset_recovery_key();
                 self.document.cancel_user_operation();
                 self.vim_engine.reset();

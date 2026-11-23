@@ -39,7 +39,7 @@ impl Editor {
             return false;
         }
         if !self.document.is_dirty() {
-            self.remove_recovery_snapshot();
+            self.remove_recovery_snapshot(cx);
             return true;
         }
         self.close_prompt = true;
@@ -64,9 +64,9 @@ impl Editor {
         cx.notify();
     }
 
-    pub(crate) fn discard_and_close(&mut self, window: &mut Window) {
+    pub(crate) fn discard_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_prompt = false;
-        self.remove_recovery_snapshot();
+        self.remove_recovery_snapshot(cx);
         window.remove_window();
     }
 
@@ -176,8 +176,8 @@ impl Editor {
                                 Button::new("close-discard", "Discard")
                                     .focus_handle(self.close_focus.discard.clone())
                                     .destructive(true)
-                                    .on_click(cx.listener(|editor, _, window, _| {
-                                        editor.discard_and_close(window);
+                                    .on_click(cx.listener(|editor, _, window, cx| {
+                                        editor.discard_and_close(window, cx);
                                     })),
                             )
                             .child(

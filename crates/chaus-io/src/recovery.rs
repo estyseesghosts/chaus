@@ -8,7 +8,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chaus_core::eol::Eol;
@@ -27,6 +27,24 @@ static WRITE_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
 /// Highest writer epoch accepted per `(directory, id)`.
 static WATERMARKS: Mutex<Vec<Watermark>> = Mutex::new(Vec::new());
+/// Test seam: hold the next retirement until the test releases the receiver.
+/// Normal runs always leave this `None`.
+static RETIRE_GATE: Mutex<Option<mpsc::Receiver<()>>> = Mutex::new(None);
+
+/// Install a one-shot gate in front of the next snapshot retirement.
+pub fn set_retire_gate_for_test(receiver: Option<mpsc::Receiver<()>>) {
+    *RETIRE_GATE.lock().expect("recovery retire gate poisoned") = receiver;
+}
+
+fn wait_for_retire_gate() {
+    let receiver = RETIRE_GATE
+        .lock()
+        .expect("recovery retire gate poisoned")
+        .take();
+    if let Some(receiver) = receiver {
+        let _ = receiver.recv();
+    }
+}
 
 struct Watermark {
     directory: PathBuf,
@@ -253,6 +271,7 @@ pub fn retire(id: u64, epoch: u64) -> std::io::Result<()> {
 
 /// Retire a snapshot in an explicit directory with an explicit epoch.
 pub fn retire_in(directory: &Path, id: u64, epoch: u64) -> std::io::Result<()> {
+    wait_for_retire_gate();
     let _guard = WRITE_LOCK.lock().map_err(|_| poisoned("recovery retire"))?;
     record_watermark(directory, id, epoch, u64::MAX)?;
     remove_file(directory, id)
