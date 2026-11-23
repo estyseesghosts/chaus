@@ -80,6 +80,8 @@ impl Formatter {
 pub enum FormatError {
     /// The executable could not be started (usually not installed).
     Unavailable(std::io::Error),
+    /// The child exited successfully without consuming all of its input.
+    InputIncomplete(std::io::Error),
     Timeout,
     OutputTooLarge,
     InvalidUtf8,
@@ -98,6 +100,10 @@ impl std::fmt::Display for FormatError {
                     "formatter is not installed or could not start: {error}"
                 )
             }
+            Self::InputIncomplete(error) => write!(
+                formatter,
+                "formatter exited before reading all input: {error}"
+            ),
             Self::Timeout => write!(formatter, "formatter timed out and was stopped"),
             Self::OutputTooLarge => write!(
                 formatter,
@@ -141,11 +147,9 @@ pub fn run_with_timeout(
 
     let mut stdin = child.stdin.take().expect("stdin was requested as piped");
     let source = source.to_owned();
-    let writer = std::thread::spawn(move || {
-        // A formatter may exit before reading everything; a broken pipe is not
-        // an application error.
-        let _ = stdin.write_all(source.as_bytes());
-    });
+    // The writer owns stdin and closes it on completion. A short read by a
+    // zero-exit child is an error, not a truncated formatting result.
+    let writer = std::thread::spawn(move || stdin.write_all(source.as_bytes()));
     let stdout = child.stdout.take().expect("stdout was requested as piped");
     let stderr = child.stderr.take().expect("stderr was requested as piped");
     let stdout = std::thread::spawn(move || read_bounded(stdout));
@@ -176,16 +180,26 @@ pub fn run_with_timeout(
             }
         }
     };
-    let _ = writer.join();
-    let stdout = join_bytes(stdout)?;
-    let stderr = String::from_utf8_lossy(&join_bytes(stderr)?).into_owned();
+    // Join all workers before interpreting any result so no thread or pipe is
+    // left behind on an error path.
+    let stdout = join_bytes(stdout);
+    let stderr = join_bytes(stderr);
+    let written = writer.join().map_err(|_| {
+        FormatError::Unavailable(std::io::Error::other("formatter stdin writer panicked"))
+    })?;
+    let stdout = stdout?;
+    let stderr = String::from_utf8_lossy(&stderr?).into_owned();
 
+    // A failed child is more informative than a broken pipe caused by its
+    // early exit. Once it succeeded, incomplete input and oversized output
+    // take precedence over unusable stdout.
     if !status.success() {
         return Err(FormatError::Failed {
             status: status.code(),
             stderr,
         });
     }
+    written.map_err(FormatError::InputIncomplete)?;
     let text = String::from_utf8(stdout).map_err(|_| FormatError::InvalidUtf8)?;
     Ok(text)
 }

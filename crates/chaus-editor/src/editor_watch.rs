@@ -25,7 +25,7 @@ impl Editor {
             loop {
                 cx.background_executor().timer(WATCH_INTERVAL).await;
                 let snapshot = editor.update(cx, |editor, _| {
-                    if editor.saving || editor.opening || editor.disk_check_in_flight {
+                    if editor.file_operation_active() || editor.disk_check_in_flight {
                         return None;
                     }
                     editor

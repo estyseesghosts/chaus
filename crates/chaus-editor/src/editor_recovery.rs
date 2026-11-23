@@ -7,11 +7,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chaus_core::document::DocumentSnapshot;
 use chaus_core::eol::{Eol, EolMap};
 use chaus_core::position::{CharOffset, Selection};
-use chaus_io::recovery::RecoveryRecord;
+use chaus_io::recovery::{RecoveryError, RecoveryRecord};
 use gpui::{
-    div, px, AnyElement, App, Context, FocusHandle, InteractiveElement as _, IntoElement,
+    div, px, AnyElement, App, AsyncApp, Context, FocusHandle, InteractiveElement as _, IntoElement,
     KeyDownEvent, MouseButton, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
-    Window,
+    WeakEntity, Window,
 };
 use silvestris::controls::Button;
 use silvestris::ActiveTheme;
@@ -20,6 +20,15 @@ use crate::editor::Editor;
 
 const SNAPSHOT_DELAY: Duration = Duration::from_millis(750);
 static RECOVERY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// A failed snapshot is a persistent, visible condition: the dirty document
+/// has no durable copy until the next successful write.
+fn report_recovery_failure(editor: &WeakEntity<Editor>, cx: &mut AsyncApp, error: &RecoveryError) {
+    let _ = editor.update(cx, |editor, cx| {
+        editor.set_status(format!("Recovery unavailable: {error}"));
+        cx.notify();
+    });
+}
 
 #[derive(Clone)]
 pub(crate) struct RecoveryPromptFocus {
@@ -106,14 +115,14 @@ impl Editor {
                 .ok()
                 .flatten();
             if let Some(snapshot) = record {
-                cx.background_executor()
-                    .spawn(async move {
-                        let record = snapshot.into_record();
-                        if let Err(error) = chaus_io::recovery::write_with_epoch(&record, epoch) {
-                            eprintln!("chaus: could not write recovery snapshot: {error}");
-                        }
-                    })
-                    .detach();
+                let write = cx.background_executor().spawn(async move {
+                    let record = snapshot.into_record();
+                    chaus_io::recovery::write_with_epoch(&record, epoch)
+                });
+                if let Err(error) = write.await {
+                    let mut async_cx = cx.clone();
+                    report_recovery_failure(&editor, &mut async_cx, &error);
+                }
             }
         })
         .detach();
@@ -129,14 +138,18 @@ impl Editor {
             return;
         }
         let snapshot = self.recovery_snapshot();
-        cx.background_executor()
-            .spawn(async move {
+        let weak = cx.weak_entity();
+        cx.spawn(async move |_, cx| {
+            let write = cx.background_executor().spawn(async move {
                 let record = snapshot.into_record();
-                if let Err(error) = chaus_io::recovery::write_with_epoch(&record, epoch) {
-                    eprintln!("chaus: could not write recovery snapshot: {error}");
-                }
-            })
-            .detach();
+                chaus_io::recovery::write_with_epoch(&record, epoch)
+            });
+            if let Err(error) = write.await {
+                let mut async_cx = cx.clone();
+                report_recovery_failure(&weak, &mut async_cx, &error);
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn retire_recovery_snapshot(&self, epoch: u64) {
@@ -198,6 +211,10 @@ impl Editor {
         self.recovery_had_utf8_bom = record.had_utf8_bom;
         let (text, eol) = EolMap::from_source(&record.text);
         self.document.reset(text, eol, record.preferred_eol);
+        // A recovered document is a new document generation: a pending open or
+        // save from before the reset must never settle against it.
+        self.cancel_file_operation();
+        self.document_generation.bump();
         self.document.mark_unsaved();
         self.selection = Selection::caret(CharOffset::ZERO);
         self.preferred_column = None;

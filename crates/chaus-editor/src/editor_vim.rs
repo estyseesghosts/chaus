@@ -152,11 +152,7 @@ impl Editor {
         // comparison keeps bookkeeping correct if an edit path forgets to.
         let mutated = self.document.revision() != before || matches!(outcome, Outcome::Changed);
         if mutated {
-            self.after_document_mutation(self.document.last_changed_lines(), cx);
-            self.clear_composition();
-            self.preferred_column = None;
-            self.schedule_highlight(None, cx);
-            cx.notify();
+            self.after_opaque_mutation(cx);
         }
         match outcome {
             Outcome::Unhandled => {}

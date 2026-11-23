@@ -45,10 +45,10 @@ impl Editor {
         self.preedit_active = false;
     }
 
-    /// Complete an undo/redo. `EditResult` is not available because history
-    /// replays whole transactions, so highlighting reparses from the current
-    /// revision.
-    pub(crate) fn after_history_change(&mut self, cx: &mut Context<Self>) {
+    /// Complete a mutation that reports no `EditResult`: history replays whole
+    /// transactions and the Vim engine only reports `Outcome`. Derive affected
+    /// lines from the document and reparse from the current revision.
+    pub(crate) fn after_opaque_mutation(&mut self, cx: &mut Context<Self>) {
         self.after_document_mutation(self.document.last_changed_lines(), cx);
         self.clear_composition();
         self.preferred_column = None;
@@ -251,14 +251,14 @@ impl Editor {
     pub(crate) fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(selection) = self.document.undo() {
             self.selection = selection;
-            self.after_history_change(cx);
+            self.after_opaque_mutation(cx);
         }
     }
 
     pub(crate) fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(selection) = self.document.redo() {
             self.selection = selection;
-            self.after_history_change(cx);
+            self.after_opaque_mutation(cx);
         }
     }
 

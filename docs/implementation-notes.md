@@ -104,7 +104,11 @@ history; `None` restores horizontal scrolling.
   overwriting them. The Vim checkbox is not the live mode; `Ctrl+Shift+V` and
   View → Vim Mode remain per-window.
 - Find and replace support literal search only; regular expressions are not
-  implemented. Vim `/` and `?` remain separate.
+  implemented. Vim `/` and `?` remain separate. Literal search streams Rope
+  characters through a KMP prefix table, so a long needle over repeated
+  prefixes no longer causes a comparison per candidate character per needle
+  character. Case-insensitive matching still compares each scalar's lowercase
+  expansion, which is an equivalence relation the same matcher accepts.
 - Syntax highlighting is linked through `chaus-highlight`: Rust, C, C++,
   Python, JavaScript, TypeScript, TSX, JSON, TOML and shell, selected by
   extension or known name with a View → Language override (including Plain
@@ -119,20 +123,33 @@ history; `None` restores horizontal scrolling.
   inline trees need a two-grammar pipeline. External formatters remain separate
   and explicit: Format Document uses `rustfmt`, `clang-format`, `black` or
   `prettier` when installed, runs with a 10-second deadline and bounded output,
-  never through a shell, and discards output if the document changed.
-  Format-on-save is off and no formatter runtime is bundled.
-- Open/save dialogs use the Win32 common dialogs on Windows. Linux uses the
-  desktop's `zenity` or `kdialog` helper when one is installed; otherwise the
-  command reports that no picker is available, so pass paths on the command
-  line and use `Ctrl+S` for an already-open file. The Linux helper path has not
-  been smoke-tested in this Windows environment.
+  never through a shell, and discards output if the document changed. A child
+  that exits zero after reading only part of stdin is rejected rather than
+  replacing the document with truncated text; a nonzero exit keeps its own
+  diagnostic. Format-on-save is off and no formatter runtime is bundled.
+- Open and Save As use GPUI's `prompt_for_paths` / `prompt_for_new_path`. The
+  pinned GPUI runs the Win32 picker on its own STA thread and serializes it per
+  owner window, so no modal loop is pumped inside an editor update. Linux uses
+  the xdg-desktop-portal implementation behind the same API; a machine without
+  a portal implementation reports a picker error instead of a chooser. The
+  `zenity`/`kdialog` helper in `chaus-dialog` is no longer used by either path.
+  Native picker runs on real Windows and Linux desktops remain a manual gate.
+- One typed file operation owns the editor's picker, open and write. Every
+  completion checks its request id and document generation before it can
+  install metadata, clear dirty state, change recovery or close the window.
+  A second Save dispatched while a picker or write is pending is rejected, and
+  a forced reload no longer overwrites edits made while its load was in flight.
 - The save-conflict and dirty-close sheets cover the normal paths. Reload after
   a conflict replaces the document; there is no three-way merge.
 - Dirty documents write a debounced crash-recovery snapshot under the platform
   state directory (`%LOCALAPPDATA%\Chaus\Recovery`, `$XDG_STATE_HOME/chaus/recovery`,
-  or `~/.local/state/chaus/recovery`). Launch offers Recover/Discard per
-  snapshot, and saving or discarding removes it. Recovery is best-effort and
-  does not replace a power-failure test.
+  or `~/.local/state/chaus/recovery`). The 64 MiB reader limit is now checked
+  on the serialized record before writing, so an accepted snapshot is always
+  listable; exceeding it returns a typed error and a visible editor status
+  instead of replacing a usable snapshot with an unreadable one. Legacy records
+  larger than the cap are still skipped at startup. Launch offers
+  Recover/Discard per snapshot, and saving or discarding removes it. Recovery
+  is best-effort and does not replace a power-failure test.
 - A 2-second background watcher checks identity, size and mtime first and only
   hashes when one changed, with a forced hash every 30 seconds for coarse
   timestamps. A check in flight suppresses the next tick. Review opens the

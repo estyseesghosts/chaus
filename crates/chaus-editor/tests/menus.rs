@@ -8,8 +8,7 @@ use gpui::{
 };
 use silvestris::command::CommandRegistry;
 use silvestris::core::command::CommandId;
-use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 struct Harness {
     editor: Entity<Editor>,
@@ -242,66 +241,33 @@ fn the_vim_shortcut_is_ignored_while_the_find_bar_owns_the_keyboard() {
     });
 }
 
-/// Deterministic stand-in for the native Save As picker. A real dialog would
-/// block this headless test and pop a window on the developer's desktop.
-#[derive(Default)]
-struct PickerLog {
-    calls: usize,
-    suggested: Option<Option<PathBuf>>,
-    result: Option<PathBuf>,
-}
-
-thread_local! {
-    static PICKER: RefCell<PickerLog> = RefCell::new(PickerLog::default());
-}
-
-fn fake_picker(suggested: Option<&Path>) -> Option<PathBuf> {
-    PICKER.with(|log| {
-        let mut log = log.borrow_mut();
-        log.calls += 1;
-        log.suggested = Some(suggested.map(Path::to_path_buf));
-        log.result.clone()
-    })
-}
-
-fn arm_picker(result: PathBuf) {
-    PICKER.with(|log| {
-        *log.borrow_mut() = PickerLog {
-            calls: 0,
-            suggested: None,
-            result: Some(result),
-        };
-    });
-}
-
-fn picker_calls() -> (usize, Option<Option<PathBuf>>) {
-    PICKER.with(|log| {
-        let log = log.borrow();
-        (log.calls, log.suggested.clone())
-    })
-}
-
 /// Press Save on a fresh untitled window through `trigger`, then report the
-/// window title the save settled on.
+/// window title the save settled on. GPUI's test platform stands in for the
+/// native picker, so the production path is exercised without a modal dialog.
 fn save_untitled_through(
     target: &Path,
     trigger: impl FnOnce(&Entity<Editor>, &mut VisualTestContext),
 ) -> String {
     let mut title = String::new();
     run(false, |editor, cx| {
-        arm_picker(target.to_path_buf());
-        cx.update(|_, cx| {
-            editor.update(cx, |editor, _| editor.set_save_picker_for_test(fake_picker));
-        });
         trigger(&editor, cx);
         draw(cx);
 
-        let (calls, suggested) = picker_calls();
-        assert_eq!(calls, 1, "Save must ask for a path instead of refusing");
-        assert_eq!(
-            suggested,
-            Some(None),
-            "an untitled document has no path to suggest"
+        assert!(
+            cx.did_prompt_for_new_path(),
+            "Save must open Save As, not print a refusal"
+        );
+        cx.simulate_new_path_selection(|suggested| {
+            assert!(
+                suggested.as_os_str().is_empty(),
+                "an untitled document has no directory to suggest"
+            );
+            Some(target.to_path_buf())
+        });
+        draw(cx);
+        assert!(
+            !cx.did_prompt_for_new_path(),
+            "a single Save must open exactly one picker"
         );
         let status = cx.update(|_, cx| editor.read(cx).status_text().map(str::to_owned));
         assert_ne!(
@@ -337,19 +303,18 @@ fn menu_save_and_the_shortcut_both_route_untitled_documents_to_save_as() {
 fn cancelling_the_menu_save_as_leaves_the_untitled_document_alone() {
     let target = std::env::temp_dir().join("chaus-cancelled-save.txt");
     run(false, |editor, cx| {
-        arm_picker(target.clone());
-        PICKER.with(|log| log.borrow_mut().result = None);
-        cx.update(|_, cx| {
-            editor.update(cx, |editor, _| editor.set_save_picker_for_test(fake_picker));
-        });
         cx.simulate_input("draft");
         draw(cx);
 
         invoke(&editor, cx, "file.save");
         draw(cx);
 
-        let (calls, _) = picker_calls();
-        assert_eq!(calls, 1, "cancelling still goes through the picker");
+        assert!(
+            cx.did_prompt_for_new_path(),
+            "cancelling still goes through the picker"
+        );
+        cx.simulate_new_path_selection(|_| None);
+        draw(cx);
         cx.update(|_, cx| {
             let editor = editor.read(cx);
             assert_eq!(editor.title(), "Untitled — Edited");

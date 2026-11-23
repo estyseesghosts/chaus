@@ -6,7 +6,8 @@ use chaus_core::settings::Settings;
 use chaus_editor::Editor;
 use chaus_io::LoadedFile;
 use gpui::{
-    actions, px, size, App, AppContext, Bounds, Entity, Focusable, KeyBinding, WindowHandle,
+    actions, px, size, App, AppContext, Bounds, Entity, Focusable, KeyBinding, PathPromptOptions,
+    WindowHandle,
 };
 use silvestris::core::command::CommandDescriptor;
 use silvestris::{chrome, ThemePreference};
@@ -182,19 +183,31 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
         });
         cx.on_action(|_: &Preferences, cx| open_preferences(cx));
         cx.on_action(|_: &OpenFile, cx| {
-            if !chaus_dialog::is_available() {
-                eprintln!("chaus: no native file picker is available on this platform yet");
-                return;
-            }
-            let Some(path) = chaus_dialog::choose_file(chaus_dialog::Choice::Open, "Open", None)
-            else {
-                return;
-            };
-            let load_path = path.clone();
-            let task = cx
-                .background_executor()
-                .spawn(async move { chaus_io::load(&load_path) });
+            // GPUI owns the native picker and answers on a oneshot channel, so
+            // the Win32 modal loop never runs inside this editor/app update.
+            let receiver = cx.prompt_for_paths(PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: Some("Open".into()),
+            });
             cx.spawn(async move |cx| {
+                let selection = match receiver.await {
+                    Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                    Ok(Ok(None)) => None,
+                    Ok(Err(error)) => {
+                        eprintln!("chaus: Open failed: {error:#}");
+                        None
+                    }
+                    Err(_) => None,
+                };
+                let Some(path) = selection else {
+                    return;
+                };
+                let load_path = path.clone();
+                let task = cx
+                    .background_executor()
+                    .spawn(async move { chaus_io::load(&load_path) });
                 let result = task.await;
                 let _ = cx.update(|cx| open_loaded_result(&path, result, cx));
             })

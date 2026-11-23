@@ -15,7 +15,8 @@ use chaus_core::eol::Eol;
 use tempfile::Builder;
 
 const MAGIC: &[u8; 8] = b"CHAUSR01";
-const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
+/// Largest serialized snapshot the reader accepts, including header and path.
+pub const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 const FILE_PREFIX: &str = "recovery-";
 const FILE_SUFFIX: &str = ".rec";
 
@@ -32,6 +33,40 @@ struct Watermark {
     id: u64,
     epoch: u64,
     revision: u64,
+}
+
+/// Why a recovery snapshot could not be written.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum RecoveryError {
+    /// No writable platform state directory is configured.
+    NoDirectory,
+    /// The serialized record (including path and header) exceeds the readable
+    /// limit, so accepting it would create a snapshot that startup discards.
+    TooLarge { bytes: u64, limit: u64 },
+    /// The filesystem rejected the write or replacement.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for RecoveryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoDirectory => write!(formatter, "no platform state directory for recovery"),
+            Self::TooLarge { bytes, limit } => write!(
+                formatter,
+                "recovery snapshot is {bytes} bytes; the limit is {limit} bytes"
+            ),
+            Self::Io(error) => write!(formatter, "recovery snapshot failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RecoveryError {}
+
+impl From<std::io::Error> for RecoveryError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
 /// One unsaved document snapshot.
@@ -106,13 +141,8 @@ pub fn recovery_directory() -> Option<PathBuf> {
 }
 
 /// Write a snapshot to the platform recovery directory.
-pub fn write(record: &RecoveryRecord) -> std::io::Result<PathBuf> {
-    let directory = recovery_directory().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no platform state directory for recovery",
-        )
-    })?;
+pub fn write(record: &RecoveryRecord) -> Result<PathBuf, RecoveryError> {
+    let directory = recovery_directory().ok_or(RecoveryError::NoDirectory)?;
     write_to(&directory, record)
 }
 
@@ -121,19 +151,14 @@ pub fn write(record: &RecoveryRecord) -> std::io::Result<PathBuf> {
 /// Only the highest epoch for a snapshot id is retained. A stale debounced
 /// write that finishes after a newer edit or after the record was retired is
 /// discarded instead of resurrecting older text.
-pub fn write_with_epoch(record: &RecoveryRecord, epoch: u64) -> std::io::Result<PathBuf> {
-    let directory = recovery_directory().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no platform state directory for recovery",
-        )
-    })?;
+pub fn write_with_epoch(record: &RecoveryRecord, epoch: u64) -> Result<PathBuf, RecoveryError> {
+    let directory = recovery_directory().ok_or(RecoveryError::NoDirectory)?;
     write_to_with_epoch(&directory, record, epoch)
 }
 
 /// Write a snapshot to an explicit directory. Existing snapshots with the same
 /// id are replaced. Call order supplies the ordering epoch.
-pub fn write_to(directory: &Path, record: &RecoveryRecord) -> std::io::Result<PathBuf> {
+pub fn write_to(directory: &Path, record: &RecoveryRecord) -> Result<PathBuf, RecoveryError> {
     let epoch = NEXT_EPOCH.fetch_add(1, Ordering::Relaxed);
     write_to_with_epoch(directory, record, epoch)
 }
@@ -143,7 +168,10 @@ pub fn write_to_with_epoch(
     directory: &Path,
     record: &RecoveryRecord,
     epoch: u64,
-) -> std::io::Result<PathBuf> {
+) -> Result<PathBuf, RecoveryError> {
+    // Check the complete serialized size before touching the filesystem. A
+    // record the reader would discard must never replace a usable snapshot.
+    let bytes = encode_checked(record)?;
     fs::create_dir_all(directory)?;
     let _guard = WRITE_LOCK.lock().map_err(|_| poisoned("recovery write"))?;
     let target = directory.join(file_name(record.id));
@@ -156,7 +184,7 @@ pub fn write_to_with_epoch(
     let mut temporary = Builder::new()
         .prefix(".chaus-recovery-")
         .tempfile_in(directory)?;
-    temporary.write_all(&encode(record))?;
+    temporary.write_all(&bytes)?;
     temporary.as_file().sync_all()?;
     let temporary_path = temporary.into_temp_path();
     crate::replace_path(&temporary_path, &target)?;
@@ -294,6 +322,18 @@ fn record_watermark(directory: &Path, id: u64, epoch: u64, revision: u64) -> std
 
 fn file_name(id: u64) -> String {
     format!("{FILE_PREFIX}{id:016x}{FILE_SUFFIX}")
+}
+
+fn encode_checked(record: &RecoveryRecord) -> Result<Vec<u8>, RecoveryError> {
+    let bytes = encode(record);
+    let size = bytes.len() as u64;
+    if size > MAX_RECORD_BYTES {
+        return Err(RecoveryError::TooLarge {
+            bytes: size,
+            limit: MAX_RECORD_BYTES,
+        });
+    }
+    Ok(bytes)
 }
 
 fn encode(record: &RecoveryRecord) -> Vec<u8> {

@@ -25,13 +25,14 @@ mod editor_recovery;
 mod editor_vim;
 mod editor_watch;
 mod editor_zoom;
+mod file_operation;
 mod geometry;
 mod paint_cache;
 mod paint_row;
 mod row_index;
 
 pub use editor::Editor;
-pub use editor_file::FileState;
+pub use editor_file::{FileState, LoadHook};
 pub use editor_highlight::HighlightStatistics;
 pub use editor_keys::{bind_keys, KEY_CONTEXT};
 pub use geometry::Geometry;

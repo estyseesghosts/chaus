@@ -33,7 +33,7 @@ impl Editor {
     /// one shows the Save / Discard / Cancel sheet and keeps the window open
     /// until the person chooses.
     pub fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.saving || self.opening {
+        if self.file_operation_active() {
             self.set_status("A file operation is in progress");
             cx.notify();
             return false;

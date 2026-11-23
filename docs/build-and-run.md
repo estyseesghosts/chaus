@@ -143,7 +143,7 @@ readelf --version-info target/release/chaus | grep GLIBC_ | sort -u
 
 Launch GUI windows from a real graphical session with `DISPLAY`, `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` set correctly. Headless CI does not prove window behavior. Test native Wayland and X11 separately, including XWayland where relevant.
 
-Open and Save dialogs use `zenity` or `kdialog` when installed. Without one of them the command reports that no picker is available; pass paths on the command line and use `Ctrl+S` for an already-open file. This helper path has not been smoke-tested in the Windows environment used to write this guide.
+Open and Save As use the GPUI picker for the running platform: `IFileOpenDialog`/`IFileSaveDialog` on Windows and the freedesktop file chooser portal on Linux with the Wayland and X11 features enabled. A Linux machine without a portal implementation reports a picker error; no external `zenity` or `kdialog` executable is required. Verify real dialogs, cancellation and focus restoration on a desktop session.
 
 ### Artifact checks
 

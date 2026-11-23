@@ -563,44 +563,88 @@ impl Document {
     ) -> Option<CharOffset> {
         let needle_chars: Vec<char> = needle.chars().collect();
         let length = self.len_chars();
-        if needle_chars.is_empty() || needle_chars.len() > length {
+        let width = needle_chars.len();
+        if width == 0 || width > length {
             return None;
         }
-        let last_start = length - needle_chars.len();
+        let prefix = build_prefix(&needle_chars, case_sensitive);
+
         if forward {
             let start = from.0.min(length);
-            for candidate in start..=last_start {
-                if self.literal_matches_at(CharOffset(candidate), &needle_chars, case_sensitive) {
-                    return Some(CharOffset(candidate));
-                }
+            let mut found = None;
+            scan_matches(
+                self.rope.chars_at(start).enumerate(),
+                start,
+                &needle_chars,
+                &prefix,
+                case_sensitive,
+                true,
+                |at| {
+                    found = Some(at);
+                    false
+                },
+            );
+            if let Some(at) = found {
+                return Some(CharOffset(at));
             }
-            // Wraparound. Candidates at or after `start` were already checked.
-            let wrap_end = start.min(last_start + 1);
-            for candidate in 0..wrap_end {
-                if self.literal_matches_at(CharOffset(candidate), &needle_chars, case_sensitive) {
-                    return Some(CharOffset(candidate));
-                }
+            if start == 0 {
+                return None;
             }
-            None
-        } else {
-            let from = from.0.min(length);
-            // Backward search requires the whole match to end at or before
-            // `from`, matching the previous prefix-search semantics.
-            if from >= needle_chars.len() {
-                for candidate in (0..=from - needle_chars.len()).rev() {
-                    if self.literal_matches_at(CharOffset(candidate), &needle_chars, case_sensitive)
-                    {
-                        return Some(CharOffset(candidate));
+            // Wraparound: a candidate before `from` may extend past it. The
+            // extra width covers all such matches without rescanning the tail.
+            let limit = length.min(start + width - 1);
+            let mut wrapped = None;
+            scan_matches(
+                self.rope.chars_at(0).take(limit).enumerate(),
+                0,
+                &needle_chars,
+                &prefix,
+                case_sensitive,
+                true,
+                |at| {
+                    if at < start {
+                        wrapped = Some(at);
+                        return false;
                     }
-                }
-            }
-            for candidate in (0..=last_start).rev() {
-                if self.literal_matches_at(CharOffset(candidate), &needle_chars, case_sensitive) {
-                    return Some(CharOffset(candidate));
-                }
-            }
-            None
+                    true
+                },
+            );
+            return wrapped.map(CharOffset);
         }
+
+        let from = from.0.min(length);
+        // Backward search requires the whole match to end at or before
+        // `from`, matching the previous prefix-search semantics.
+        let mut before = None;
+        scan_matches(
+            self.rope.chars_at(0).take(from).enumerate(),
+            0,
+            &needle_chars,
+            &prefix,
+            case_sensitive,
+            true,
+            |at| {
+                before = Some(at);
+                true
+            },
+        );
+        if let Some(at) = before {
+            return Some(CharOffset(at));
+        }
+        let mut wrapped = None;
+        scan_matches(
+            self.rope.chars_at(0).enumerate(),
+            0,
+            &needle_chars,
+            &prefix,
+            case_sensitive,
+            true,
+            |at| {
+                wrapped = Some(at);
+                true
+            },
+        );
+        wrapped.map(CharOffset)
     }
 
     /// Every non-overlapping literal match in document order.
@@ -615,42 +659,22 @@ impl Document {
         if needle_chars.is_empty() || needle_chars.len() > length {
             return Vec::new();
         }
-        let last_start = length - needle_chars.len();
+        let width = needle_chars.len();
+        let prefix = build_prefix(&needle_chars, case_sensitive);
         let mut ranges = Vec::new();
-        let mut candidate = 0usize;
-        while candidate <= last_start {
-            if self.literal_matches_at(CharOffset(candidate), &needle_chars, case_sensitive) {
-                ranges.push(CharRange::new(
-                    CharOffset(candidate),
-                    CharOffset(candidate + needle_chars.len()),
-                ));
-                candidate += needle_chars.len();
-            } else {
-                candidate += 1;
-            }
-        }
+        scan_matches(
+            self.rope.chars().enumerate(),
+            0,
+            &needle_chars,
+            &prefix,
+            case_sensitive,
+            false,
+            |start| {
+                ranges.push(CharRange::new(CharOffset(start), CharOffset(start + width)));
+                true
+            },
+        );
         ranges
-    }
-
-    /// Compare `needle` at `start` without allocating a document copy.
-    ///
-    /// Case-insensitive matching intentionally preserves the previous
-    /// per-scalar lowercase comparison rather than switching to full casefold.
-    fn literal_matches_at(&self, start: CharOffset, needle: &[char], case_sensitive: bool) -> bool {
-        let mut candidates = self.rope.chars_at(start.0.min(self.len_chars()));
-        for expected in needle {
-            let Some(candidate) = candidates.next() else {
-                return false;
-            };
-            if case_sensitive {
-                if candidate != *expected {
-                    return false;
-                }
-            } else if !candidate.to_lowercase().eq(expected.to_lowercase()) {
-                return false;
-            }
-        }
-        true
     }
 
     /// Text of a line, excluding its trailing hard break.
@@ -1245,5 +1269,73 @@ impl Document {
 impl Default for Document {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The comparison used by literal search. Case-insensitive search keeps the
+/// original per-scalar lowercase comparison instead of full Unicode casefold.
+fn chars_equal(left: char, right: char, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        left == right
+    } else {
+        left.to_lowercase().eq(right.to_lowercase())
+    }
+}
+
+/// KMP failure table. Equality is a caller-supplied relation so the same
+/// matcher serves case-sensitive and per-scalar case-insensitive search.
+fn build_prefix(needle: &[char], case_sensitive: bool) -> Vec<usize> {
+    let mut table = vec![0; needle.len()];
+    for index in 1..needle.len() {
+        let mut candidate = table[index - 1];
+        while candidate > 0 && !chars_equal(needle[index], needle[candidate], case_sensitive) {
+            candidate = table[candidate - 1];
+        }
+        if chars_equal(needle[index], needle[candidate], case_sensitive) {
+            candidate += 1;
+        }
+        table[index] = candidate;
+    }
+    table
+}
+
+/// Stream a character iterator through the matcher, reporting the character
+/// offset of every match start. `base` is the document offset of the iterator's
+/// first item; `allow_overlap` controls whether a new match may reuse a suffix
+/// of the previous one (Replace All must not produce overlapping edits). The
+/// callback returns `false` to stop early, which keeps Find Next proportional
+/// to the distance to the next match rather than the size of the document.
+fn scan_matches<I, F>(
+    chars: I,
+    base: usize,
+    needle: &[char],
+    prefix: &[usize],
+    case_sensitive: bool,
+    allow_overlap: bool,
+    mut on_match: F,
+) where
+    I: Iterator<Item = (usize, char)>,
+    F: FnMut(usize) -> bool,
+{
+    let mut matched = 0usize;
+    for (index, character) in chars {
+        while matched > 0 && !chars_equal(character, needle[matched], case_sensitive) {
+            matched = prefix[matched - 1];
+        }
+        if chars_equal(character, needle[matched], case_sensitive) {
+            matched += 1;
+        }
+        if matched == needle.len() {
+            let consumed = base + index + 1;
+            let continue_scanning = on_match(consumed - needle.len());
+            matched = if allow_overlap {
+                prefix[matched - 1]
+            } else {
+                0
+            };
+            if !continue_scanning {
+                return;
+            }
+        }
     }
 }

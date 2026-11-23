@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chaus_core::document::{Document, LineRange};
@@ -26,6 +26,7 @@ use crate::editor_commands::MenuKind;
 use crate::editor_conflict::ConflictPromptFocus;
 use crate::editor_element::EditorElement;
 use crate::editor_file::FileState;
+use crate::editor_file::LoadHook;
 use crate::editor_find::FindBar;
 use crate::editor_keys::{
     Backspace, ConvertIndentationToSpaces, ConvertIndentationToTabs, Copy, Cut, Delete,
@@ -37,22 +38,16 @@ use crate::editor_keys::{
     KEY_CONTEXT, VIM_OWNED_KEY_CONTEXT,
 };
 use crate::editor_recovery::{new_recovery_id, RecoveryPromptFocus};
+use crate::file_operation::{DocumentGeneration, FileOperation};
 use crate::geometry::Geometry;
 
 /// Routine confirmations (`Saved`, `Copied`) disappear after this long.
 const TRANSIENT_STATUS: Duration = Duration::from_secs(4);
 
-/// Deterministic stand-in for the native Save As picker, installed by tests so
-/// a headless run never opens a modal OS dialog.
-pub type SavePicker = fn(Option<&Path>) -> Option<PathBuf>;
-
 /// One editor window.
 pub struct Editor {
     pub(crate) document: Document,
     pub(crate) file: Option<FileState>,
-    /// Test seam: when set, replaces the native Save As picker so a headless
-    /// run never opens a modal OS dialog. Production leaves this `None`.
-    pub(crate) save_picker: Option<SavePicker>,
     pub(crate) selection: Selection,
     /// Preferred horizontal offset within the current visual row, in display
     /// columns. Cleared by horizontal movement and edits that relocate the
@@ -109,8 +104,12 @@ pub struct Editor {
     pub(crate) blink_epoch: u64,
     pub(crate) blink_key: Option<(Selection, bool)>,
     pub(crate) mapping_epoch: u64,
-    pub(crate) saving: bool,
-    pub(crate) opening: bool,
+    /// One authoritative owner for picker, open and save work.
+    pub(crate) file_operation: FileOperation,
+    pub(crate) file_request_next: u64,
+    /// Test seam for holding a load in flight. Production leaves this `None`.
+    pub(crate) load_hook: Option<LoadHook>,
+    pub(crate) document_generation: DocumentGeneration,
     /// Set when a key-down was consumed by the modal engine. Windows delivers
     /// the printable character in a separate WM_CHAR message afterwards, so
     /// the next text-input callback must be ignored to avoid inserting the
@@ -170,7 +169,6 @@ impl Editor {
         let mut editor = Self {
             document,
             file,
-            save_picker: None,
             selection: Selection::caret(CharOffset::ZERO),
             preferred_column: None,
             scroll_row: 0.0,
@@ -211,8 +209,10 @@ impl Editor {
             blink_epoch: 0,
             blink_key: None,
             mapping_epoch: 0,
-            saving: false,
-            opening: false,
+            file_operation: FileOperation::Idle,
+            file_request_next: 0,
+            load_hook: None,
+            document_generation: DocumentGeneration::default(),
             suppress_text_input: false,
             commands,
             menu: None,
@@ -294,10 +294,9 @@ impl Editor {
         self.rebuild_rows();
     }
 
-    /// Replace the native Save As picker with a deterministic stub. Tests use
-    /// this so a headless run never opens a modal OS dialog.
-    pub fn set_save_picker_for_test(&mut self, picker: SavePicker) {
-        self.save_picker = Some(picker);
+    /// Install a deterministic stand-in for a background load.
+    pub fn set_load_hook_for_test(&mut self, hook: LoadHook) {
+        self.load_hook = Some(hook);
     }
 
     /// Current soft-wrap mode for this window.
