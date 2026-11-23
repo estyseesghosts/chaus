@@ -6,12 +6,15 @@ Recorded 2026-11-22 while building the first chaus increment.
 
 | Component | Revision / version |
 | --- | --- |
-| Silvestris | `d1db8f0c6cbe80e80fb1dfebbb5c78990d2b9265` on `estyseesghosts/silvestris`, branch `source-list-shell` (git dependency) |
+| Silvestris | `a62b3b2553cc4af4c109b092d234522346006d30` on `estyseesghosts/silvestris`, branch `source-list-shell` (git dependency) |
 | GPUI | `6b720973027999bae402df23d469026f4cced988` (same pin as Silvestris `config/pins.toml`) |
 | Rust | `1.98.1` (`rust-toolchain.toml`); this machine builds with the GNU host `x86_64-pc-windows-gnu`, CI uses the default MSVC host |
-| Ropey | `1.6` |
-| Tree-sitter | not linked yet |
+| Ropey | `1.6.1` |
+| Tree-sitter | `0.25.10`; grammars and queries are compiled into the executable |
 | `windows-sys` | `0.61` |
+
+The table tracks the current `Cargo.toml` and `Cargo.lock`. Those two files are
+authoritative if the pins move again.
 
 Silvestris is consumed from its pinned upstream revision, so a fresh clone
 builds without a sibling checkout. Bump that revision in `Cargo.toml`,

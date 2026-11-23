@@ -1,91 +1,83 @@
-![chaus](chaus.png)
+# chaus
 
-a rust+gpui+[silvestris](https://github.com/estyseesghosts/silvestris) plaintext editor
+A small native plaintext editor written in Rust on [GPUI](https://github.com/zed-industries/zed) and [Silvestris](https://github.com/estyseesghosts/silvestris). One executable, one document per window. No tabs, projects, plugin system or embedded terminal.
 
-very deliberately minimal on features. i just wanted a faster scratchpad because notepad and textedit are frustratingly slow to me. 
+## Features
 
-##
+- UTF-8 editing. UTF-8 BOM and LF/CRLF/CR line endings are preserved. Saves write through a same-directory temporary file and leave the document dirty if replacement fails.
+- One window per file. Passing several paths on the command line opens one window for each.
+- Pointer and keyboard editing: drag/double/triple-click selection, soft wrap (word, character, off), undo/redo, clipboard, IME, and literal find and replace.
+- Optional Vim mode with Normal, Insert, Visual and Command states, toggled at runtime with `Ctrl+Shift+V`. Both editing modes share one document and undo history.
+- Syntax highlighting for Rust, C, C++, Python, JavaScript, TypeScript, TSX, JSON, TOML and shell. Parsers and queries are compiled into the executable; files above 2 MiB stay plain text.
+- Aqua Light/Dark and Geist Light/Dark themes, selectable in Preferences (`Ctrl+,`) or the rc file.
+- External-change detection with Reload / Save As / Overwrite / Cancel, a dirty-close prompt, and debounced crash-recovery snapshots.
+- Optional external formatters (`rustfmt`, `clang-format`, `black`, `prettier`) when installed. Format on save is off.
 
-Two ways of editing the *same document*: conventional point-and-click/keyboard editing by default and an optional, intentionally bounded Vim mode, toggled at runtime with **Ctrl+Shift+V on Windows/Linux** (proposed default). Menu item: **View → Vim Mode**, with checked state. When on, show an unobtrusive `NORMAL` / `INSERT` / `VISUAL` / `COMMAND` indicator (bottom corner, not a persistent full-width bar). Toggling Vim mode off must immediately restore ordinary text entry and cancel pending modal operators safely. The shortcut must work even when the cursor is in the document, but not intercept a modal dialog, menu, or settings field.
+Find and replace is literal only. There is no regex search, no Vimscript evaluation, no visible menu bar or toolbar — commands live in the titlebar right-click menu — and macOS is not yet validated. [Implementation notes](docs/implementation-notes.md) list the remaining gaps.
 
-One **self-contained application executable** (no colocated assets, grammar DLLs, scripts, or runtime installer). The executable must launch a GUI window from a terminal:
+## Run
 
 ```sh
-chaus                       # new untitled window
-chaus path/to/file.txt      # open a file
-chaus --new                 # new untitled window
-chaus --help                # print usage in terminal without launching GUI
-chaus --version             # print version
+chaus                      # one untitled window
+chaus notes.txt            # open a file
+chaus a.txt b.txt          # one window per file
+chaus --new                # also open an empty window
+chaus --help
+chaus --version
 ```
 
-Open multiple positional paths as **multiple windows**. Resolve relative paths against the invoking process's current directory. Preserve proper exit statuses on invalid flags and file-open failures. `--` terminates option parsing. Support paths with spaces and non-UTF-8 OS path representations using `OsString`/`PathBuf`, not `String`. An optional `-` (stdin) mode may be added later; do not silently block on terminal stdin in v0.1.
+`--` ends option parsing, so paths beginning with `-` can still be opened. Unknown options print an error and exit with status 2. The Windows release binary is a GUI-subsystem program: it attaches to an existing terminal for `--help` and `--version`, and does not allocate a console when launched from Explorer.
 
-**Self-contained** means resources required by *the app* are embedded or statically linked. It does **not** mean no OS/DLL/libc/graphics-driver dependencies. See platform build docs.
+## Build
 
-## Required features (v0.1)
+Requires Rust 1.98.1 (pinned in `rust-toolchain.toml`), git, and a C compiler that targets the Rust host for the bundled Tree-sitter grammars. Windows has extra toolchain constraints; see [Build and run](docs/build-and-run.md).
 
-- New/open/save/save-as, dirty-file prompt, multiple independent windows, safe file replacement, external-change protection, UTF-8 + BOM awareness, CRLF/LF preservation, explicit error paths.
-- Plain-text mouse editing, drag/double/triple-click selection, keyboard navigation, scroll, soft wrap, copy/cut/paste, undo/redo, find and replace, Unicode graphemes, IME composition, native text services and accessibility appropriate to the pinned GPUI APIs.
-- Reasonably large files without full-buffer redraw/reparse. No specific performance promise before measurement; test 1–10 MiB and 100k+ lines, including long lines.
-- Ropey text model, visible-line GPUI painting, Tree-sitter highlighting for a small embedded grammar set, optional external code formatters and built-in indent/dedent/trim whitespace.
-- Silvestris-managed chrome/menus/appearance/preferences UI; application-owned settings storage and a limited **vimrc-style** parser in `~/.chausrc` (on Windows, `%USERPROFILE%\_chausrc` by default). GUI and file drive one validated settings model. Never execute arbitrary Vimscript.
-- Limited Vim Normal/Insert/Visual/Command grammar with repeat counts, basic operators/motions/text objects, search, undo/redo and configurable normal-mode mappings. Not a Vim clone.
+```sh
+cargo build --release -p chaus-app --bin chaus --locked
+```
 
-## Scope boundary: NOT an IDE
+The executable is `target/release/chaus`, or `target\release\chaus.exe` on Windows. Fonts, grammars and highlight queries are embedded, so nothing needs to sit next to the binary.
 
-**Do not add** tabs, split panes, project/workspace state, command palette as a dependency, Git, LSP, completion, debugger, integrated terminal, extension/plugin system, runtime scripting, Vimscript VM, advanced Ex semantics, collaboration, rich text, Markdown preview, GPUI Kit or the Zed editor subsystem. The UI should not visibly change character when syntax highlighting is enabled.
+## Keys
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+N` | New window |
+| `Ctrl+O` | Open file |
+| `Ctrl+S` / `Ctrl+Shift+S` | Save / Save As |
+| `Ctrl+F` / `Ctrl+H` | Find / Replace |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / Redo |
+| `Ctrl+,` | Preferences |
+| `Ctrl+Shift+V` | Toggle Vim mode |
+| `Ctrl+Shift+I` | Format document |
+| `Ctrl+Shift+T` | Trim trailing whitespace |
+| `Ctrl++` / `Ctrl+-` / `Ctrl+0` | Zoom in / out / reset (current window) |
+
+On macOS the primary modifier is `Cmd`; that platform is not validated. Right-click the titlebar for the File, Edit and View commands.
+
+## Configuration
+
+Settings live in `~/.chausrc` on Linux and `%USERPROFILE%\_chausrc` on Windows. The file is a small, strict Vim-like subset, not Vimscript: no `source`, `autocmd`, expressions or shell commands. Invalid lines are reported with their line number and the valid settings still apply.
+
+```vim
+" chaus settings
+set theme=geist-dark
+set fontsize=14
+set wrap=word
+set tabstop=4
+set expandtab
+set novim
+```
+
+Themes are `geist-dark`, `geist-light`, `aqua-light` and `aqua-dark`. Wrap modes are `word`, `char` and `none`. The Preferences window edits the same file in place, preserving comments and lines it does not manage.
 
 ## Source layout
 
-```text
-chaus/
-  Cargo.toml                 # workspace, shared GPUI pin with Silvestris
-  Cargo.lock                 # commit for reproducible release builds
-  rust-toolchain.toml        # match Silvestris toolchain initially
-  crates/
-    chaus-core/              # Ropey document, positions, EOL map, undo history, settings parser
-    chaus-layout/            # soft-wrap segments and column mapping, no GPUI dependency
-    chaus-io/                # file metadata, checked load/save, external-change detection
-    chaus-cli/               # argument parsing and invocation model
-    chaus-vim/               # modal state machine, motions, operators, mappings
-    chaus-dialog/            # native open/save pickers and availability reporting
-    chaus-editor/            # GPUI view, input handling, painting, Vim integration
-    chaus-app/               # binary, window lifecycle, platform setup
-  docs/                      # implementation guides and recorded gaps
-```
+`chaus-core` owns the Ropey document, positions and settings parser; `chaus-layout` handles wrapping; `chaus-highlight` owns Tree-sitter parsing; `chaus-io` handles checked file I/O; `chaus-cli` parses arguments; `chaus-vim` implements the modal engine; `chaus-dialog` provides native pickers; `chaus-editor` is the GPUI view; `chaus-app` is the binary and window lifecycle.
 
-The separation of responsibilities is the requirement, not the filename spelling; a crate must not import the application GUI from a lower layer.
+## Documentation
 
-## Milestones and gates
-
-| Milestone | Deliverable | Must pass before proceeding |
-| --- | --- | --- |
-| M0: dependency gate | Silvestris demo builds; exact GPUI revision and OS prerequisites pinned | Windows + Linux CI build, licenses collected, `cargo test --locked` |
-| M1: minimal window | One Geist Dark editor window, no tabs/toolbar, title/dirty indicator | Resize/close/focus, native window behavior, theme switching |
-| M2: document editing | Rope, selection, IME, undo/redo, clipboard, soft wrapping, scroll | Unicode/IME and mouse regression suite; no full-document layout on keystroke |
-| M3: safe files + CLI | File open/save, multi-window CLI, prompts, external modification detection | Round-trip fixtures; clean-machine executable smoke test |
-| M4: settings | rc parser + Silvestris preference GUI and reloading | Invalid config isolation, preserve comments/manual lines |
-| M5: Vim | modal state machine, toggle and mappings | standard editor and Vim modes share same undo/edit API; Vim sequence tests |
-| M6: code editing | bundled grammars, incremental highlighting, formatting | edits near multi-byte characters + stale work tests |
-| M7: ship | release binaries, help text, native validation | cold start, shutdown, input, DWM/Wayland/X11 checks; dependency audit |
-
-Do not treat a passing GPUI mock test as proof of native input, DPI, font or window correctness. Build a **real-OS smoke matrix** and run it before release.
-
-## Reading order / ownership
-
-1. [AGENTS.md](AGENTS.md): implementation rules, sequencing, integration tests, prohibitions.
-2. [docs/silvestris.md](docs/silvestris.md): upstreamable integration, exact framework limitations, configuration GUI.
-3. [docs/editor.md](docs/editor.md): rendering, input, selections, undo and mode-independent commands.
-4. [docs/ropey.md](docs/ropey.md): UTF-8/char/grapheme/UTF-16/visual position contracts.
-5. [docs/file-io.md](docs/file-io.md): preserving bytes and safe, conflict-aware saving.
-6. [docs/vim.md](docs/vim.md): modal grammar, toggle, remapping, fallback.
-7. [docs/treesitter.md](docs/treesitter.md): languages, incremental parse, highlighting, formatter isolation.
-8. [docs/windows-build.md](docs/windows-build.md) and [docs/linux-build.md](docs/linux-build.md): builds and distributable binaries.
-
-## Authoritative references (check against pinned versions)
-
-- [Silvestris repository and README](https://github.com/estyseesghosts/silvestris/blob/source-list-shell/README.md), [Cargo.toml](https://github.com/estyseesghosts/silvestris/blob/source-list-shell/Cargo.toml), [commands](https://github.com/estyseesghosts/silvestris/blob/source-list-shell/docs/commands.md), [preferences](https://github.com/estyseesghosts/silvestris/blob/source-list-shell/crates/silvestris/src/preferences.rs), [text field](https://github.com/estyseesghosts/silvestris/blob/source-list-shell/crates/silvestris/src/controls/text_field.rs), [chrome](https://github.com/estyseesghosts/silvestris/blob/source-list-shell/crates/silvestris/src/chrome.rs).
-- Pinned GPUI [`input.rs`](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui/src/input.rs), [example input component](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui/examples/input.rs), [keybinding](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui/src/keymap/binding.rs).
-- [Ropey reference](https://docs.rs/ropey/latest/ropey/struct.Rope.html), [Tree-sitter reference](https://docs.rs/tree-sitter/latest/tree_sitter/), [Tree-sitter highlights](https://tree-sitter.github.io/tree-sitter/3-syntax-highlighting.html).
-
-**Source-state caveat:** Silvestris was inspected on its then-default `source-list-shell` branch on 2026-11-22. Its public APIs are evolving. Treat API signatures in that exact branch and pinned GPUI commit as authoritative at implementation time; update this packet if those pins change.
+- [Build and run](docs/build-and-run.md) — prerequisites, commands and artifact checks on Windows and Linux
+- [Implementation notes](docs/implementation-notes.md) — verified pins, build workarounds and current gaps
+- [Silvestris integration](docs/silvestris.md), [editor](docs/editor.md), [Ropey positions](docs/ropey.md), [file I/O](docs/file-io.md), [Vim](docs/vim.md), [Tree-sitter](docs/treesitter.md)
+- [Windows build](docs/windows-build.md) and [Linux build](docs/linux-build.md) — packaging and release-validation requirements

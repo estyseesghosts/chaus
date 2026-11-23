@@ -4,7 +4,7 @@
 
 Ship **one executable** named `chaus` that opens a GPUI window from a terminal. Fonts, icons, app styles, Tree-sitter grammars and highlight queries must be embedded into that executable or linked into it. A single ELF **does not imply a completely static Linux binary**: it normally relies on glibc/libstdc++ as applicable, fontconfig/windowing components, Vulkan userspace/driver stack and host system APIs. Do not promise "runs on every Linux distribution".
 
-The pinned GPUI source's [`gpui_platform` features](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui_platform/Cargo.toml) explicitly include `wayland` and `x11`. Its [`gpui_linux`](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui_linux/Cargo.toml) uses `gpui_wgpu`/window backend dependencies. **Silvestris currently has `gpui_platform` with `default-features = false`; the consuming build must ensure a Linux windowing feature is enabled**, then smoke-test both sessions. Cargo feature unification can change as the repository evolves—inspect `cargo tree -e features` rather than assume.
+The pinned GPUI source's [`gpui_platform` features](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui_platform/Cargo.toml) explicitly include `wayland` and `x11`. Its [`gpui_linux`](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui_linux/Cargo.toml) uses `gpui_wgpu`/window backend dependencies. Silvestris has `gpui_platform` with `default-features = false`, but `crates/chaus-app/Cargo.toml` already declares `gpui_linux` with `default-features = false` and features `wayland` and `x11`, so the app enables both backends. Smoke-test both sessions anyway. Cargo feature unification can change as the repository evolves—inspect `cargo tree -e features` rather than assume.
 
 ## Environment baseline
 
@@ -12,14 +12,14 @@ Start with a defined supported baseline (e.g. Ubuntu 22.04 x86_64 for packaging;
 
 Install: Rust/rustup matching workspace `rust-toolchain.toml`, `git`, `pkg-config`, `clang`/C toolchain, `cmake` if required by the selected deps, development headers for X11/XCB, Wayland, xkbcommon, fontconfig, Vulkan loader, and other libraries reported by the **pinned revision's** build scripts. Package names differ by distro; don't freeze a guessed `apt install` line as the truth. Verify graphics with the target session's Vulkan diagnostic tool and driver; loader availability alone is insufficient.
 
-Use **both** Wayland and X11 unless the port has an explicit blocker. Add feature configuration at the application workspace level, for example (after matching the actual locked GPUI version):
+Use **both** Wayland and X11 unless the port has an explicit blocker. chaus does this in `crates/chaus-app/Cargo.toml`:
 
 ```toml
 [target.'cfg(target_os = "linux")'.dependencies]
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "6b720973027999bae402df23d469026f4cced988", default-features = false, features = ["wayland", "x11"] }
+gpui_linux = { git = "https://github.com/zed-industries/zed", rev = "6b720973027999bae402df23d469026f4cced988", default-features = false, features = ["wayland", "x11"] }
 ```
 
-This snippet illustrates the feature choice, not the entire workspace manifest. Ensure GPUI and Silvestris use one exact revision; do not accidentally bring two incompatible GPUI crates into dependency graph.
+Ensure GPUI and Silvestris use one exact revision; do not accidentally bring two incompatible GPUI crates into the dependency graph.
 
 ## Build and command-line smoke
 
