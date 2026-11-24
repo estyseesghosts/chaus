@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use chaus_core::document::{EditCause, EditTransaction, TextEdit};
 use chaus_core::position::{CharOffset, LineIndex, Selection};
 use chaus_vim::ex_command::{LineTarget, SetArgument, SetOption};
-use chaus_vim::ExCommand;
+use chaus_vim::{ExCommand, ExPath};
 use gpui::{Context, Window, WindowHandle};
 
 use crate::editor::Editor;
@@ -17,6 +17,16 @@ use crate::file_operation::{CloseAfter, FileOperation, WriteAssociation};
 
 const NO_WRITE: &str = "No write since last change (add ! to override)";
 const BUSY: &str = "A file operation is in progress";
+
+/// Resolve the one path form the Ex parser keeps symbolic. Quoted paths never
+/// expand; unquoted `~` goes through the shared I/O helper.
+fn resolve_ex_path(path: &ExPath) -> PathBuf {
+    if path.expands_home() {
+        chaus_io::expand_home(path.as_path())
+    } else {
+        path.as_path().to_path_buf()
+    }
+}
 
 impl Editor {
     pub(crate) fn run_ex_command(
@@ -26,9 +36,17 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         match command {
-            ExCommand::Write { force, path } => self.ex_write(force, path, window, cx),
+            ExCommand::Write { force, path } => {
+                self.ex_write(force, path.as_ref().map(resolve_ex_path), window, cx);
+            }
             ExCommand::SaveAs { force, path } => {
-                self.write_to_path(path, WriteAssociation::Associate, force, CloseAfter::No, cx);
+                self.write_to_path(
+                    resolve_ex_path(&path),
+                    WriteAssociation::Associate,
+                    force,
+                    CloseAfter::No,
+                    cx,
+                );
             }
             ExCommand::Quit { force } => self.ex_quit(force, window, cx),
             ExCommand::WriteQuit => self.ex_write_quit(window, cx),
@@ -39,7 +57,9 @@ impl Editor {
                     self.ex_quit(false, window, cx);
                 }
             }
-            ExCommand::Edit { force, path } => self.ex_edit(force, path, cx),
+            ExCommand::Edit { force, path } => {
+                self.ex_edit(force, path.as_ref().map(resolve_ex_path), cx);
+            }
             ExCommand::New { force } => self.ex_new(force, cx),
             ExCommand::File => {
                 let message = self.file_summary();
@@ -59,7 +79,8 @@ impl Editor {
             ExCommand::Retab => self.convert_indentation_to_spaces(cx),
             ExCommand::WriteAll => self.ex_write_all(window, cx),
             ExCommand::QuitAll { force } => self.ex_quit_all(force, window, cx),
-            ExCommand::Read { path } => self.ex_read(path, cx),
+            ExCommand::WriteQuitAll => self.ex_write_quit_all(window, cx),
+            ExCommand::Read { path } => self.ex_read(resolve_ex_path(&path), cx),
             _ => self.set_status("This command is not supported in this build"),
         }
         cx.notify();
@@ -303,11 +324,10 @@ impl Editor {
         self.close_for_quit_all(window, cx);
     }
 
-    fn close_for_quit_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_for_quit_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_file_operation();
         self.discard_and_close(window, cx);
     }
-
     /// Insert another file's text after the current hard line as one undo
     /// step. The read runs off the UI thread; if the document changes before
     /// it returns, nothing is inserted.
@@ -379,7 +399,7 @@ impl Editor {
 }
 
 /// Live editor windows other than `window`, by stable handle.
-fn other_editors(window: &Window, cx: &Context<Editor>) -> Vec<WindowHandle<Editor>> {
+pub(crate) fn other_editors(window: &Window, cx: &Context<Editor>) -> Vec<WindowHandle<Editor>> {
     let current = window.window_handle();
     cx.windows()
         .into_iter()

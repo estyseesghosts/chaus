@@ -8,12 +8,75 @@
 
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chaus_core::settings::WrapMode;
 
 /// Largest accepted `tabstop`, matching the rc-file validator.
 const MAX_TAB_STOP: usize = 16;
+
+/// A path argument as the Ex grammar spells it.
+///
+/// The parser deliberately does not read the environment. An unquoted leading
+/// `~` is recorded as home-relative and the editor resolves it through the
+/// shared `chaus_io::expand_home` helper. A quoted path stays literal, so
+/// `"~/foo"` names a file called `~` in the working directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExPath {
+    path: PathBuf,
+    expands_home: bool,
+}
+
+impl ExPath {
+    /// A path that is taken literally, including a leading `~`.
+    #[must_use]
+    pub fn literal(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            expands_home: false,
+        }
+    }
+
+    /// A path from the unquoted grammar. A leading `~` is expanded when the
+    /// editor resolves it.
+    #[must_use]
+    pub fn unquoted(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            expands_home: true,
+        }
+    }
+
+    /// The path exactly as typed, with quoting and escaping already applied.
+    #[must_use]
+    pub fn as_path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Take the typed path, without resolving `~`.
+    #[must_use]
+    pub fn into_path(self) -> PathBuf {
+        self.path
+    }
+
+    /// Whether the editor should expand a leading `~` component.
+    #[must_use]
+    pub fn expands_home(&self) -> bool {
+        self.expands_home
+    }
+}
+
+impl From<PathBuf> for ExPath {
+    fn from(path: PathBuf) -> Self {
+        Self::literal(path)
+    }
+}
+
+impl From<&str> for ExPath {
+    fn from(path: &str) -> Self {
+        Self::literal(path)
+    }
+}
 
 /// One validated command-line intent.
 #[non_exhaustive]
@@ -24,12 +87,12 @@ pub enum ExCommand {
     /// on an untitled document the path becomes its file once the write lands.
     Write {
         force: bool,
-        path: Option<PathBuf>,
+        path: Option<ExPath>,
     },
     /// `:sav[eas][!] path`: write, then associate the document with `path`.
     SaveAs {
         force: bool,
-        path: PathBuf,
+        path: ExPath,
     },
     /// `:q[uit][!]`.
     Quit {
@@ -40,10 +103,11 @@ pub enum ExCommand {
     /// `:x[it]`: close a clean document, otherwise save then close.
     Exit,
     /// `:e[dit] path` or `:e[dit]! [path]`. `path` is `None` only for `:e!`,
-    /// which reloads the current file.
+    /// which reloads the current file. `:o[pen]` is a Chaus convenience alias
+    /// for this command and reaches the same intent.
     Edit {
         force: bool,
-        path: Option<PathBuf>,
+        path: Option<ExPath>,
     },
     /// `:ene[w][!]`: replace this window's document with an untitled one.
     New {
@@ -71,8 +135,11 @@ pub enum ExCommand {
     },
     /// `:r[ead] path`.
     Read {
-        path: PathBuf,
+        path: ExPath,
     },
+    /// `:wqa[ll]`: save every modified named document and close all windows
+    /// only after those saves have succeeded.
+    WriteQuitAll,
 }
 
 /// Logical (hard) line addressed by `:N` or `:$`.
@@ -191,15 +258,19 @@ enum Name {
     WriteAll,
     QuitAll,
     Read,
+    WriteQuitAll,
+    Open,
 }
 
-const NAMES: [(Name, &str, usize, bool); 17] = [
+const NAMES: [(Name, &str, usize, bool); 19] = [
     (Name::Write, "write", 1, true),
     (Name::SaveAs, "saveas", 3, true),
     (Name::Quit, "quit", 1, true),
     (Name::WriteQuit, "wq", 2, false),
     (Name::Exit, "xit", 1, false),
     (Name::Edit, "edit", 1, true),
+    // Chaus convenience alias for `:edit`; it is not Vim's historical `:open`.
+    (Name::Open, "open", 1, true),
     (Name::New, "enew", 3, true),
     (Name::File, "file", 1, false),
     (Name::WorkingDirectory, "pwd", 2, false),
@@ -211,6 +282,7 @@ const NAMES: [(Name, &str, usize, bool); 17] = [
     (Name::WriteAll, "wall", 2, false),
     (Name::QuitAll, "qall", 2, true),
     (Name::Read, "read", 1, false),
+    (Name::WriteQuitAll, "wqall", 3, false),
 ];
 
 fn lookup(name: &str) -> Option<(Name, &'static str, bool)> {
@@ -297,6 +369,13 @@ pub fn parse(text: &str) -> Result<ExCommand, ExParseError> {
             }
             Ok(ExCommand::Edit { force, path })
         }
+        Name::Open => {
+            let path = parse_path(argument, full)?;
+            if path.is_none() && !force {
+                return Err(ExParseError::MissingPath(full));
+            }
+            Ok(ExCommand::Edit { force, path })
+        }
         Name::New => no_argument(ExCommand::New { force }),
         Name::File => no_argument(ExCommand::File),
         Name::WorkingDirectory => no_argument(ExCommand::WorkingDirectory),
@@ -310,6 +389,7 @@ pub fn parse(text: &str) -> Result<ExCommand, ExParseError> {
         Name::Read => Ok(ExCommand::Read {
             path: parse_path(argument, full)?.ok_or(ExParseError::MissingPath(full))?,
         }),
+        Name::WriteQuitAll => no_argument(ExCommand::WriteQuitAll),
     }
 }
 
@@ -362,13 +442,16 @@ fn parse_set_argument(argument: &str) -> Result<SetArgument, ExParseError> {
 /// Grammar, deliberately small:
 /// - `"..."` takes everything up to the next `"` literally, backslashes
 ///   included. Paths cannot contain `"` (Windows forbids it in file names).
+///   A quoted path never expands `~`.
 /// - Unquoted, `\ ` is an escaped space. Every other backslash is literal so
 ///   `C:\Users\me` and `\\server\share` keep their separators.
-/// - Unquoted `*`, `?`, and a leading `~`, `%` or `#` would be expanded by
-///   Vim; they are rejected instead of being taken as literal names.
+/// - An unquoted leading `~` is a home-directory component: `~`, `~/...`, and
+///   on Windows `~\...`. `~user` is rejected rather than implemented.
+/// - Unquoted `*`, `?`, and a leading `%` or `#` would be expanded by Vim;
+///   they are rejected instead of being taken as literal names.
 /// - Relative paths are kept relative and resolve against the process
 ///   working directory when the file operation runs.
-fn parse_path(argument: &str, command: &'static str) -> Result<Option<PathBuf>, ExParseError> {
+fn parse_path(argument: &str, command: &'static str) -> Result<Option<ExPath>, ExParseError> {
     if argument.is_empty() {
         return Ok(None);
     }
@@ -383,14 +466,22 @@ fn parse_path(argument: &str, command: &'static str) -> Result<Option<PathBuf>, 
         if path.is_empty() {
             return Err(ExParseError::MissingPath(command));
         }
-        return Ok(Some(PathBuf::from(path)));
+        return Ok(Some(ExPath::literal(path)));
     }
     let (path, rest) = unescape_unquoted(argument);
     if !rest.trim().is_empty() {
         return Err(ExParseError::UnexpectedArgument(command));
     }
-    if let Some(first @ ('~' | '%' | '#')) = path.chars().next() {
+    if let Some(first @ ('%' | '#')) = path.chars().next() {
         return Err(ExParseError::UnsupportedExpansion(first));
+    }
+    if let Some(after) = path.strip_prefix('~') {
+        let home_relative = after.is_empty()
+            || after.starts_with('/')
+            || (cfg!(windows) && after.starts_with('\\'));
+        if !home_relative {
+            return Err(ExParseError::UnsupportedExpansion('~'));
+        }
     }
     if let Some(wildcard) = path
         .chars()
@@ -398,7 +489,7 @@ fn parse_path(argument: &str, command: &'static str) -> Result<Option<PathBuf>, 
     {
         return Err(ExParseError::UnsupportedExpansion(wildcard));
     }
-    Ok(Some(PathBuf::from(path)))
+    Ok(Some(ExPath::unquoted(path)))
 }
 
 /// Read one unquoted token, turning `\ ` into a space. Returns the token and
@@ -425,7 +516,7 @@ fn unescape_unquoted(argument: &str) -> (String, &str) {
 }
 
 /// The partially typed path argument at the end of a command line, for Tab
-/// completion. Only `:e`, `:w`, `:saveas` and `:r` take paths.
+/// completion. Only `:e`, `:o`, `:w`, `:saveas` and `:r` take paths.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PathArgument {
     /// Byte offset in the command text where the raw argument starts.
@@ -443,7 +534,10 @@ pub fn path_argument(text: &str) -> Option<PathArgument> {
     let body = &text[leading..];
     let (name, _, rest) = split(body).ok()?;
     let (kind, _, _) = lookup(name)?;
-    if !matches!(kind, Name::Write | Name::SaveAs | Name::Edit | Name::Read) {
+    if !matches!(
+        kind,
+        Name::Write | Name::SaveAs | Name::Edit | Name::Open | Name::Read
+    ) {
         return None;
     }
     if !rest.starts_with(char::is_whitespace) {
@@ -473,15 +567,27 @@ pub fn path_argument(text: &str) -> Option<PathArgument> {
 }
 
 /// Spell `path` so [`parse`] reads it back unchanged. Returns `None` for a
-/// path that cannot be written in the grammar (it contains `"`).
+/// path that cannot be written in the grammar (it contains `"`, or a
+/// home-relative path contains a wildcard that would need quoting and would
+/// therefore stop being home-relative).
 #[must_use]
 pub fn quote_path(path: &str) -> Option<String> {
     if path.contains('"') {
         return None;
     }
+    let home_relative =
+        path == "~" || path.starts_with("~/") || (cfg!(windows) && path.starts_with("~\\"));
+    if home_relative {
+        // A quoted path is literal, so a home path must stay unquoted. The
+        // unquoted grammar spells a space as `\ `.
+        if path.contains(['*', '?']) {
+            return None;
+        }
+        return Some(path.replace(' ', "\\ "));
+    }
     let needs_quotes = path.contains(char::is_whitespace)
         || path.contains(['*', '?'])
-        || path.starts_with(['~', '%', '#']);
+        || path.starts_with(['%', '#', '~']);
     if needs_quotes {
         Some(format!("\"{path}\""))
     } else {

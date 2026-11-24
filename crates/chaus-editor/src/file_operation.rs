@@ -49,11 +49,14 @@ pub(crate) enum CloseAfter {
     /// `:wq`/`:x`: close on success; on failure keep the window and report,
     /// without opening the GUI sheet.
     Ex,
+    /// `:wqa`: keep the window open; the orchestrator closes every window only
+    /// after all required saves have succeeded.
+    Wqa,
 }
 
 impl CloseAfter {
     pub(crate) fn closes(self) -> bool {
-        !matches!(self, Self::No)
+        matches!(self, Self::Sheet | Self::Ex)
     }
 }
 

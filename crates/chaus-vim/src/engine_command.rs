@@ -27,6 +27,9 @@ pub struct CompletionRequest {
     pub revision: u64,
     /// The partial path, with command-line quoting removed.
     pub typed: String,
+    /// Whether the path was typed inside `"..."`. A quoted path never expands
+    /// `~`, in completion or when it is executed.
+    pub quoted: bool,
 }
 
 fn full_message() -> String {
@@ -184,6 +187,7 @@ impl Engine {
         Some(CompletionRequest {
             revision: line.revision(),
             typed: argument.typed,
+            quoted: argument.quoted,
         })
     }
 

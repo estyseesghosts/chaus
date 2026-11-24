@@ -141,6 +141,10 @@ pub struct Editor {
     /// One authoritative owner for picker, open and save work.
     pub(crate) file_operation: FileOperation,
     pub(crate) file_request_next: u64,
+    /// `:wqa` participation: set on every window until the coordinator either
+    /// closes them or aborts. A failure leaves all windows open.
+    pub(crate) wqa_active: bool,
+    pub(crate) wqa_failure: Option<String>,
     /// Test seam for holding a load in flight. Production leaves this `None`.
     pub(crate) load_hook: Option<LoadHook>,
     pub(crate) document_generation: DocumentGeneration,
@@ -254,6 +258,8 @@ impl Editor {
             format_generation: 0,
             file_operation: FileOperation::Idle,
             file_request_next: 0,
+            wqa_active: false,
+            wqa_failure: None,
             load_hook: None,
             document_generation: DocumentGeneration::default(),
             suppress_text_input: false,

@@ -3,7 +3,7 @@
 use chaus_core::document::Document;
 use chaus_core::position::{CharOffset, Selection};
 use chaus_vim::{
-    CommandPrefix, Engine, ExCommand, Key, Mode, Outcome, MAX_COMMAND_CHARS, MAX_HISTORY,
+    CommandPrefix, Engine, ExCommand, ExPath, Key, Mode, Outcome, MAX_COMMAND_CHARS, MAX_HISTORY,
 };
 
 struct Fixture {
@@ -248,7 +248,7 @@ fn tab_requests_completion_and_applies_only_to_the_same_line() {
         fixture.key(Key::Enter),
         Outcome::Ex(ExCommand::Edit {
             force: false,
-            path: Some("my docs/x.txt".into())
+            path: Some(ExPath::literal("my docs/x.txt"))
         })
     );
 }

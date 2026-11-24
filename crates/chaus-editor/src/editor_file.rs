@@ -1,6 +1,7 @@
 //! Per-window file session: save, save-as, dirty close policy.
 
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Mutex};
 
 use chaus_core::position::{CharOffset, Selection};
 use chaus_io::{FileMeta, LoadedFile, SaveError};
@@ -11,6 +12,24 @@ use crate::editor_keys::{Save, SaveAs};
 use crate::file_operation::{
     CloseAfter, FileOperation, FileRequest, FileRequestId, SaveTarget, WriteAssociation,
 };
+
+/// Test seam: hold the next background save so an edit, quit or second command
+/// can be dispatched while the write is still in flight.
+static SAVE_GATE: Mutex<Option<mpsc::Receiver<()>>> = Mutex::new(None);
+
+/// Install a one-shot gate in front of the next background save.
+pub fn set_save_gate_for_test(receiver: Option<mpsc::Receiver<()>>) {
+    if let Ok(mut gate) = SAVE_GATE.lock() {
+        *gate = receiver;
+    }
+}
+
+fn wait_for_save_gate() {
+    let receiver = SAVE_GATE.lock().ok().and_then(|mut gate| gate.take());
+    if let Some(receiver) = receiver {
+        let _ = receiver.recv();
+    }
+}
 
 /// Deterministic stand-in for a background load. Tests use it to hold a load
 /// open while they dispatch UI events, then release it and observe which
@@ -439,6 +458,7 @@ impl Editor {
             if refuse_existing {
                 save_request = save_request.refusing_existing();
             }
+            wait_for_save_gate();
             chaus_io::save(save_request)
         });
         cx.spawn(async move |editor, cx| {
@@ -478,6 +498,9 @@ impl Editor {
                 self.disk_change = None;
                 self.disk_epoch = self.disk_epoch.wrapping_add(1);
                 self.document.mark_saved_at(request.state);
+                if self.wqa_active && self.document.is_dirty() {
+                    self.note_wqa_failure("the document changed while its save was running");
+                }
                 // A save only covers the captured revision. If the person
                 // typed while the write was in flight, keep the durable
                 // snapshot (and refresh it now) instead of deleting the only
@@ -496,6 +519,7 @@ impl Editor {
                         self.set_status("Saved the previous revision; the window stays open");
                     }
                     CloseAfter::No => self.flash_status("Saved", cx),
+                    CloseAfter::Wqa => self.flash_status("Saved", cx),
                 }
             }
             Err(SaveError::DurabilityUnconfirmed { source, meta, .. }) => {
@@ -509,12 +533,14 @@ impl Editor {
                 self.disk_change = None;
                 self.disk_epoch = self.disk_epoch.wrapping_add(1);
                 self.write_recovery_now(cx);
+                self.note_wqa_failure(format!("the folder could not be synced ({source})"));
                 self.set_status(format!(
                     "Written, but the folder could not be synced ({source}); save again to confirm"
                 ));
                 self.close_not_started(close_after, window, cx);
             }
             Err(SaveError::Conflict(conflict)) => {
+                self.note_wqa_failure(conflict.to_string());
                 self.disk_change = Some(conflict);
                 self.show_conflict_prompt(conflict, window, cx);
                 self.set_status(format!("{conflict}"));
@@ -523,6 +549,7 @@ impl Editor {
                 }
             }
             Err(error) => {
+                self.note_wqa_failure(format!("save failed: {error}"));
                 self.set_status(format!("Save failed: {error}"));
                 self.close_not_started(close_after, window, cx);
             }

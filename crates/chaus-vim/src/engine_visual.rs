@@ -1,14 +1,18 @@
 //! Visual mode.
+//!
+//! Movement and text objects go through the same resolver as Normal and
+//! operator-pending mode. Visual-line finishes explicitly linewise; a
+//! characterwise text object inside Visual-line does not change that.
 
 use chaus_core::document::Document;
-use chaus_core::position::{CharOffset, CharRange, LineIndex, Selection};
+use chaus_core::position::{CharOffset, CharRange, Selection};
 
 use crate::command_line::CommandPrefix;
-use crate::engine::{Engine, Outcome};
+use crate::engine::{Engine, Outcome, Pending};
 use crate::key::Key;
 use crate::mode::Mode;
-use crate::motion;
-use crate::operator::{self, Operator};
+use crate::motion::{self, FindDirection, Motion};
+use crate::operator::Operator;
 
 impl Engine {
     pub(crate) fn visual_key(
@@ -26,13 +30,32 @@ impl Engine {
                 self.clear_pending();
                 Outcome::Handled
             }
+            Key::Control('d') => self.half_page(true),
+            Key::Control('u') => self.half_page(false),
             Key::Char(character)
                 if character.is_ascii_digit() && (character != '0' || self.count > 0) =>
             {
                 self.push_digits(character as usize - '0' as usize);
                 Outcome::Handled
             }
-            Key::Char('v') => {
+            Key::Char(character) => {
+                if let Some(pending) = self.take_pending() {
+                    return self.pending_key(pending, character, document, selection);
+                }
+                self.visual_char(character, document, selection)
+            }
+            _ => Outcome::Handled,
+        }
+    }
+
+    fn visual_char(
+        &mut self,
+        character: char,
+        document: &mut Document,
+        selection: &mut Selection,
+    ) -> Outcome {
+        match character {
+            'v' => {
                 let head = selection.head;
                 self.set_mode(Mode::Normal);
                 self.set_visual_anchor(None);
@@ -40,63 +63,94 @@ impl Engine {
                 self.reset_count();
                 Outcome::Handled
             }
-            Key::Char('V') => {
-                self.set_mode(Mode::VisualLine);
+            'V' => {
+                if self.mode() == Mode::VisualLine {
+                    let head = selection.head;
+                    self.set_mode(Mode::Normal);
+                    self.set_visual_anchor(None);
+                    *selection = Selection::caret(head);
+                    self.reset_count();
+                } else {
+                    self.set_mode(Mode::VisualLine);
+                }
                 Outcome::Handled
             }
-            Key::Char('o') => {
+            'o' => {
                 let anchor = self.visual_anchor().unwrap_or(selection.head);
                 self.set_visual_anchor(Some(selection.head));
                 *selection = Selection::new(selection.head, anchor);
                 Outcome::Handled
             }
-            Key::Char('d' | 'x') => self.finish_visual(Operator::Delete, document, selection),
-            Key::Char('c') => self.finish_visual(Operator::Change, document, selection),
-            Key::Char('y') => self.finish_visual(Operator::Yank, document, selection),
-            Key::Char(':') => self.start_command_line(CommandPrefix::Ex),
-            Key::Char(
-                character @ ('h' | 'j' | 'k' | 'l' | 'w' | 'b' | 'e' | '0' | '^' | '$' | 'G'),
-            ) => {
-                let count = self.count();
-                let mut head = selection.head;
-                for _ in 0..count {
-                    head = match character {
-                        'h' => document.prev_grapheme_boundary(head),
-                        'l' => document.next_grapheme_boundary(head),
-                        'j' => motion::vertical(document, head, 1),
-                        'k' => motion::vertical(document, head, -1),
-                        'w' => motion::next_word_start(document.rope(), head),
-                        'b' => motion::previous_word_start(document.rope(), head),
-                        'e' => motion::word_end(document.rope(), head),
-                        '0' => {
-                            let line = document.line_of(head);
-                            document.line_start(line)
-                        }
-                        '^' => {
-                            let line = document.line_of(head);
-                            motion::first_non_space(document, line)
-                        }
-                        '$' => {
-                            let line = document.line_of(head);
-                            document.line_content_end(line)
-                        }
-                        'G' => {
-                            let line = LineIndex(document.len_lines().saturating_sub(1));
-                            motion::first_non_space(document, line)
-                        }
-                        _ => head,
-                    };
+            'd' | 'x' => self.finish_visual(Operator::Delete, document, selection),
+            'c' => self.finish_visual(Operator::Change, document, selection),
+            'y' => self.finish_visual(Operator::Yank, document, selection),
+            ':' => self.start_command_line(CommandPrefix::Ex),
+            '>' | '<' => self.indent_visual_lines(character == '<', document, selection),
+            'i' | 'a' => {
+                self.set_pending(Some(Pending::TextObject {
+                    operator: None,
+                    outer: character == 'a',
+                }));
+                Outcome::Handled
+            }
+            'f' | 'F' | 't' | 'T' => {
+                self.set_pending(Some(Pending::Find {
+                    operator: None,
+                    direction: if matches!(character, 'f' | 't') {
+                        FindDirection::Forward
+                    } else {
+                        FindDirection::Backward
+                    },
+                    till: matches!(character, 't' | 'T'),
+                }));
+                Outcome::Handled
+            }
+            ';' | ',' => self.visual_repeat_find(character == ',', document, selection),
+            'g' => {
+                self.set_pending(Some(Pending::G));
+                Outcome::Handled
+            }
+            '%' => self.move_visual_motion(Motion::MatchPair, document, selection),
+            character => {
+                if let Some(motion) = Motion::from_key(character) {
+                    self.move_visual_motion(motion, document, selection)
+                } else {
+                    self.message(format!("visual command '{character}' is not implemented"));
+                    Outcome::Handled
                 }
-                let anchor = self.visual_anchor().unwrap_or(selection.anchor);
-                *selection = Selection::new(anchor, head);
-                self.reset_count();
-                Outcome::Handled
             }
-            Key::Char(character) => {
-                self.message(format!("visual command '{character}' is not implemented"));
-                Outcome::Handled
-            }
-            _ => Outcome::Handled,
+        }
+    }
+
+    fn visual_repeat_find(
+        &mut self,
+        reversed: bool,
+        document: &mut Document,
+        selection: &mut Selection,
+    ) -> Outcome {
+        let Some(state) = self.last_find() else {
+            self.message("no previous find");
+            return Outcome::Handled;
+        };
+        let state = if reversed { state.reversed() } else { state };
+        self.set_last_find(Some(state));
+        self.move_visual_motion(Motion::Find(state), document, selection)
+    }
+
+    fn indent_visual_lines(
+        &mut self,
+        outdent: bool,
+        document: &Document,
+        selection: &Selection,
+    ) -> Outcome {
+        let (first, last) = visual_lines(document, *selection, self.mode() == Mode::VisualLine);
+        self.set_visual_anchor(None);
+        self.set_mode(Mode::Normal);
+        self.reset_count();
+        Outcome::Indent {
+            outdent,
+            first_line: first,
+            last_line: last,
         }
     }
 
@@ -107,54 +161,55 @@ impl Engine {
         selection: &mut Selection,
     ) -> Outcome {
         let visual_line = self.mode() == Mode::VisualLine;
-        let mut range = if visual_line {
-            let from = document.line_of(selection.range().start);
-            let to = document.line_of(selection.range().end);
-            let start = from.0.min(to.0);
-            let count = from.0.max(to.0) - start + 1;
-            motion::linewise_range(document, LineIndex(start), count)
+        let range = if visual_line {
+            let (first, last) = visual_lines(document, *selection, true);
+            motion::linewise_range(document, first, last.0 - first.0 + 1)
         } else {
-            selection.range()
+            let mut range = selection.range();
+            if range.is_empty() && range.start.0 < document.len_chars() {
+                let line = document.line_of(range.start);
+                if range.start < document.line_content_end(line) {
+                    range.end = document.next_grapheme_boundary(range.start);
+                }
+            } else if range.start < range.end && range.end.0 < document.len_chars() {
+                range.end = document.next_grapheme_boundary(range.end);
+            }
+            range
         };
-        if !visual_line && range.start < range.end && range.end.0 < document.len_chars() {
-            range.end = document.next_grapheme_boundary(range.end);
-        }
         let range = if operator == Operator::Change && visual_line {
             let end_line = document.line_of(CharOffset(range.end.0.saturating_sub(1)));
             CharRange::new(range.start, document.line_content_end(end_line))
         } else {
             range
         };
-        let before = *selection;
-        let applied = operator::apply(
-            operator,
-            document,
-            before,
-            range,
-            visual_line,
-            self.register_mut(),
-        );
         // A visual range has no replayable Normal-mode command; leave `.`
         // pointing at the previous change.
         self.set_visual_anchor(None);
         self.reset_count();
-        match applied {
-            Some(applied) => {
-                *selection = Selection::caret(motion::clamp_normal(document, applied.caret));
-                self.set_changed();
-                if applied.enter_insert {
-                    self.set_mode(Mode::Insert);
-                    self.begin_insert(applied.caret, Vec::new(), false, 1);
-                } else {
-                    self.set_mode(Mode::Normal);
-                }
-                Outcome::Changed
-            }
-            None => {
-                self.set_mode(Mode::Normal);
-                self.message("edit was rejected");
-                Outcome::Handled
-            }
+        let outcome = self.apply_operator(operator, document, selection, range, visual_line, None);
+        if self.mode() != Mode::Insert {
+            self.set_mode(Mode::Normal);
         }
+        outcome
+    }
+}
+
+/// Hard lines covered by a Visual selection. Visual-line uses the anchor and
+/// head lines directly, because a head at a line start still selects that
+/// line. Characterwise follows the text range rule instead.
+fn visual_lines(
+    document: &Document,
+    selection: Selection,
+    visual_line: bool,
+) -> (
+    chaus_core::position::LineIndex,
+    chaus_core::position::LineIndex,
+) {
+    if visual_line {
+        let anchor = document.line_of(selection.anchor);
+        let head = document.line_of(selection.head);
+        (anchor.min(head), anchor.max(head))
+    } else {
+        motion::selected_lines(document, selection)
     }
 }

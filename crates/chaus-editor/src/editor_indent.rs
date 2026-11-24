@@ -27,6 +27,59 @@ impl Editor {
     /// Indent every selected hard line by one tab stop.
     pub fn indent_selection(&mut self, cx: &mut Context<Self>) {
         let (first, last) = self.selected_lines();
+        let edits = self.indent_edits(first, last);
+        let after = remap_selection(self.selection, &edits);
+        self.apply_whitespace_edits(edits, after, EditCause::Indent, cx);
+    }
+
+    /// Remove one indentation level from every selected hard line.
+    pub fn outdent_selection(&mut self, cx: &mut Context<Self>) {
+        let (first, last) = self.selected_lines();
+        let edits = self.outdent_edits(first, last);
+        if edits.is_empty() {
+            return;
+        }
+        let after = remap_selection(self.selection, &edits);
+        self.apply_whitespace_edits(edits, after, EditCause::Indent, cx);
+    }
+
+    /// Indent or outdent a known hard-line range without reading the current
+    /// selection as the range. Vim `>>`/`<<` and Visual `>`/`<` use this so
+    /// indentation policy stays in the editor.
+    pub(crate) fn indent_line_range(
+        &mut self,
+        first: LineIndex,
+        last: LineIndex,
+        outdent: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let first = LineIndex(first.0.min(self.document.len_lines().saturating_sub(1)));
+        let last = LineIndex(last.0.min(self.document.len_lines().saturating_sub(1)));
+        if first > last {
+            return;
+        }
+        let edits = if outdent {
+            self.outdent_edits(first, last)
+        } else {
+            self.indent_edits(first, last)
+        };
+        if edits.is_empty() {
+            let target = chaus_vim::first_non_space(&self.document, first);
+            self.selection = Selection::caret(target);
+            self.preferred_column = None;
+            self.scroll_to_caret();
+            cx.notify();
+            return;
+        }
+        let after = Selection::caret(self.document.line_start(first));
+        self.apply_whitespace_edits(edits, after, EditCause::Indent, cx);
+        let target = chaus_vim::first_non_space(&self.document, first);
+        self.selection = Selection::caret(target);
+        self.preferred_column = None;
+        self.scroll_to_caret();
+    }
+
+    fn indent_edits(&self, first: LineIndex, last: LineIndex) -> Vec<TextEdit> {
         let indent = if self.settings.expand_tabs {
             " ".repeat(self.settings.tab_stop.max(1))
         } else {
@@ -37,13 +90,10 @@ impl Editor {
             let start = self.document.line_start(LineIndex(line));
             edits.push(TextEdit::insertion(start, indent.clone()));
         }
-        let after = remap_selection(self.selection, &edits);
-        self.apply_whitespace_edits(edits, after, EditCause::Indent, cx);
+        edits
     }
 
-    /// Remove one indentation level from every selected hard line.
-    pub fn outdent_selection(&mut self, cx: &mut Context<Self>) {
-        let (first, last) = self.selected_lines();
+    fn outdent_edits(&self, first: LineIndex, last: LineIndex) -> Vec<TextEdit> {
         let mut edits = Vec::new();
         for line in first.0..=last.0 {
             let text = self.document.line_text(LineIndex(line));
@@ -62,11 +112,7 @@ impl Editor {
             let end = CharOffset(start.0 + remove);
             edits.push(TextEdit::new(CharRange::new(start, end), ""));
         }
-        if edits.is_empty() {
-            return;
-        }
-        let after = remap_selection(self.selection, &edits);
-        self.apply_whitespace_edits(edits, after, EditCause::Indent, cx);
+        edits
     }
 
     /// Remove spaces or tabs at the end of every line in the document.

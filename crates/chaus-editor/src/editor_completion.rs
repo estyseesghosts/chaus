@@ -1,10 +1,13 @@
-//! Tab completion for the path argument of `:e`, `:w`, `:saveas` and `:r`.
+//! Tab completion for the path argument of `:e`, `:o`, `:w`, `:saveas` and
+//! `:r`.
 //!
 //! The directory is listed on the background executor with fixed bounds, and
 //! the answer is applied only if the command line is still the one it was
-//! computed for. Completion never opens, creates or writes a file.
+//! computed for. Completion never opens, creates or writes a file. A leading
+//! `~` is expanded for the directory scan only; the visible line keeps the
+//! `~/...` spelling so the command still means the same thing when it runs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gpui::Context;
 
@@ -30,15 +33,24 @@ impl Editor {
     pub(crate) fn complete_command_path(&mut self, cx: &mut Context<Self>) {
         let Some(request) = self.vim_engine.completion_request() else {
             self.flash_status(
-                "Tab completes a file path at the end of :e, :w, :saveas or :r",
+                "Tab completes a file path at the end of :e, :o, :w, :saveas or :r",
                 cx,
             );
             return;
         };
-        let (directory, prefix) = split_typed(&request.typed);
-        let directory = directory.to_owned();
-        let prefix = prefix.to_owned();
-        let listed_directory = directory.clone();
+        let (directory, prefix) = if request.typed == "~" {
+            // Bare `~` means the home directory. Spell the completed argument
+            // as `~/...`; `/` is accepted on both platforms.
+            ("~/".to_owned(), String::new())
+        } else {
+            let (directory, prefix) = split_typed(&request.typed);
+            (directory.to_owned(), prefix.to_owned())
+        };
+        let listed_directory = if request.quoted {
+            PathBuf::from(display_dir(&directory))
+        } else {
+            chaus_io::expand_home(Path::new(display_dir(&directory)))
+        };
         let listed_prefix = prefix.clone();
         let task = cx
             .background_executor()
@@ -138,12 +150,11 @@ fn matches_prefix(name: &str, prefix: &str) -> bool {
     }
 }
 
-/// List names in `directory` (relative to the working directory when it is
-/// not absolute) that start with `prefix`. Non-UTF-8 names are skipped
-/// because they cannot be spelled back into the command line losslessly.
-fn list_matches(directory: &str, prefix: &str) -> Listing {
-    let path = Path::new(display_dir(directory));
-    let entries = match std::fs::read_dir(path) {
+/// List names in `directory` that start with `prefix`. The caller has already
+/// expanded a leading `~`; non-UTF-8 names are skipped because they cannot be
+/// spelled back into the command line losslessly.
+fn list_matches(directory: &Path, prefix: &str) -> Listing {
+    let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) => {
             return Listing {
@@ -194,7 +205,7 @@ fn common_prefix<'a>(mut names: impl Iterator<Item = &'a str>) -> String {
         let shared = common
             .iter()
             .zip(name.chars())
-            .take_while(|(left, right)| *left == right)
+            .take_while(|(left, right)| **left == *right)
             .count();
         common.truncate(shared);
     }

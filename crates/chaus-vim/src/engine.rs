@@ -3,14 +3,16 @@
 use std::collections::VecDeque;
 
 use chaus_core::document::Document;
-use chaus_core::position::{CharOffset, Selection};
+use chaus_core::position::{CharOffset, LineIndex, Selection};
 
 use crate::command_line::{CommandLine, CommandPrefix, History};
 use crate::ex_command::ExCommand;
 use crate::key::Key;
 use crate::mapping::Mapping;
 use crate::mode::Mode;
+use crate::motion::{FindDirection, FindState};
 use crate::register::Register;
+use crate::viewport::ViewportIntent;
 
 /// What the editor layer should do after a key.
 #[non_exhaustive]
@@ -31,18 +33,39 @@ pub enum Outcome {
     Complete,
     /// A non-blocking explanation for an unknown or rejected command.
     Message(String),
+    /// Indent or outdent whole hard lines through the editor's existing
+    /// indentation engine. The engine has already left Visual mode.
+    Indent {
+        outdent: bool,
+        first_line: LineIndex,
+        last_line: LineIndex,
+    },
+    /// Place or scroll the viewport without exposing UI geometry here.
+    Viewport(ViewportIntent),
 }
 
 /// One half-completed Normal-mode sequence.
 pub(crate) enum Pending {
     Operator(crate::operator::Operator),
+    /// An operator followed by `g`, waiting for `g` or `e`.
+    OperatorG(crate::operator::Operator),
+    /// `g` in Normal mode: `gg`, `ge`, or `gJ`.
     G,
-    Find,
+    Find {
+        operator: Option<crate::operator::Operator>,
+        direction: FindDirection,
+        till: bool,
+    },
     Replace,
     TextObject {
-        operator: crate::operator::Operator,
+        operator: Option<crate::operator::Operator>,
         outer: bool,
     },
+    Indent {
+        outdent: bool,
+    },
+    Z,
+    Scroll,
 }
 
 /// How `.` should replay the last change: the keys that produced it,
@@ -68,7 +91,7 @@ pub struct Engine {
     ex_history: History,
     search_history: History,
     last_search: Option<(String, bool)>,
-    last_find: Option<char>,
+    last_find: Option<FindState>,
     last_change: Option<LastChange>,
     insert_start: Option<CharOffset>,
     insert_keys: Option<Vec<Key>>,
@@ -331,6 +354,12 @@ impl Engine {
             .min(10_000)
     }
 
+    /// Whether any count digit was typed. `G` needs this: plain `G` is the
+    /// last line, while `1G` is line one.
+    pub(crate) fn explicit_count(&self) -> bool {
+        self.count > 0 || self.motion_count > 0
+    }
+
     pub(crate) fn reset_count(&mut self) {
         self.count = 0;
         self.motion_count = 0;
@@ -420,12 +449,12 @@ impl Engine {
         self.last_search = search;
     }
 
-    pub(crate) fn last_find(&self) -> Option<char> {
+    pub(crate) fn last_find(&self) -> Option<FindState> {
         self.last_find
     }
 
-    pub(crate) fn set_last_find(&mut self, character: Option<char>) {
-        self.last_find = character;
+    pub(crate) fn set_last_find(&mut self, state: Option<FindState>) {
+        self.last_find = state;
     }
 
     /// Prefix `keys` with digits for the active count so that replaying them

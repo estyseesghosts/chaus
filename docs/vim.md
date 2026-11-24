@@ -31,19 +31,25 @@ Counts: `3j`, `2dw`, `d3w` and `2d3w` should have documented multiplication sema
 
 | Category | Commands | Notes |
 | --- | --- | --- |
-| Movement | `h j k l`, `w b e`, `0 ^ $`, `gg G`, `f{char}` and `;` (optional) | Follow grapheme boundaries; maintain preferred X for vertical movement; define word classes |
+| Movement | `h j k l`, `w W b B e E ge`, `0 ^ $`, `gg G`, `f F t T` and `; ,`, `%` | Follow grapheme boundaries; maintain preferred X for vertical movement; define word classes. `%` scans forward to the nearest bracket and then matches it, bounded in depth and length. |
 | Insert | `i I a A o O`, `Esc` | `o/O` insert new logical lines; autoindent; IME enabled |
-| Operators | `d`, `c`, `y`, with motions; doubled `dd`, `cc`, `yy` | Operator-pending; changes via shared transaction API |
-| Text objects | `iw aw`, `i" a"`, `i' a'`, `i( a(`, `i[ a[` | Quote/bracket pairs; predictable errors for unmatched delimiters |
-| Visual | `v`, `V`, motion, `d/c/y`, `Esc` | Linewise inclusive behavior; blockwise Visual **excluded** |
+| Operators | `d`, `c`, `y`, with motions; doubled `dd`, `cc`, `yy` | Operator-pending; changes via shared transaction API. `dgg`, `cgg`, `ygg` and counted `2dgg`/`d2gg` share the motion resolver. |
+| Text objects | `iw aw`, `iW aW`, `i" a"`, `i' a'`, `i( a(`, `i[ a[`, `i{ a{` | Quote/bracket pairs; predictable errors for unmatched delimiters |
+| Visual | `v`, `V`, motion, `d/c/y`, `x`, `o`, `>`, `<`, `%`, `Esc` | The same motions as Normal mode; linewise behavior is preserved for `V`; blockwise Visual **excluded** |
 | Paste | `p`, `P` | Distinguish charwise/linewise yank; internal unnamed register + system clipboard policy |
-| Search | `/`, `?`, `n`, `N`, `*` optionally | Literal substring first; highlight match temporarily; cancel returns to old selection |
-| Changes | `u`, `Ctrl+R`, `.`, `x`, `r{char}` optionally | `.` replays semantic last change, not raw key bytes; avoid history corruption |
+| Search | `/`, `?`, `n`, `N`, `*`, `#` | Literal substring; `*`/`#` derive the word under or next to the caret and store it for `n`/`N`; no regex |
+| Changes | `u`, `Ctrl+R`, `.`, `x`, `X`, `s`, `S`, `D`, `C`, `Y`, `r{char}`, `J`, `gJ`, `>>`, `<<` | `.` replays semantic last change, not raw key bytes; avoid history corruption |
+| Viewport | `zz`, `zt`, `zb`, `Ctrl+D`, `Ctrl+U` | The engine returns semantic intents; the editor maps them to its visual rows. Counts scroll extra half pages. |
+| Exit | `ZZ`, `ZQ` | `ZZ` saves if needed then closes; `ZQ` discards and closes, refusing while a write is in flight. |
 | Ex subset | See [Command line and Ex reference](#command-line-and-ex-reference) | No arbitrary Ex, `:!`, `:source`, register expressions or shell |
 
 **Scope limits:** no macro recording, named registers, jump lists, marks, complex search regex, substitutions, splits/tabs, full Vim text-object language, Vimscript evaluation, `:global`, `:normal`, `:help` compatibility, or plugin ABI. If a key is unimplemented, show a concise nonblocking indicator rather than pretending success.
 
 Linewise operations must define newline ownership: deleting last line, yanking a line without trailing newline, and pasting at EOF all need fixtures. `cw` and `ciw` are not merely aliases to `dw`; change enters Insert mode after the deletion and should undo as one change. `.` replays the complete command including inserted text after `Esc`.
+
+`J` follows Vim's count rule: it joins `[count]` hard lines with a minimum of two, so plain `J` and `2J` both join two lines and `3J` joins three. It inserts one space when both sides are non-empty, the first line does not already end in whitespace, and the next line does not start with `)`; it removes the next line's leading indent, and leaves the caret at the join point. `gJ` removes only the line break. Counts stop at the last line. A join is one transaction and one undo step, and `.` repeats the count.
+
+`>>` and `<<` indent or outdent whole hard lines through the editor's existing indentation policy (tab stop, `expandtab`), not spaces guessed by the modal layer. `3>>` covers three lines; Visual `>`/`<` covers the highlighted range and returns to Normal. The engine emits one `Indent` outcome for the range, so it is a single undo step and `.` repeats it.
 
 ## Command line and Ex reference
 
@@ -67,6 +73,7 @@ Every `:` line is parsed into a typed `ExCommand` (`crates/chaus-vim/src/ex_comm
 | `:x[it]` | Close a clean window without writing; otherwise as `:wq`. |
 | `:e[dit] {path}` | Open `path` in this window. Refused when the document is dirty. |
 | `:e[dit]! {path}` / `:e!` | Replace the document even if dirty; `:e!` alone reloads the current file. Edits typed while the load runs cancel it. |
+| `:o[pen][!] {path}` | Chaus alias for `:e[dit]` (not Vim's historical `:open`). Same dirty check, `!` force and load-cancellation behavior. |
 | `:ene[w][!]` | Replace this window's document with an empty untitled one; dirty needs `!`. Settings, theme and Vim mode stay. |
 | `:f[ile]` | Show the file name (`[No Name]` when untitled), `[Modified]`, and the line count. |
 | `:pw[d]` | Show the process working directory that relative paths resolve against. |
@@ -77,20 +84,22 @@ Every `:` line is parsed into a typed `ExCommand` (`crates/chaus-vim/src/ex_comm
 | `:wa[ll]` | Start a checked save of every modified named document in every window. Untitled windows are reported as not written; no picker opens. |
 | `:qa[ll]` | Close every window, only if every window is clean and idle; otherwise nothing closes. |
 | `:qa[ll]!` | Discard every window's edits and close them all. Refused, closing nothing, while any window has a write in flight. |
+| `:wqa[ll]` | Start a checked save for every modified named document and close all windows only after every started save has actually succeeded. Dirty untitled windows, conflicts, in-flight writers, duplicate save targets and edits made while a save is pending leave all windows open with a status message. Unlike `:wa` followed by `:qa`, it does not treat a queued save as success. |
 | `:r[ead] {path}` | Insert the file's text as whole lines below the current hard line, as one undo step. The file association is unchanged. A BOM is not inserted; one trailing newline of the read file is dropped so no blank line appears. If the document changes before the read finishes, nothing is inserted. |
 
 Command names accept the abbreviations shown in brackets. A name must be followed by a space before its argument, so `:wq1` is an unknown command rather than `:w q1`.
 
 Path arguments:
 
-- `"..."` is taken literally, backslashes included. A path cannot contain `"`.
+- `"..."` is taken literally, backslashes included. A path cannot contain `"`. A quoted leading `~` is a file named `~`, not the home directory.
 - Unquoted, a backslash followed by a space is an escaped space; every other backslash is literal, so `C:\Users\me\a.txt` and `\\server\share\a.txt` work as typed.
-- Unquoted `*`, `?`, and a leading `~`, `%` or `#` are rejected because Vim would expand them; quote the path to use them literally.
+- Unquoted, a leading `~` component (`~`, `~/...`, and `~\...` on Windows) expands to the current user's home directory. `~user` is rejected. The parser records the spelling; the editor resolves it through `chaus_io::expand_home` only when the file operation runs.
+- Unquoted `*`, `?`, and a leading `%` or `#` are rejected because Vim would expand them; quote the path to use them literally.
 - Relative paths resolve against the process working directory (`:pwd`), not the current file's directory.
 
-Tab completes the path argument of `:e`, `:w`, `:saveas` and `:r` when the caret is at the end of the line. The directory is listed off the UI thread, examining at most 4096 entries and keeping 256 matches. One match is inserted (a directory gets a trailing separator); several matches insert their longest common prefix and list up to eight in the status. Hidden entries appear only when the typed name starts with `.`. Names that are not valid UTF-8 are skipped. Matching is case-insensitive on Windows. A result that arrives after the line changed is dropped. Completion never opens, creates or writes a file.
+Tab completes the path argument of `:e`, `:o`, `:w`, `:saveas` and `:r` when the caret is at the end of the line. A leading `~` is expanded for the directory scan only; the visible line keeps `~/...`, so the completed command still means the same thing when it runs. A quoted `~` is scanned as the literal relative directory. The directory is listed off the UI thread, examining at most 4096 entries and keeping 256 matches. One match is inserted (a directory gets a trailing separator); several matches insert their longest common prefix and list up to eight in the status. Hidden entries appear only when the typed name starts with `.`. Names that are not valid UTF-8 are skipped. Matching is case-insensitive on Windows. A result that arrives after the line changed is dropped. Completion never opens, creates or writes a file.
 
-Known limits: the existing-file check for `:w {path}` runs immediately before the rename, not atomically with it. A path that is the current file under a different spelling (symlink, 8.3 name) is treated as another file and therefore refused without `!`. Native Windows/Linux GUI runs of this workflow are not automated yet (#63); `crates/chaus-editor/tests/ex_commands.rs` drives the editor through GPUI's test platform with real temporary files.
+Known limits: the existing-file check for `:w {path}` runs immediately before the rename, not atomically with it. A path that is the current file under a different spelling (symlink, 8.3 name) is treated as another file and therefore refused without `!`. Native Windows/Linux GUI runs of this workflow are not automated yet (#63); `crates/chaus-editor/tests/ex_commands.rs`, `editor_home_paths.rs`, `editor_exit.rs` and `editor_wqa_all.rs` drive the editor through GPUI's test platform with real temporary files.
 
 ## Mapping language in the rc file
 

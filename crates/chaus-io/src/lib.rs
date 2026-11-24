@@ -12,7 +12,10 @@ use std::sync::{mpsc, Mutex};
 use std::time::SystemTime;
 
 pub mod format;
+pub mod path;
 pub mod recovery;
+
+pub use path::expand_home;
 
 use chaus_core::eol::{Eol, EolMap};
 use chaus_core::settings::Settings;

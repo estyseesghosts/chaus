@@ -1,16 +1,19 @@
 //! Typed Ex grammar: accepted forms, rejected forms and the path rules.
 
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
 
 use chaus_core::settings::WrapMode;
 use chaus_vim::ex_command::{
     parse, path_argument, quote_path, ExParseError, LineTarget, SetArgument, SetOption,
 };
-use chaus_vim::ExCommand;
+use chaus_vim::{ExCommand, ExPath};
 
-fn path(text: &str) -> PathBuf {
-    PathBuf::from(text)
+fn path(text: &str) -> ExPath {
+    ExPath::unquoted(text)
+}
+
+fn literal(text: &str) -> ExPath {
+    ExPath::literal(text)
 }
 
 fn line(number: usize) -> ExCommand {
@@ -52,7 +55,7 @@ fn accepted_forms_produce_typed_intents() {
             "w! \"a b.txt\"",
             ExCommand::Write {
                 force: true,
-                path: Some(path("a b.txt")),
+                path: Some(literal("a b.txt")),
             },
         ),
         (
@@ -66,7 +69,7 @@ fn accepted_forms_produce_typed_intents() {
             "saveas \"a b.txt\"",
             ExCommand::SaveAs {
                 force: false,
-                path: path("a b.txt"),
+                path: literal("a b.txt"),
             },
         ),
         (
@@ -180,7 +183,7 @@ fn rejected_forms_name_the_problem() {
         ("w \"\"", ExParseError::MissingPath("write")),
         ("w %", ExParseError::UnsupportedExpansion('%')),
         ("e #", ExParseError::UnsupportedExpansion('#')),
-        ("e ~/notes", ExParseError::UnsupportedExpansion('~')),
+        ("e ~user/notes", ExParseError::UnsupportedExpansion('~')),
         ("e *.txt", ExParseError::UnsupportedExpansion('*')),
         ("wq1", ExParseError::UnknownCommand("wq1".to_owned())),
         ("set", ExParseError::MissingSetArgument),
@@ -231,7 +234,7 @@ fn backslashes_are_literal_except_before_a_space() {
         parse(r#"w "C:\Program Files\x.txt""#),
         Ok(ExCommand::Write {
             force: false,
-            path: Some(path(r"C:\Program Files\x.txt"))
+            path: Some(literal(r"C:\Program Files\x.txt"))
         })
     );
     assert_eq!(
@@ -256,7 +259,7 @@ fn unicode_and_quoted_wildcards_are_kept_literally() {
         parse("w \"what?.txt\""),
         Ok(ExCommand::Write {
             force: false,
-            path: Some(path("what?.txt"))
+            path: Some(literal("what?.txt"))
         })
     );
 }
@@ -271,11 +274,16 @@ fn quote_path_round_trips_through_the_parser() {
         r"C:\a b\c",
     ] {
         let spelled = quote_path(raw).unwrap();
+        let expected = if spelled.starts_with('"') {
+            literal(raw)
+        } else {
+            path(raw)
+        };
         assert_eq!(
             parse(&format!("w {spelled}")),
             Ok(ExCommand::Write {
                 force: false,
-                path: Some(path(raw))
+                path: Some(expected)
             }),
             "{raw:?} spelled as {spelled:?}"
         );

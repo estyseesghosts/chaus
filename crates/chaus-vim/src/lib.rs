@@ -17,12 +17,14 @@ mod mode;
 mod motion;
 mod operator;
 mod register;
+mod viewport;
 
 pub use command_line::{CommandPrefix, MAX_COMMAND_CHARS, MAX_HISTORY};
 pub use engine::{Engine, Outcome};
 pub use engine_command::{CommandLineView, CompletionRequest};
-pub use ex_command::ExCommand;
+pub use ex_command::{ExCommand, ExPath};
 pub use key::Key;
 pub use mapping::{parse_mappings, Mapping};
 pub use mode::Mode;
 pub use motion::first_non_space;
+pub use viewport::{ViewportCommand, ViewportIntent};

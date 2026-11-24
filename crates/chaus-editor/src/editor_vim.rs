@@ -42,11 +42,20 @@ impl Editor {
         }
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
-        let control_redo = modifiers.control
+        let plain_control = modifiers.control
             && !modifiers.shift
             && !modifiers.alt
             && !modifiers.platform
-            && keystroke.key.eq_ignore_ascii_case("r");
+            && !modifiers.function;
+        let control_redo = plain_control && keystroke.key.eq_ignore_ascii_case("r");
+        // Only the two Vim half-page keys are admitted from Ctrl; every other
+        // application shortcut keeps its existing priority.
+        let control_scroll = plain_control
+            && matches!(keystroke.key.as_str(), "d" | "u")
+            && matches!(
+                self.vim_engine.mode(),
+                Mode::Normal | Mode::VisualChar | Mode::VisualLine
+            );
         let clipboard_shortcut = (modifiers.control || modifiers.platform)
             && !modifiers.shift
             && !modifiers.alt
@@ -64,13 +73,14 @@ impl Editor {
         }
         if (modifiers.control || modifiers.alt || modifiers.platform || modifiers.function)
             && !control_redo
+            && !control_scroll
         {
             // An application shortcut abandons a partial Vim command rather
             // than leaving it armed for the next keystroke after the action.
             self.cancel_vim_prefix(cx);
             return false;
         }
-        let Some(mut key) = translate(keystroke, control_redo) else {
+        let Some(mut key) = translate(keystroke, control_redo, control_scroll) else {
             return false;
         };
         let mode = self.vim_engine.mode();
@@ -163,6 +173,12 @@ impl Editor {
             }
             Outcome::Ex(command) => self.run_ex_command(command, window, cx),
             Outcome::Complete => self.complete_command_path(cx),
+            Outcome::Indent {
+                outdent,
+                first_line,
+                last_line,
+            } => self.indent_line_range(first_line, last_line, outdent, cx),
+            Outcome::Viewport(intent) => self.apply_viewport_intent(intent, cx),
             // `Outcome` is `#[non_exhaustive]`; future variants are treated as
             // informational until routed explicitly.
             _ => {}
@@ -192,9 +208,16 @@ impl Editor {
     }
 }
 
-fn translate(keystroke: &Keystroke, control_redo: bool) -> Option<VimKey> {
+fn translate(keystroke: &Keystroke, control_redo: bool, control_scroll: bool) -> Option<VimKey> {
     if control_redo {
         return Some(VimKey::Control('r'));
+    }
+    if control_scroll {
+        return Some(match keystroke.key.as_str() {
+            "d" => VimKey::Control('d'),
+            "u" => VimKey::Control('u'),
+            _ => return None,
+        });
     }
     match keystroke.key.as_str() {
         "escape" => Some(VimKey::Escape),

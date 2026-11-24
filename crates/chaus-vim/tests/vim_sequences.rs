@@ -116,7 +116,7 @@ fn unknown_normal_keys_never_insert_text() {
     let mut document = Document::from_source_text("text");
     let mut selection = Selection::caret(CharOffset::ZERO);
     let mut engine = new_engine();
-    let outcome = engine.handle_key(Key::Char('Z'), &mut document, &mut selection);
+    let outcome = engine.handle_key(Key::Char('q'), &mut document, &mut selection);
     assert_eq!(document.text(), "text");
     assert!(matches!(outcome, Outcome::Message(_)));
 }

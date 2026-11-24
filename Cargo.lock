@@ -866,6 +866,7 @@ version = "0.1.0"
 dependencies = [
  "chaus-core",
  "ropey",
+ "unicode-segmentation",
 ]
 
 [[package]]
