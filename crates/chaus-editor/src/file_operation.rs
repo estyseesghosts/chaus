@@ -39,6 +39,35 @@ pub(crate) struct FileRequest {
     pub(crate) state: u64,
 }
 
+/// What happens to the window after a write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseAfter {
+    /// Keep the window open.
+    No,
+    /// Close on success; on failure or cancel re-show the dirty-close sheet.
+    Sheet,
+    /// `:wq`/`:x`: close on success; on failure keep the window and report,
+    /// without opening the GUI sheet.
+    Ex,
+}
+
+impl CloseAfter {
+    pub(crate) fn closes(self) -> bool {
+        !matches!(self, Self::No)
+    }
+}
+
+/// Whether a finished write changes the document's file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WriteAssociation {
+    /// Save, Save As, `:saveas` and a first `:w path`: the target becomes the
+    /// document's file and the captured revision is marked saved.
+    Associate,
+    /// `:w path` on a named document: the bytes land at `path`, but the file,
+    /// dirty state and crash-recovery snapshot are untouched.
+    Copy,
+}
+
 /// Immutable details captured when a save starts. They travel with the
 /// request so the write task does not need a live editor borrow.
 #[derive(Debug)]
@@ -47,7 +76,10 @@ pub(crate) struct SaveTarget {
     pub(crate) requested: PathBuf,
     pub(crate) had_utf8_bom: bool,
     pub(crate) baseline: Option<FileMeta>,
-    pub(crate) close_after: bool,
+    pub(crate) close_after: CloseAfter,
+    pub(crate) association: WriteAssociation,
+    /// Fail instead of replacing an existing file (Ex writes without `!`).
+    pub(crate) refuse_existing: bool,
 }
 
 /// The single authoritative state of file I/O owned by one editor.
@@ -61,7 +93,7 @@ pub(crate) enum FileOperation {
     },
     ChoosingSaveTarget {
         request: FileRequest,
-        close_after: bool,
+        close_after: CloseAfter,
         had_utf8_bom: bool,
     },
     Saving {

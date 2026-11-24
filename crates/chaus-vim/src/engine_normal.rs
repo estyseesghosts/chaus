@@ -3,7 +3,8 @@
 use chaus_core::document::{Document, EditCause, EditTransaction, TextEdit};
 use chaus_core::position::{CharOffset, CharRange, LineIndex, Selection};
 
-use crate::engine::{CommandKind, Engine, LastChange, Outcome, Pending};
+use crate::command_line::CommandPrefix;
+use crate::engine::{Engine, LastChange, Outcome, Pending};
 use crate::key::Key;
 use crate::mode::Mode;
 use crate::motion;
@@ -34,7 +35,7 @@ impl Engine {
                 }
             }
             Key::Char(character) => self.normal_char(character, document, selection),
-            Key::Enter | Key::Backspace | Key::Tab | Key::Control(_) => Outcome::Handled,
+            _ => Outcome::Handled,
         }
     }
 
@@ -127,9 +128,9 @@ impl Engine {
                     Outcome::Handled
                 }
             }
-            '/' => self.start_command_line(CommandKind::Search { forward: true }),
-            '?' => self.start_command_line(CommandKind::Search { forward: false }),
-            ':' => self.start_command_line(CommandKind::Ex),
+            '/' => self.start_command_line(CommandPrefix::SearchForward),
+            '?' => self.start_command_line(CommandPrefix::SearchBackward),
+            ':' => self.start_command_line(CommandPrefix::Ex),
             'n' | 'N' => self.repeat_search(character == 'N', document, selection),
             '.' => self.repeat_last_change(document, selection),
             'f' => {
@@ -677,14 +678,6 @@ impl Engine {
         } else {
             self.message(format!("'{character}' not found on this line"));
         }
-    }
-
-    fn start_command_line(&mut self, kind: CommandKind) -> Outcome {
-        self.set_mode(Mode::CommandLine);
-        self.set_command_kind(kind);
-        self.take_command();
-        self.reset_count();
-        Outcome::Handled
     }
 
     fn repeat_search(

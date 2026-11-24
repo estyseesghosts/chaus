@@ -8,6 +8,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Mutex};
 use std::time::SystemTime;
 
 pub mod format;
@@ -354,6 +355,8 @@ pub struct SaveRequest<'a> {
     pub preferred_eol: Eol,
     /// Content baseline to compare against before overwriting, if any.
     pub baseline: Option<&'a FileMeta>,
+    /// Fail with [`SaveError::Exists`] instead of replacing an existing path.
+    pub refuse_existing: bool,
 }
 
 impl<'a> SaveRequest<'a> {
@@ -375,7 +378,16 @@ impl<'a> SaveRequest<'a> {
             had_utf8_bom,
             preferred_eol,
             baseline,
+            refuse_existing: false,
         }
+    }
+
+    /// Refuse to replace anything already at the target path. Used by Ex
+    /// writes to a new name without `!`.
+    #[must_use]
+    pub fn refusing_existing(mut self) -> Self {
+        self.refuse_existing = true;
+        self
     }
 }
 
@@ -394,6 +406,19 @@ pub enum SaveError {
     MultipleLinks {
         path: PathBuf,
         links: u64,
+    },
+    /// The replacement is visible on disk, but the directory entry could not
+    /// be synced. This is not a failed write and the original was not kept.
+    /// The target exists and the request asked not to replace it.
+    Exists {
+        path: PathBuf,
+    },
+    /// `meta` describes the committed content so callers can adopt it as the
+    /// new baseline instead of reporting a false external change later.
+    DurabilityUnconfirmed {
+        path: PathBuf,
+        source: std::io::Error,
+        meta: Box<FileMeta>,
     },
 }
 
@@ -414,6 +439,16 @@ impl std::fmt::Display for SaveError {
                 "{}: file has {links} hard links; save as a new file or break the links first",
                 path.display()
             ),
+            SaveError::Exists { path } => write!(
+                formatter,
+                "{}: file exists (add ! to overwrite)",
+                path.display()
+            ),
+            SaveError::DurabilityUnconfirmed { path, source, .. } => write!(
+                formatter,
+                "{}: replacement committed but directory sync failed ({source}); the new content is on disk",
+                path.display()
+            ),
         }
     }
 }
@@ -421,9 +456,38 @@ impl std::fmt::Display for SaveError {
 impl std::error::Error for SaveError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            SaveError::Io { source, .. } | SaveError::ReplaceFailed { source, .. } => Some(source),
-            SaveError::Conflict(_) | SaveError::MultipleLinks { .. } => None,
+            SaveError::Io { source, .. }
+            | SaveError::ReplaceFailed { source, .. }
+            | SaveError::DurabilityUnconfirmed { source, .. } => Some(source),
+            SaveError::Conflict(_) | SaveError::MultipleLinks { .. } | SaveError::Exists { .. } => {
+                None
+            }
         }
+    }
+}
+
+type PreReplaceGate = (mpsc::Receiver<()>, Option<mpsc::Sender<()>>);
+
+static PRE_REPLACE_GATE: Mutex<Option<PreReplaceGate>> = Mutex::new(None);
+
+/// Test seam: pause a writer after its final conflict check and before commit.
+/// The optional sender signals that the gate has been reached.
+pub fn set_pre_replace_gate_for_test(gate: Option<PreReplaceGate>) {
+    if let Ok(mut slot) = PRE_REPLACE_GATE.lock() {
+        *slot = gate;
+    }
+}
+
+fn wait_for_pre_replace_gate() {
+    let gate = PRE_REPLACE_GATE
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take());
+    if let Some((release, reached)) = gate {
+        if let Some(reached) = reached {
+            let _ = reached.send(());
+        }
+        let _ = release.recv();
     }
 }
 
@@ -448,7 +512,17 @@ pub fn save(request: SaveRequest<'_>) -> Result<FileMeta, SaveError> {
             Err(ConflictCheckError::Io { path, source }) => Err(SaveError::Io { path, source }),
         }
     };
+    let check_absent = || -> Result<(), SaveError> {
+        // `symlink_metadata` so a dangling symlink also counts as occupied.
+        if request.refuse_existing && fs::symlink_metadata(&target).is_ok() {
+            return Err(SaveError::Exists {
+                path: target.clone(),
+            });
+        }
+        Ok(())
+    };
     check_baseline(request.baseline)?;
+    check_absent()?;
     if let Some(links) = hard_link_count(&target) {
         if links > 1 {
             return Err(SaveError::MultipleLinks {
@@ -483,10 +557,16 @@ pub fn save(request: SaveRequest<'_>) -> Result<FileMeta, SaveError> {
     // atomic with the rename, but it narrows the window to the operation that
     // follows rather than the whole temporary-file write.
     check_baseline(request.baseline)?;
-    commit(&temporary_path, &target)?;
+    wait_for_pre_replace_gate();
+    // The gate exists to test the check/commit boundary. Recheck afterwards so
+    // a writer that was paused while another save landed cannot overwrite it
+    // silently. This still cannot make the check and rename one OS operation.
+    check_baseline(request.baseline)?;
+    check_absent()?;
+    let committed = commit(&temporary_path, &target);
 
     let size = request.bytes.len() as u64;
-    Ok(FileMeta {
+    let meta = FileMeta {
         canonical_target: target.clone(),
         user_requested_path: request.user_requested_path.to_path_buf(),
         had_utf8_bom: request.had_utf8_bom,
@@ -497,7 +577,22 @@ pub fn save(request: SaveRequest<'_>) -> Result<FileMeta, SaveError> {
             .and_then(|meta| meta.modified().ok()),
         identity: file_identity(&target),
         fingerprint: fingerprint(request.bytes),
-    })
+    };
+    match committed {
+        Ok(()) => Ok(meta),
+        Err(Unconfirmed::Durability(source)) => Err(SaveError::DurabilityUnconfirmed {
+            path: target,
+            source,
+            meta: Box::new(meta),
+        }),
+        Err(Unconfirmed::Failed(error)) => Err(error),
+    }
+}
+
+/// A commit either failed outright or landed without a confirmed directory sync.
+enum Unconfirmed {
+    Failed(SaveError),
+    Durability(std::io::Error),
 }
 
 /// Canonical spelling even when the file itself is gone: canonicalize the
@@ -513,11 +608,31 @@ fn canonical_spelling(path: &Path) -> PathBuf {
     }
 }
 
-fn commit(temporary: &Path, target: &Path) -> Result<(), SaveError> {
-    replace_path(temporary, target).map_err(|source| SaveError::ReplaceFailed {
-        path: target.to_path_buf(),
-        source,
+fn commit(temporary: &Path, target: &Path) -> Result<(), Unconfirmed> {
+    replace_path(temporary, target).map_err(|error| match error {
+        ReplaceError::Io(source) => Unconfirmed::Failed(SaveError::ReplaceFailed {
+            path: target.to_path_buf(),
+            source,
+        }),
+        ReplaceError::DurabilityUnconfirmed(source) => Unconfirmed::Durability(source),
     })
+}
+
+/// Failure mode of an OS replacement. A committed rename whose directory sync
+/// failed is distinct from a replacement that never happened.
+#[derive(Debug)]
+pub enum ReplaceError {
+    Io(std::io::Error),
+    DurabilityUnconfirmed(std::io::Error),
+}
+
+impl ReplaceError {
+    #[must_use]
+    pub fn into_io(self) -> std::io::Error {
+        match self {
+            Self::Io(error) | Self::DurabilityUnconfirmed(error) => error,
+        }
+    }
 }
 
 /// Replace `target` with `temporary` using OS-appropriate atomic semantics.
@@ -526,25 +641,38 @@ fn commit(temporary: &Path, target: &Path) -> Result<(), SaveError> {
 /// live on the same filesystem as the target. On Unix the parent directory is
 /// synced after the rename; on Windows `ReplaceFileW` refuses to run when the
 /// target is missing, so that case falls back to a move-with-replace.
-pub(crate) fn replace_path(temporary: &Path, target: &Path) -> std::io::Result<()> {
+pub(crate) fn replace_path(temporary: &Path, target: &Path) -> Result<(), ReplaceError> {
     #[cfg(unix)]
     {
-        fs::rename(temporary, target)?;
+        fs::rename(temporary, target).map_err(ReplaceError::Io)?;
         if let Some(parent) = target.parent() {
-            if let Ok(directory) = File::open(parent) {
-                let _ = directory.sync_all();
+            if FAIL_DIR_SYNC.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(ReplaceError::DurabilityUnconfirmed(std::io::Error::other(
+                    "injected directory sync failure",
+                )));
             }
+            let directory = File::open(parent).map_err(ReplaceError::DurabilityUnconfirmed)?;
+            directory
+                .sync_all()
+                .map_err(ReplaceError::DurabilityUnconfirmed)?;
         }
         Ok(())
     }
     #[cfg(windows)]
     {
-        windows_replace::replace(temporary, target)
+        windows_replace::replace(temporary, target).map_err(ReplaceError::Io)
     }
     #[cfg(not(any(unix, windows)))]
     {
-        fs::rename(temporary, target)
+        fs::rename(temporary, target).map_err(ReplaceError::Io)
     }
+}
+
+static FAIL_DIR_SYNC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Test seam for post-rename directory sync failure (Unix only).
+pub fn set_fail_dir_sync_for_test(fail: bool) {
+    FAIL_DIR_SYNC.store(fail, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(windows)]
@@ -663,7 +791,7 @@ pub fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = fs::set_permissions(temporary.path(), existing.permissions());
     }
     let temporary_path = temporary.into_temp_path();
-    replace_path(&temporary_path, target)
+    replace_path(&temporary_path, target).map_err(|error| error.into_io())
 }
 
 /// Persist the Preferences-owned settings to an rc file.

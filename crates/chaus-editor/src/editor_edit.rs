@@ -243,6 +243,12 @@ impl Editor {
     }
 
     pub(crate) fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        if self.command_line_active() {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                self.insert_command_text(&text, cx);
+            }
+            return;
+        }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.replace_selection(&text, EditCause::Paste, cx);
         }

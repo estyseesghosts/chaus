@@ -7,11 +7,14 @@
 mod editor;
 mod editor_blink;
 mod editor_close;
+mod editor_command_line;
 mod editor_commands;
+mod editor_completion;
 mod editor_conflict;
 mod editor_cursor;
 mod editor_edit;
 mod editor_element;
+mod editor_ex;
 mod editor_file;
 mod editor_find;
 mod editor_format;
@@ -31,7 +34,7 @@ mod paint_cache;
 mod paint_row;
 mod row_index;
 
-pub use editor::Editor;
+pub use editor::{set_reflow_gate_for_test, Editor};
 pub use editor_file::{FileState, LoadHook};
 pub use editor_highlight::HighlightStatistics;
 pub use editor_keys::{bind_keys, KEY_CONTEXT};

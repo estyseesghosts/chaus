@@ -39,11 +39,58 @@ Counts: `3j`, `2dw`, `d3w` and `2d3w` should have documented multiplication sema
 | Paste | `p`, `P` | Distinguish charwise/linewise yank; internal unnamed register + system clipboard policy |
 | Search | `/`, `?`, `n`, `N`, `*` optionally | Literal substring first; highlight match temporarily; cancel returns to old selection |
 | Changes | `u`, `Ctrl+R`, `.`, `x`, `r{char}` optionally | `.` replays semantic last change, not raw key bytes; avoid history corruption |
-| Ex subset | `:w`, `:q`, `:wq`, `:q!`; `:e {path}` / `:e! {path}`; `:set wrap`, `nowrap`, `expandtab`, `noexpandtab`, `tabstop=N` | No arbitrary Ex, `:!`, `:source`, register expressions or shell |
+| Ex subset | See [Command line and Ex reference](#command-line-and-ex-reference) | No arbitrary Ex, `:!`, `:source`, register expressions or shell |
 
 **Scope limits:** no macro recording, named registers, jump lists, marks, complex search regex, substitutions, splits/tabs, full Vim text-object language, Vimscript evaluation, `:global`, `:normal`, `:help` compatibility, or plugin ABI. If a key is unimplemented, show a concise nonblocking indicator rather than pretending success.
 
 Linewise operations must define newline ownership: deleting last line, yanking a line without trailing newline, and pasting at EOF all need fixtures. `cw` and `ciw` are not merely aliases to `dw`; change enters Insert mode after the deletion and should undo as one change. `.` replays the complete command including inserted text after `Esc`.
+
+## Command line and Ex reference
+
+`:`, `/` and `?` open a temporary input line over the bottom-left corner of the document; it replaces the mode badge while open and disappears on Enter or Escape. The text lives in the Vim engine (`crates/chaus-vim/src/command_line.rs`), never in the document, its undo history or its recovery snapshot.
+
+Input line editing: Left/Right move by extended grapheme, Home/End, Backspace (on an empty line it closes the line), Delete, Ctrl+V paste (stops at the first line break), Up/Down history, Tab path completion in `:` lines. Text from the platform text service (IME commit, dead keys, AltGr) goes into the line; an IME composition is shown at the caret until committed. The line is capped at 1024 characters; input past that is refused with a message, not dropped silently. Toggling Vim, opening a dialog or the find bar, or an application shortcut closes an unfinished line without running it. The IME candidate window is still positioned at the document caret, not on the input line.
+
+History is per window and in memory only: up to 100 `:` lines and, separately, 100 `/`/`?` patterns. Empty lines and immediate repeats are not recorded; lines that failed to parse are, so they can be corrected. Up past the newest entry restores the unsent draft. `n`/`N` keep using the last search regardless of history browsing.
+
+Every `:` line is parsed into a typed `ExCommand` (`crates/chaus-vim/src/ex_command.rs`) before anything runs; a parse error is shown and nothing else happens.
+
+| Command | Behavior |
+| --- | --- |
+| `:w` / `:w!` | Save the current file through the normal checked save. `!` does not skip the external-change check; the conflict sheet is the override. Untitled: opens Save As. |
+| `:w {path}` | Named document: write a **copy** to `path`. The window keeps its file, stays dirty if it was, and keeps its recovery snapshot. Untitled document: write to `path` and make it the document's file once the write succeeds. Refuses an existing `path`. A path naming the current file is a normal save. |
+| `:w! {path}` | As above, but may replace an existing `path`. |
+| `:sav[eas][!] {path}` | Write to `path` and make it the document's file once the write succeeds. Refuses an existing `path` without `!`. On failure the old file and dirty state are kept. |
+| `:q` | Close this window if clean. Dirty: "No write since last change" and the window stays open; the GUI close sheet is not shown. File → Close keeps its sheet. |
+| `:q!` | Discard edits and close this window. Refused while a write is in flight. |
+| `:wq` | Save, then close only if the saved revision is still current. Untitled opens Save As. Cancel, conflict or failure keeps the window open with a message. |
+| `:x[it]` | Close a clean window without writing; otherwise as `:wq`. |
+| `:e[dit] {path}` | Open `path` in this window. Refused when the document is dirty. |
+| `:e[dit]! {path}` / `:e!` | Replace the document even if dirty; `:e!` alone reloads the current file. Edits typed while the load runs cancel it. |
+| `:ene[w][!]` | Replace this window's document with an empty untitled one; dirty needs `!`. Settings, theme and Vim mode stay. |
+| `:f[ile]` | Show the file name (`[No Name]` when untitled), `[Modified]`, and the line count. |
+| `:pw[d]` | Show the process working directory that relative paths resolve against. |
+| `:noh[lsearch]` | Vim search paints no match decoration in chaus, so this reports that nothing is shown. The last pattern stays for `n`/`N`. |
+| `:{N}` / `:$` | Go to hard line N (soft wrap is ignored) at its first non-blank. `:0` is line 1; past the end is the last line. |
+| `:se[t] {args}` | `wrap`, `nowrap`, `wrap=word`/`char`/`none`, `expandtab`/`et`, `noexpandtab`/`noet`, `tabstop=N`/`ts=N` (1–16), and `wrap?`, `expandtab?`, `tabstop?` queries. Applies to this window only and is never written to the rc file. |
+| `:format`, `:trim`, `:retab` | Format with the configured external formatter, trim trailing whitespace, convert indentation to spaces. |
+| `:wa[ll]` | Start a checked save of every modified named document in every window. Untitled windows are reported as not written; no picker opens. |
+| `:qa[ll]` | Close every window, only if every window is clean and idle; otherwise nothing closes. |
+| `:qa[ll]!` | Discard every window's edits and close them all. Refused, closing nothing, while any window has a write in flight. |
+| `:r[ead] {path}` | Insert the file's text as whole lines below the current hard line, as one undo step. The file association is unchanged. A BOM is not inserted; one trailing newline of the read file is dropped so no blank line appears. If the document changes before the read finishes, nothing is inserted. |
+
+Command names accept the abbreviations shown in brackets. A name must be followed by a space before its argument, so `:wq1` is an unknown command rather than `:w q1`.
+
+Path arguments:
+
+- `"..."` is taken literally, backslashes included. A path cannot contain `"`.
+- Unquoted, a backslash followed by a space is an escaped space; every other backslash is literal, so `C:\Users\me\a.txt` and `\\server\share\a.txt` work as typed.
+- Unquoted `*`, `?`, and a leading `~`, `%` or `#` are rejected because Vim would expand them; quote the path to use them literally.
+- Relative paths resolve against the process working directory (`:pwd`), not the current file's directory.
+
+Tab completes the path argument of `:e`, `:w`, `:saveas` and `:r` when the caret is at the end of the line. The directory is listed off the UI thread, examining at most 4096 entries and keeping 256 matches. One match is inserted (a directory gets a trailing separator); several matches insert their longest common prefix and list up to eight in the status. Hidden entries appear only when the typed name starts with `.`. Names that are not valid UTF-8 are skipped. Matching is case-insensitive on Windows. A result that arrives after the line changed is dropped. Completion never opens, creates or writes a file.
+
+Known limits: the existing-file check for `:w {path}` runs immediately before the rename, not atomically with it. A path that is the current file under a different spelling (symlink, 8.3 name) is treated as another file and therefore refused without `!`. Native Windows/Linux GUI runs of this workflow are not automated yet (#63); `crates/chaus-editor/tests/ex_commands.rs` drives the editor through GPUI's test platform with real temporary files.
 
 ## Mapping language in the rc file
 

@@ -1,9 +1,10 @@
-//! Visual mode and the command line.
+//! Visual mode.
 
 use chaus_core::document::Document;
 use chaus_core::position::{CharOffset, CharRange, LineIndex, Selection};
 
-use crate::engine::{CommandKind, Engine, Outcome};
+use crate::command_line::CommandPrefix;
+use crate::engine::{Engine, Outcome};
 use crate::key::Key;
 use crate::mode::Mode;
 use crate::motion;
@@ -52,12 +53,7 @@ impl Engine {
             Key::Char('d' | 'x') => self.finish_visual(Operator::Delete, document, selection),
             Key::Char('c') => self.finish_visual(Operator::Change, document, selection),
             Key::Char('y') => self.finish_visual(Operator::Yank, document, selection),
-            Key::Char(':') => {
-                self.set_mode(Mode::CommandLine);
-                self.set_command_kind(CommandKind::Ex);
-                self.take_command();
-                Outcome::Handled
-            }
+            Key::Char(':') => self.start_command_line(CommandPrefix::Ex),
             Key::Char(
                 character @ ('h' | 'j' | 'k' | 'l' | 'w' | 'b' | 'e' | '0' | '^' | '$' | 'G'),
             ) => {
@@ -100,7 +96,7 @@ impl Engine {
                 self.message(format!("visual command '{character}' is not implemented"));
                 Outcome::Handled
             }
-            Key::Enter | Key::Backspace | Key::Tab | Key::Control(_) => Outcome::Handled,
+            _ => Outcome::Handled,
         }
     }
 
@@ -159,61 +155,6 @@ impl Engine {
                 self.message("edit was rejected");
                 Outcome::Handled
             }
-        }
-    }
-
-    pub(crate) fn command_line_key(
-        &mut self,
-        key: Key,
-        document: &mut Document,
-        selection: &mut Selection,
-    ) -> Outcome {
-        match key {
-            Key::Escape => {
-                self.take_command();
-                self.set_mode(Mode::Normal);
-                Outcome::Handled
-            }
-            Key::Backspace => {
-                self.command_mut().pop();
-                Outcome::Handled
-            }
-            Key::Enter => {
-                let command = self.take_command();
-                let kind = match self.command_kind() {
-                    CommandKind::Search { forward } => CommandKind::Search { forward: *forward },
-                    CommandKind::Ex => CommandKind::Ex,
-                };
-                self.set_mode(Mode::Normal);
-                match kind {
-                    CommandKind::Search { forward } => {
-                        if command.is_empty() {
-                            return Outcome::Handled;
-                        }
-                        if let Some(offset) =
-                            motion::find_literal(document, selection.head, &command, forward)
-                        {
-                            *selection = Selection::caret(offset);
-                            self.set_last_search(Some((command, forward)));
-                        } else {
-                            self.message(format!("pattern not found: {command}"));
-                        }
-                        Outcome::Handled
-                    }
-                    CommandKind::Ex => Outcome::Command(command),
-                }
-            }
-            Key::Char(character) => {
-                if self.command_mut().chars().count() < 512 {
-                    self.command_mut().push(character);
-                }
-                Outcome::Handled
-            }
-            Key::Tab => {
-                self.command_mut().push('\t');
-                Outcome::Handled
-            }
-            Key::Control(_) => Outcome::Handled,
         }
     }
 }

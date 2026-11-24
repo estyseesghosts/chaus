@@ -2,7 +2,9 @@
 
 use chaus_core::position::{CharOffset, LineIndex};
 use chaus_highlight::{Span, TokenKind};
-use gpui::{fill, point, px, size, Bounds, PaintQuad, Pixels, SharedString, TextRun, Window};
+use gpui::{
+    fill, point, px, size, Bounds, Context, PaintQuad, Pixels, SharedString, TextRun, Window,
+};
 use silvestris::convert::hsla;
 use silvestris::core::tokens::Theme;
 
@@ -30,6 +32,7 @@ impl Editor {
         window: &mut Window,
         bounds: Bounds<Pixels>,
         theme: &Theme,
+        cx: &mut Context<Editor>,
     ) -> PaintFrame {
         let font_size = px(self.editor_font_size());
         let line_height = px(self.editor_font_size() * self.settings.line_height);
@@ -59,7 +62,7 @@ impl Editor {
                 .max(1.0) as usize
         });
         let policy = Editor::wrap_policy(mode);
-        self.set_wrap_layout(columns, policy);
+        self.set_wrap_layout(columns, policy, cx);
         let paint_key = crate::paint_cache::PaintKey {
             revision: self.document.revision(),
             highlight: self.highlight_applied_generation,

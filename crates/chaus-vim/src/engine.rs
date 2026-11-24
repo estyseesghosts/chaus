@@ -5,6 +5,8 @@ use std::collections::VecDeque;
 use chaus_core::document::Document;
 use chaus_core::position::{CharOffset, Selection};
 
+use crate::command_line::{CommandLine, CommandPrefix, History};
+use crate::ex_command::ExCommand;
 use crate::key::Key;
 use crate::mapping::Mapping;
 use crate::mode::Mode;
@@ -21,8 +23,12 @@ pub enum Outcome {
     /// The key is not part of the modal grammar (Insert mode passes text
     /// through to the platform input service).
     Unhandled,
-    /// A complete Ex command line, without the leading colon.
-    Command(String),
+    /// A validated Ex command. Lines that fail to parse become
+    /// [`Outcome::Message`] and never reach the editor as commands.
+    Ex(ExCommand),
+    /// Tab in an Ex line: the editor may complete the path argument through
+    /// [`Engine::completion_request`] and [`Engine::apply_completion`].
+    Complete,
     /// A non-blocking explanation for an unknown or rejected command.
     Message(String),
 }
@@ -47,11 +53,6 @@ pub(crate) struct LastChange {
     pub(crate) inserted: Option<String>,
 }
 
-pub(crate) enum CommandKind {
-    Search { forward: bool },
-    Ex,
-}
-
 /// The modal state machine.
 pub struct Engine {
     mode: Mode,
@@ -63,8 +64,9 @@ pub struct Engine {
     mapping_prefix: Vec<Key>,
     queue: VecDeque<QueuedKey>,
     visual_anchor: Option<CharOffset>,
-    command: String,
-    command_kind: CommandKind,
+    command_line: Option<CommandLine>,
+    ex_history: History,
+    search_history: History,
     last_search: Option<(String, bool)>,
     last_find: Option<char>,
     last_change: Option<LastChange>,
@@ -104,8 +106,9 @@ impl Engine {
             mapping_prefix: Vec::new(),
             queue: VecDeque::new(),
             visual_anchor: None,
-            command: String::new(),
-            command_kind: CommandKind::Ex,
+            command_line: None,
+            ex_history: History::default(),
+            search_history: History::default(),
             last_search: None,
             last_find: None,
             last_change: None,
@@ -145,8 +148,7 @@ impl Engine {
         self.motion_count = 0;
         self.mapping_prefix.clear();
         self.queue.clear();
-        self.command.clear();
-        self.command_kind = CommandKind::Ex;
+        self.command_line = None;
         self.visual_anchor = None;
         if matches!(
             self.mode,
@@ -165,8 +167,7 @@ impl Engine {
         self.motion_count = 0;
         self.mapping_prefix.clear();
         self.queue.clear();
-        self.command.clear();
-        self.command_kind = CommandKind::Ex;
+        self.command_line = None;
         self.visual_anchor = None;
         self.insert_start = None;
         self.insert_keys = None;
@@ -285,6 +286,11 @@ impl Engine {
         document: &mut Document,
         selection: &mut Selection,
     ) -> Outcome {
+        let key = if self.mode == Mode::CommandLine {
+            key
+        } else {
+            key.as_motion()
+        };
         match self.mode {
             Mode::Normal => self.normal_key(key, document, selection),
             Mode::VisualChar | Mode::VisualLine => self.visual_key(key, document, selection),
@@ -367,20 +373,43 @@ impl Engine {
         self.visual_anchor = anchor;
     }
 
-    pub(crate) fn command_mut(&mut self) -> &mut String {
-        &mut self.command
+    /// Open an empty input line of the given kind.
+    pub(crate) fn start_command_line(&mut self, prefix: CommandPrefix) -> Outcome {
+        self.set_mode(Mode::CommandLine);
+        self.command_line = Some(CommandLine::new(prefix));
+        self.reset_count();
+        Outcome::Handled
     }
 
-    pub(crate) fn take_command(&mut self) -> String {
-        std::mem::take(&mut self.command)
+    pub(crate) fn command_line_mut(&mut self) -> Option<&mut CommandLine> {
+        self.command_line.as_mut()
     }
 
-    pub(crate) fn command_kind(&self) -> &CommandKind {
-        &self.command_kind
+    pub(crate) fn command_line_ref(&self) -> Option<&CommandLine> {
+        self.command_line.as_ref()
     }
 
-    pub(crate) fn set_command_kind(&mut self, kind: CommandKind) {
-        self.command_kind = kind;
+    pub(crate) fn take_command_line(&mut self) -> Option<CommandLine> {
+        self.command_line.take()
+    }
+
+    /// The command line and the history that belongs to its kind.
+    pub(crate) fn command_line_and_history(&mut self) -> Option<(&mut CommandLine, &History)> {
+        let line = self.command_line.as_mut()?;
+        let history = match line.prefix() {
+            CommandPrefix::Ex => &self.ex_history,
+            CommandPrefix::SearchForward | CommandPrefix::SearchBackward => &self.search_history,
+        };
+        Some((line, history))
+    }
+
+    pub(crate) fn remember_command(&mut self, prefix: CommandPrefix, text: &str) {
+        match prefix {
+            CommandPrefix::Ex => self.ex_history.push(text),
+            CommandPrefix::SearchForward | CommandPrefix::SearchBackward => {
+                self.search_history.push(text);
+            }
+        }
     }
 
     pub(crate) fn last_search(&self) -> Option<&(String, bool)> {

@@ -10,3 +10,4 @@ description = "Deterministic modal editing state machine for chaus."
 [dependencies]
 chaus-core = { workspace = true }
 ropey = { workspace = true }
+unicode-segmentation = { workspace = true }

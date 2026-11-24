@@ -1,7 +1,7 @@
 //! Rc mapping parsing and non-recursive expansion.
 
 use chaus_core::settings::RawMapping;
-use chaus_vim::{parse_mappings, Engine, Key, Mode, Outcome};
+use chaus_vim::{parse_mappings, Engine, ExCommand, Key, Mode, Outcome};
 
 fn raw(lhs: &str, rhs: &str) -> RawMapping {
     RawMapping::new(lhs, rhs)
@@ -51,7 +51,10 @@ fn mapped_sequence_reaches_the_ex_command() {
     let outcome = engine.handle_key(Key::Char('w'), &mut document, &mut selection);
     assert_eq!(
         outcome,
-        Outcome::Command("w".to_owned()),
+        Outcome::Ex(ExCommand::Write {
+            force: false,
+            path: None
+        }),
         "the mapped keys must arrive as one Ex command"
     );
     assert_eq!(engine.mode(), Mode::Normal);

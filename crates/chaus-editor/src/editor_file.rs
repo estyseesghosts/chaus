@@ -8,7 +8,9 @@ use gpui::{px, Context, Window};
 
 use crate::editor::Editor;
 use crate::editor_keys::{Save, SaveAs};
-use crate::file_operation::{FileOperation, FileRequest, FileRequestId, SaveTarget};
+use crate::file_operation::{
+    CloseAfter, FileOperation, FileRequest, FileRequestId, SaveTarget, WriteAssociation,
+};
 
 /// Deterministic stand-in for a background load. Tests use it to hold a load
 /// open while they dispatch UI events, then release it and observe which
@@ -118,33 +120,79 @@ impl Editor {
             return;
         }
         match result {
-            Ok(loaded) => {
-                self.document
-                    .reset(loaded.text, loaded.eol, loaded.preferred_eol);
-                self.cancel_format_job();
-                self.document_generation.bump();
-                self.file = Some(FileState { meta: loaded.meta });
-                self.reset_highlight(cx);
-                self.selection = Selection::caret(CharOffset::ZERO);
-                self.preferred_column = None;
-                self.scroll_row = 0.0;
-                self.scroll_x = px(0.);
-                self.marked = None;
-                self.preedit_start = None;
-                self.preedit_active = false;
-                self.force_next_save = false;
-                self.disk_change = None;
-                self.disk_epoch = self.disk_epoch.wrapping_add(1);
-                self.remove_recovery_snapshot(cx);
-                self.reset_recovery_key();
-                self.document.cancel_user_operation();
-                self.vim_engine.reset();
-                self.rebuild_rows();
-                self.flash_status(format!("Opened {}", opened_path.display()), cx);
-            }
+            Ok(loaded) => self.install_loaded(&opened_path, loaded, cx),
             Err(error) => self.set_status(format!("Open failed: {error}")),
         }
         cx.notify();
+    }
+
+    /// Install a file that was loaded elsewhere, for asynchronous startup.
+    /// A dirty document is never replaced by a deferred load.
+    pub fn adopt_loaded(&mut self, path: &Path, loaded: LoadedFile, cx: &mut Context<Self>) {
+        if self.document.is_dirty() {
+            self.set_status("Open cancelled: the document has unsaved edits");
+            cx.notify();
+            return;
+        }
+        self.install_loaded(path, loaded, cx);
+        cx.notify();
+    }
+
+    fn install_loaded(&mut self, path: &Path, loaded: LoadedFile, cx: &mut Context<Self>) {
+        self.install_document(
+            loaded.text,
+            loaded.eol,
+            loaded.preferred_eol,
+            Some(FileState { meta: loaded.meta }),
+            cx,
+        );
+        self.flash_status(format!("Opened {}", path.display()), cx);
+    }
+
+    /// Replace this window's document with an empty untitled one (`:enew`).
+    /// Window preferences, theme and Vim mode stay; everything tied to the
+    /// old document is reset.
+    pub(crate) fn install_untitled(&mut self, cx: &mut Context<Self>) {
+        self.cancel_file_operation();
+        self.install_document(
+            String::new(),
+            chaus_core::eol::EolMap::default(),
+            chaus_core::eol::Eol::Lf,
+            None,
+            cx,
+        );
+    }
+
+    fn install_document(
+        &mut self,
+        text: String,
+        eol: chaus_core::eol::EolMap,
+        preferred_eol: chaus_core::eol::Eol,
+        file: Option<FileState>,
+        cx: &mut Context<Self>,
+    ) {
+        // Retire the old document's recovery snapshot under its own key
+        // before the key is reset for the new document.
+        self.remove_recovery_snapshot(cx);
+        self.document.reset(text, eol, preferred_eol);
+        self.cancel_format_job();
+        self.document_generation.bump();
+        self.file = file;
+        self.reset_highlight(cx);
+        self.selection = Selection::caret(CharOffset::ZERO);
+        self.preferred_column = None;
+        self.scroll_row = 0.0;
+        self.scroll_x = px(0.);
+        self.marked = None;
+        self.preedit_start = None;
+        self.preedit_active = false;
+        self.force_next_save = false;
+        self.disk_change = None;
+        self.disk_epoch = self.disk_epoch.wrapping_add(1);
+        self.reset_recovery_key();
+        self.document.cancel_user_operation();
+        self.vim_engine.reset();
+        self.rebuild_rows();
     }
 
     pub(crate) fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
@@ -152,11 +200,11 @@ impl Editor {
             self.save_as(&SaveAs, window, cx);
             return;
         }
-        self.save_inner(false, cx);
+        self.save_inner(CloseAfter::No, cx);
     }
 
     pub(crate) fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = self.save_as_inner(false, window, cx);
+        let _ = self.save_as_inner(CloseAfter::No, window, cx);
     }
 
     /// Ask for a path without blocking the GPUI update. The picker belongs to
@@ -164,14 +212,12 @@ impl Editor {
     /// while the dialog is open is rejected instead of opening another one.
     pub(crate) fn save_as_inner(
         &mut self,
-        close_after: bool,
+        close_after: CloseAfter,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(request) = self.begin_request(cx) else {
-            if close_after {
-                self.restore_close_prompt(window, cx);
-            }
+            self.close_not_started(close_after, window, cx);
             return false;
         };
         // Choosing a new target abandons a pending conflict overwrite; a
@@ -245,21 +291,15 @@ impl Editor {
             Err(Some(error)) => {
                 self.file_operation = FileOperation::Idle;
                 self.set_status(format!("Save As failed: {error}"));
-                if close_after {
-                    self.restore_close_prompt(window, cx);
-                } else {
-                    cx.notify();
-                }
+                self.close_not_started(close_after, window, cx);
+                cx.notify();
                 return;
             }
             Err(None) => {
                 self.file_operation = FileOperation::Idle;
                 self.set_status("Save cancelled");
-                if close_after {
-                    self.restore_close_prompt(window, cx);
-                } else {
-                    cx.notify();
-                }
+                self.close_not_started(close_after, window, cx);
+                cx.notify();
                 return;
             }
         };
@@ -271,20 +311,70 @@ impl Editor {
                 had_utf8_bom,
                 baseline: None,
                 close_after,
+                association: WriteAssociation::Associate,
+                refuse_existing: false,
             },
             cx,
         );
     }
 
+    /// A close-after-save that could not start or was cancelled. The GUI
+    /// sheet comes back; an Ex `:wq` only reports, as the status already does.
+    pub(crate) fn close_not_started(
+        &mut self,
+        close_after: CloseAfter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if close_after == CloseAfter::Sheet {
+            self.restore_close_prompt(window, cx);
+        }
+    }
+
+    /// Ex write to an explicit path. `association` decides whether the path
+    /// becomes the document's file; `force` only permits replacing an
+    /// existing file and never skips the current file's conflict check.
+    pub(crate) fn write_to_path(
+        &mut self,
+        path: PathBuf,
+        association: WriteAssociation,
+        force: bool,
+        close_after: CloseAfter,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(request) = self.begin_request(cx) else {
+            return false;
+        };
+        let target = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
+        let had_utf8_bom = self
+            .file
+            .as_ref()
+            .is_some_and(|file| file.meta.had_utf8_bom);
+        self.force_next_save = false;
+        self.start_save(
+            request,
+            SaveTarget {
+                target,
+                requested: path,
+                had_utf8_bom,
+                baseline: None,
+                close_after,
+                association,
+                refuse_existing: !force,
+            },
+            cx,
+        )
+    }
+
     /// Save the current document through the normal conflict-checked path.
     /// Returns `true` when a background write was started.
     pub fn save_now(&mut self, cx: &mut Context<Self>) -> bool {
-        self.save_inner(false, cx)
+        self.save_inner(CloseAfter::No, cx)
     }
 
     /// Save the document, or overwrite a known external change on the second
     /// attempt. Returns `true` when a background write was started.
-    pub(crate) fn save_inner(&mut self, close_after: bool, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn save_inner(&mut self, close_after: CloseAfter, cx: &mut Context<Self>) -> bool {
         let Some(request) = self.begin_request(cx) else {
             return false;
         };
@@ -303,6 +393,8 @@ impl Editor {
                 had_utf8_bom: file.meta.had_utf8_bom,
                 baseline,
                 close_after,
+                association: WriteAssociation::Associate,
+                refuse_existing: false,
             },
             cx,
         )
@@ -330,24 +422,34 @@ impl Editor {
             had_utf8_bom,
             baseline,
             close_after,
+            association,
+            refuse_existing,
         } = destination;
         let task = cx.background_executor().spawn(async move {
             let text = snapshot.text_with_eol();
             let bytes = chaus_io::encode_for_save(&text, had_utf8_bom);
-            chaus_io::save(chaus_io::SaveRequest::new(
+            let mut save_request = chaus_io::SaveRequest::new(
                 &target,
                 &requested,
                 &bytes,
                 had_utf8_bom,
                 preferred_eol,
                 baseline.as_ref(),
-            ))
+            );
+            if refuse_existing {
+                save_request = save_request.refusing_existing();
+            }
+            chaus_io::save(save_request)
         });
         cx.spawn(async move |editor, cx| {
             let result = task.await;
             editor
                 .update_in(cx, |editor, window, cx| {
-                    editor.finish_save(request, result, close_after, window, cx);
+                    if association == WriteAssociation::Copy {
+                        editor.finish_write_copy(request, result, cx);
+                    } else {
+                        editor.finish_save(request, result, close_after, window, cx);
+                    }
                 })
                 .ok();
         })
@@ -359,7 +461,7 @@ impl Editor {
         &mut self,
         request: FileRequest,
         result: Result<FileMeta, SaveError>,
-        close_after: bool,
+        close_after: CloseAfter,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -381,31 +483,77 @@ impl Editor {
                 // snapshot (and refresh it now) instead of deleting the only
                 // crash-recovery copy.
                 self.write_recovery_now(cx);
-                if close_after && !self.document.is_dirty() {
+                if close_after.closes() && !self.document.is_dirty() {
                     window.remove_window();
                     return;
                 }
-                if close_after {
-                    self.set_status("Saved the previous revision; save again to quit");
-                    self.restore_close_prompt(window, cx);
-                } else {
-                    self.flash_status("Saved", cx);
+                match close_after {
+                    CloseAfter::Sheet => {
+                        self.set_status("Saved the previous revision; save again to quit");
+                        self.restore_close_prompt(window, cx);
+                    }
+                    CloseAfter::Ex => {
+                        self.set_status("Saved the previous revision; the window stays open");
+                    }
+                    CloseAfter::No => self.flash_status("Saved", cx),
                 }
+            }
+            Err(SaveError::DurabilityUnconfirmed { source, meta, .. }) => {
+                // The new bytes are on disk, so adopt them as the baseline; a
+                // later save must not see its own write as an external change.
+                // The document stays dirty and the recovery snapshot is kept
+                // because the rename may not survive a power loss.
+                self.file = Some(FileState { meta: *meta });
+                self.force_next_save = false;
+                self.conflict_prompt = None;
+                self.disk_change = None;
+                self.disk_epoch = self.disk_epoch.wrapping_add(1);
+                self.write_recovery_now(cx);
+                self.set_status(format!(
+                    "Written, but the folder could not be synced ({source}); save again to confirm"
+                ));
+                self.close_not_started(close_after, window, cx);
             }
             Err(SaveError::Conflict(conflict)) => {
                 self.disk_change = Some(conflict);
                 self.show_conflict_prompt(conflict, window, cx);
                 self.set_status(format!("{conflict}"));
-                if close_after {
+                if close_after == CloseAfter::Sheet {
                     self.close_prompt = true;
                 }
             }
             Err(error) => {
                 self.set_status(format!("Save failed: {error}"));
-                if close_after {
-                    self.restore_close_prompt(window, cx);
-                }
+                self.close_not_started(close_after, window, cx);
             }
+        }
+        cx.notify();
+    }
+
+    /// Completion of `:w path` on a named document. The bytes are a copy: the
+    /// document keeps its file, dirty state and recovery snapshot whatever
+    /// the outcome, even when the copy happens to match the saved text.
+    fn finish_write_copy(
+        &mut self,
+        request: FileRequest,
+        result: Result<FileMeta, SaveError>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.owns_request(request) || self.document_generation != request.document {
+            return;
+        }
+        self.file_operation = FileOperation::Idle;
+        match result {
+            Ok(meta) => {
+                self.flash_status(format!("Wrote {}", meta.user_requested_path.display()), cx);
+            }
+            Err(SaveError::DurabilityUnconfirmed { path, source, .. }) => {
+                self.set_status(format!(
+                    "Wrote {}, but the folder could not be synced ({source})",
+                    path.display()
+                ));
+            }
+            Err(error) => self.set_status(format!("Write failed: {error}")),
         }
         cx.notify();
     }

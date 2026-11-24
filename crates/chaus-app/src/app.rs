@@ -123,32 +123,44 @@ pub(crate) fn apply_to_open_editors(settings: &Settings, cx: &mut App) {
     }
 }
 
-/// Start the application and return the process exit status.
-///
-/// Positional files are loaded before GPUI starts. That makes failures visible
-/// with a nonzero status instead of opening a misleading untitled window, and
-/// it removes the startup race where every window could fail and the process
-/// still looked successful.
-pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
-    let settings = load_settings();
+/// Cheap preflight for positional paths. Document decoding is deferred to the
+/// GUI, but missing paths and non-files still produce a truthful CLI status.
+pub fn validate_startup_paths(paths: Vec<PathBuf>) -> (Vec<PathBuf>, usize) {
+    let mut valid = Vec::new();
     let mut failures = 0;
-    let mut loaded = Vec::new();
     for path in paths {
-        match chaus_io::load(&path) {
-            Ok(file) => loaded.push((path, Some(file))),
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => valid.push(path),
+            Ok(_) => {
+                failures += 1;
+                eprintln!("chaus: {}: not a regular file", path.display());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                failures += 1;
+                eprintln!("chaus: {}: file not found", path.display());
+            }
             Err(error) => {
                 failures += 1;
-                eprintln!("chaus: {error}");
-                loaded.push((path, None));
+                eprintln!("chaus: {}: {error}", path.display());
             }
         }
     }
-    let opened_files = loaded.iter().filter(|(_, file)| file.is_some()).count();
-    if opened_files == 0 && !new_window && failures > 0 {
+    (valid, failures)
+}
+
+/// Start the application and return the process exit status.
+///
+/// Only path validation happens before GPUI. Each file is loaded on the
+/// background executor into a window that already exists, so first paint does
+/// not wait for document decoding or the recovery scan.
+pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
+    let settings = load_settings();
+    let (valid_paths, failures) = validate_startup_paths(paths);
+    if valid_paths.is_empty() && !new_window && failures > 0 {
         return 1;
     }
     let exit_code = i32::from(failures > 0);
-    let has_paths = !loaded.is_empty();
+    let has_paths = !valid_paths.is_empty();
     crate::platform::application().run(move |cx| {
         let preference = ThemePreference::explicit(theme_id(settings.theme));
         if let Err(error) = silvestris::init(preference, cx) {
@@ -223,38 +235,66 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
         })
         .detach();
 
-        let recovery_records = chaus_io::recovery::list();
-        if !has_paths {
-            if let Some(handle) = open_untitled(cx) {
-                if !recovery_records.is_empty() {
-                    let _ = handle.update(cx, |editor, window, cx| {
-                        editor.queue_recovery(recovery_records, window, cx);
-                    });
-                }
-            }
-            cx.activate(true);
-            return;
-        }
+        let recovery_task = cx
+            .background_executor()
+            .spawn(async { chaus_io::recovery::list() });
 
-        let mut first = None;
-        for (path, file) in loaded {
-            let Some(file) = file else {
+        // Each requested path owns one window from the start. Its title says
+        // "Opening …" until the deferred load succeeds, so a failure never
+        // masquerades as a successfully opened file.
+        for path in &valid_paths {
+            let name = display_name(path);
+            let message = format!("Opening {name}…");
+            let Some(handle) = window_for(&format!("Opening {name}"), None, Some(message), cx)
+            else {
                 continue;
             };
-            if let Some(handle) = window_for(&display_name(&path), Some(file), None, cx) {
-                if first.is_none() {
-                    first = Some(handle);
-                }
-            }
+            let load_path = path.clone();
+            let target_path = path.clone();
+            let task = cx
+                .background_executor()
+                .spawn(async move { chaus_io::load(&load_path) });
+            cx.spawn(async move |cx| {
+                let result = task.await;
+                cx.update(|cx| match result {
+                    Ok(loaded) => {
+                        let _ = handle.update(cx, |editor, _, cx| {
+                            editor.adopt_loaded(&target_path, loaded, cx);
+                        });
+                    }
+                    Err(error) => {
+                        eprintln!("chaus: {error}");
+                        let _ = handle.update(cx, |editor, _, _| {
+                            editor.show_message(format!("Open failed: {error}"));
+                        });
+                    }
+                });
+            })
+            .detach();
         }
+        let recovery_host = if !has_paths { open_untitled(cx) } else { None };
         if new_window {
             open_untitled(cx);
         }
-        if let Some(handle) = first {
-            let _ = handle.update(cx, |editor, window, cx| {
-                editor.queue_recovery(recovery_records, window, cx);
+
+        // Recovery never replaces a CLI file: records get their own untitled
+        // window, which is the initial window when no paths were requested.
+        cx.spawn(async move |cx| {
+            let records = recovery_task.await;
+            if records.is_empty() {
+                return;
+            }
+            cx.update(|cx| {
+                let handle =
+                    recovery_host.or_else(|| if has_paths { open_untitled(cx) } else { None });
+                if let Some(handle) = handle {
+                    let _ = handle.update(cx, |editor, window, cx| {
+                        editor.queue_recovery(records, window, cx);
+                    });
+                }
             });
-        }
+        })
+        .detach();
         cx.activate(true);
     });
     exit_code

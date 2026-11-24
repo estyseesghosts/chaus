@@ -103,10 +103,18 @@ history; `None` restores horizontal scrolling.
   re-reads an externally edited file and lists invalid lines instead of
   overwriting them. The Vim checkbox is not the live mode; `Ctrl+Shift+V` and
   View → Vim Mode remain per-window.
+- Width changes from paint are coalesced into one background reflow per editor.
+  The committed row index and paint key keep the previous width until a
+  generation- and revision-checked measurement is published, so dragging never
+  paints new-width text against old row positions. Explicit wrap-mode changes
+  still rebuild synchronously because they are not continuous resize events.
 - Caret/native-selection row lookup uses `chaus_layout::row_of_char`, the same
   row walker as painting, and stops at the target row instead of building the
-  whole segment list. A 1 MiB unwrapped line visits one row. The remaining
-  layout work is chunk-friendly input and deep-row checkpoints for paint.
+  whole segment list. A 1 MiB unwrapped line visits one row. Native selection
+  geometry clips to the visible hard lines and builds only the visible row
+  window, so Select All on 100k lines returns a viewport-sized set of
+  rectangles. The remaining layout work is chunk-friendly input and deep-row
+  checkpoints for paint.
 - Find and replace support literal search only; regular expressions are not
   implemented. Vim `/` and `?` remain separate. Literal search streams Rope
   characters through a KMP prefix table, so a long needle over repeated
@@ -142,6 +150,13 @@ history; `None` restores horizontal scrolling.
   a portal implementation reports a picker error instead of a chooser. The
   `zenity`/`kdialog` helper in `chaus-dialog` is no longer used by either path.
   Native picker runs on real Windows and Linux desktops remain a manual gate.
+- Startup validates positional paths with a cheap metadata check before GPUI
+  starts, so missing paths and directories still produce a nonzero CLI status.
+  Document decoding and the recovery scan run on the background executor after
+  the first windows exist; each path owns its "Opening …" window and adopts its
+  load without a second read. Recovery records get a separate untitled window
+  so they never replace a CLI file. Content decode failures found after startup
+  are reported in that window, not as a CLI exit code.
 - GUI launches write bounded local events under the platform state directory,
   with the build SHA, monotonic sequence, correlation id and redacted phase
   outcomes. The panic hook is installed before CLI parsing; native faults are
@@ -180,7 +195,10 @@ history; `None` restores horizontal scrolling.
 - Save refuses a target with additional hard links instead of silently
   breaking them. Windows uses `ReplaceFileW` and keeps the target's ACLs and
   attributes. Conflict checks are repeated immediately before replacement, but
-  the check and replacement are still not one atomic operation.
+  the check and replacement are still not one atomic operation; the adversarial
+  two-writer test proves a paused writer detects a change made at that boundary,
+  not that unrelated processes are serialized. A committed rename whose parent
+  directory cannot be synced reports `DurabilityUnconfirmed` instead of success.
 - Ctrl+Plus/Minus/0 change only the current window's document font size
   (9-48px, documented stops). The override is never written to `_chausrc`.
 - Tab and Shift+Tab indent or outdent every selected hard line as one undo

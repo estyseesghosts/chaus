@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 
 use chaus_core::document::{Document, LineRange};
@@ -44,6 +45,24 @@ use crate::geometry::Geometry;
 /// Routine confirmations (`Saved`, `Copied`) disappear after this long.
 const TRANSIENT_STATUS: Duration = Duration::from_secs(4);
 
+/// Test seam: hold the next reflow measurement so an edit can land between
+/// request and completion.
+static REFLOW_GATE: Mutex<Option<mpsc::Receiver<()>>> = Mutex::new(None);
+
+/// Install a one-shot gate in front of the next background reflow.
+pub fn set_reflow_gate_for_test(receiver: Option<mpsc::Receiver<()>>) {
+    if let Ok(mut gate) = REFLOW_GATE.lock() {
+        *gate = receiver;
+    }
+}
+
+fn wait_for_reflow_gate() {
+    let receiver = REFLOW_GATE.lock().ok().and_then(|mut gate| gate.take());
+    if let Some(receiver) = receiver {
+        let _ = receiver.recv();
+    }
+}
+
 /// One editor window.
 pub struct Editor {
     pub(crate) document: Document,
@@ -72,6 +91,16 @@ pub struct Editor {
     /// between word and character wrapping invalidates the rows even when the
     /// column count did not change.
     pub(crate) rows_policy: chaus_layout::WrapPolicy,
+    /// Tests freeze the paint-driven width so their explicit reflow requests
+    /// cannot be overridden by the test window's own geometry.
+    pub(crate) wrap_width_locked: bool,
+    /// Latest requested reflow. Publication only happens when the finished
+    /// generation still matches this one and the document revision is intact.
+    pub(crate) reflow_generation: u64,
+    pub(crate) reflow_in_flight: Option<u64>,
+    pub(crate) reflow_columns: Option<usize>,
+    pub(crate) reflow_policy: chaus_layout::WrapPolicy,
+    pub(crate) reflow_publications: u64,
     pub(crate) settings: Settings,
     /// Per-window zoom override in logical pixels. `None` follows
     /// `settings.font_size`; this never writes back to the rc file.
@@ -189,6 +218,12 @@ impl Editor {
             shaped_row_calls: 0,
             rows_columns: None,
             rows_policy: chaus_layout::WrapPolicy::Word,
+            wrap_width_locked: false,
+            reflow_generation: 0,
+            reflow_in_flight: None,
+            reflow_columns: None,
+            reflow_policy: chaus_layout::WrapPolicy::Word,
+            reflow_publications: 0,
             settings,
             zoom: None,
             status: None,
@@ -299,7 +334,15 @@ impl Editor {
         if mode == WrapMode::None {
             self.rows_columns = None;
         }
+        self.invalidate_reflow();
         self.rebuild_rows();
+    }
+
+    /// Drop any pending width measurement whose inputs are no longer valid.
+    fn invalidate_reflow(&mut self) {
+        self.reflow_generation = self.reflow_generation.wrapping_add(1);
+        self.reflow_columns = self.rows_columns;
+        self.reflow_policy = self.rows_policy;
     }
 
     /// Install a deterministic stand-in for a background load.
@@ -387,6 +430,20 @@ impl Editor {
     #[must_use]
     pub fn status_text(&self) -> Option<&str> {
         self.status.as_deref()
+    }
+
+    /// The file this window's document is associated with, if any.
+    #[must_use]
+    pub fn file_state(&self) -> Option<&crate::editor_file::FileState> {
+        self.file.as_ref()
+    }
+
+    /// Text of the open Vim command line, without its prefix.
+    #[must_use]
+    pub fn command_line_text(&self) -> Option<String> {
+        self.vim_engine
+            .command_line()
+            .map(|view| format!("{}{}", view.before_caret, view.after_caret))
     }
 
     /// Show a transient message in the window corner.
@@ -489,18 +546,128 @@ impl Editor {
         }
     }
 
-    /// Install the row width and break policy, rebuilding only when either
-    /// changed. Reflow never touches the document or its undo history.
+    /// Request a new wrap width. The committed row index keeps the previous
+    /// width until a background job measures the new one and its generation is
+    /// still current, so every frame derives rows and paint from one layout.
     pub(crate) fn set_wrap_layout(
         &mut self,
         columns: Option<usize>,
         policy: chaus_layout::WrapPolicy,
+        cx: &mut Context<Self>,
     ) {
-        if self.rows_columns == columns && self.rows_policy == policy {
+        if self.wrap_width_locked {
             return;
         }
-        self.rows_columns = columns;
-        self.rows_policy = policy;
+        self.request_wrap_layout(columns, policy, cx);
+    }
+
+    /// Freeze the width derived from paint geometry, for deterministic tests.
+    pub fn lock_wrap_width_for_test(&mut self) {
+        self.wrap_width_locked = true;
+    }
+
+    fn request_wrap_layout(
+        &mut self,
+        columns: Option<usize>,
+        policy: chaus_layout::WrapPolicy,
+        cx: &mut Context<Self>,
+    ) {
+        if self.rows_columns == columns && self.rows_policy == policy {
+            if self.reflow_columns != columns || self.reflow_policy != policy {
+                self.reflow_columns = columns;
+                self.reflow_policy = policy;
+                self.reflow_generation = self.reflow_generation.wrapping_add(1);
+            }
+            return;
+        }
+        if self.reflow_columns == columns && self.reflow_policy == policy {
+            return;
+        }
+        self.reflow_columns = columns;
+        self.reflow_policy = policy;
+        self.reflow_generation = self.reflow_generation.wrapping_add(1);
+        if self.reflow_in_flight.is_none() {
+            self.spawn_reflow(cx);
+        }
+    }
+
+    /// Programmatic wrap width, also used by deterministic reflow tests.
+    pub fn set_wrap_columns(&mut self, columns: Option<usize>, cx: &mut Context<Self>) {
+        let policy = self.rows_policy;
+        self.request_wrap_layout(columns, policy, cx);
+    }
+
+    fn spawn_reflow(&mut self, cx: &mut Context<Self>) {
+        let generation = self.reflow_generation;
+        let columns = self.reflow_columns;
+        let policy = self.reflow_policy;
+        let tab_stop = self.settings.tab_stop;
+        let revision = self.document.revision();
+        let snapshot = self.document.snapshot();
+        self.reflow_in_flight = Some(generation);
+        let task = cx.background_executor().spawn(async move {
+            wait_for_reflow_gate();
+            measure_rows(&snapshot.line_texts(), columns, tab_stop, policy)
+        });
+        cx.spawn(async move |editor, cx| {
+            let counts = task.await;
+            editor
+                .update(cx, |editor, cx| {
+                    editor.finish_reflow(generation, revision, counts, cx);
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Publish a finished measurement only when its generation and document
+    /// revision still match. A superseded or stale job is discarded and the
+    /// latest width is measured instead; no partial layout is ever published.
+    pub(crate) fn finish_reflow(
+        &mut self,
+        generation: u64,
+        revision: chaus_core::position::DocumentRevision,
+        counts: Vec<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reflow_in_flight != Some(generation) {
+            return;
+        }
+        self.reflow_in_flight = None;
+        if generation == self.reflow_generation && revision == self.document.revision() {
+            self.rows_columns = self.reflow_columns;
+            self.rows_policy = self.reflow_policy;
+            self.rows.rebuild(counts);
+            self.reflow_publications = self.reflow_publications.wrapping_add(1);
+            self.clamp_scroll();
+            cx.notify();
+            return;
+        }
+        self.spawn_reflow(cx);
+    }
+
+    #[must_use]
+    pub fn reflow_generation(&self) -> u64 {
+        self.reflow_generation
+    }
+
+    #[must_use]
+    pub fn reflow_publications(&self) -> u64 {
+        self.reflow_publications
+    }
+
+    #[must_use]
+    pub fn is_reflowing(&self) -> bool {
+        self.reflow_in_flight.is_some()
+    }
+
+    #[must_use]
+    pub fn committed_wrap_columns(&self) -> Option<usize> {
+        self.rows_columns
+    }
+
+    /// Force a synchronous measurement for deterministic layout oracles.
+    pub fn rebuild_rows_for_test(&mut self) {
         self.rebuild_rows();
     }
 
@@ -624,7 +791,12 @@ impl Render for Editor {
             .then(|| self.render_conflict_prompt(cx));
         let recovery_prompt =
             (!self.recovery_queue.is_empty()).then(|| self.render_recovery_prompt(cx));
-        let vim_label = self.vim_mode_label();
+        let command_line = self.render_command_line(window, &theme);
+        let vim_label = if command_line.is_some() {
+            None
+        } else {
+            self.vim_mode_label()
+        };
         let vim_owns_keys = self.vim && !self.vim_engine.mode().accepts_text();
         let key_context = if vim_owns_keys {
             VIM_OWNED_KEY_CONTEXT
@@ -839,6 +1011,7 @@ impl Render for Editor {
                         .child(label),
                 )
             })
+            .when_some(command_line, |element, line| element.child(line))
             .when_some(status, |element, message| {
                 element.child(
                     div()
@@ -897,4 +1070,16 @@ impl Render for Editor {
         }
         root
     }
+}
+
+fn measure_rows(
+    lines: &[String],
+    columns: Option<usize>,
+    tab_stop: usize,
+    policy: chaus_layout::WrapPolicy,
+) -> Vec<usize> {
+    lines
+        .iter()
+        .map(|text| chaus_layout::row_count_with(text, columns, tab_stop, policy))
+        .collect()
 }

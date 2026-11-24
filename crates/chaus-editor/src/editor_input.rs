@@ -67,6 +67,7 @@ impl EntityInputHandler for Editor {
     }
 
     fn unmark_text(&mut self, window: &mut Window, _: &mut Context<Self>) {
+        self.vim_engine.set_command_preedit(None);
         self.marked = None;
         self.preedit_active = false;
         self.preedit_start = None;
@@ -91,6 +92,10 @@ impl EntityInputHandler for Editor {
             return;
         }
         if !self.accepts_text_input(window, cx) {
+            return;
+        }
+        if self.command_line_active() {
+            self.insert_command_text(new_text, cx);
             return;
         }
         let text = normalize_newlines(new_text);
@@ -130,6 +135,12 @@ impl EntityInputHandler for Editor {
             return;
         }
         if !self.accepts_text_input(window, cx) {
+            return;
+        }
+        if self.command_line_active() {
+            self.vim_engine
+                .set_command_preedit(Some(new_text.to_owned()));
+            cx.notify();
             return;
         }
         if self.preedit_active && self.document.undo().is_some() {
@@ -208,18 +219,37 @@ impl EntityInputHandler for Editor {
         if range.is_empty() {
             return Vec::new();
         }
-        let first_line = self.document.line_of(range.start);
-        let last_line = self
+        let selected_first_line = self.document.line_of(range.start);
+        let selected_last_line = self
             .document
             .line_of(CharOffset(range.end.0.saturating_sub(1)));
+        let first_visible_row = self.scroll_row.floor().max(0.0) as usize;
+        let last_visible_row = first_visible_row + geometry.visible_rows();
+        let visible_first_line = self.line_at_row(first_visible_row);
+        let visible_last_line = self.line_at_row(last_visible_row);
+        let first_line = selected_first_line.0.max(visible_first_line.0);
+        let last_line = selected_last_line.0.min(visible_last_line.0);
         let origin = geometry.text_origin();
         let mut rectangles = Vec::new();
-        for line_number in first_line.0..=last_line.0 {
+        for line_number in first_line..=last_line {
             let line = LineIndex(line_number);
             let line_start = self.document.line_start(line);
             let line_text = self.document.line_text(line);
-            let segments = self.segments_for(line);
-            for segment in &segments {
+            let line_prefix = self.rows.prefix(line.0);
+            let skip = first_visible_row.saturating_sub(line_prefix);
+            let limit = last_visible_row
+                .saturating_sub(line_prefix)
+                .saturating_sub(skip)
+                + 1;
+            let segments = chaus_layout::segments_window(
+                &line_text,
+                self.rows_columns,
+                self.settings.tab_stop,
+                self.rows_policy,
+                skip,
+                limit,
+            );
+            for (index, segment) in segments.iter().enumerate() {
                 let segment_start = CharOffset(line_start.0 + segment.char_start);
                 let segment_end = CharOffset(line_start.0 + segment.char_end);
                 let start = range.start.max(segment_start);
@@ -227,8 +257,7 @@ impl EntityInputHandler for Editor {
                 if start >= end {
                     continue;
                 }
-                let row = self.rows.prefix(line.0)
-                    + self.local_row_in_line(&line_text, segment_start, line);
+                let row = line_prefix + skip + index;
                 let y = origin.y
                     + gpui::px((row as f32 - self.scroll_row) * f32::from(geometry.line_height));
                 if y + geometry.line_height < element_bounds.top() || y > element_bounds.bottom() {
@@ -285,11 +314,18 @@ impl EntityInputHandler for Editor {
     fn accepts_text_input(&self, _: &mut Window, _: &mut Context<Self>) -> bool {
         // GPUI derives `prefers_ime_for_printable_keys` from this method, so
         // Normal mode sends printable keys through the command grammar while
-        // Insert mode and standard editing defer to an active IME.
-        !self.vim || self.vim_engine.mode().accepts_text()
+        // Insert mode and standard editing defer to an active IME. The
+        // command line takes text too, but routes it to its own buffer.
+        !self.vim || self.vim_engine.mode().accepts_text() || self.command_line_active()
     }
 
     fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_line_active() {
+            if let Some(text) = item.text() {
+                self.insert_command_text(&text, cx);
+            }
+            return;
+        }
         if let Some(text) = item.text() {
             self.replace_selection(&text, EditCause::Paste, cx);
             window.notify_text_input_changed(&self.focus);
@@ -298,6 +334,21 @@ impl EntityInputHandler for Editor {
 }
 
 impl Editor {
+    /// Whether a Vim `:`, `/` or `?` line owns typed text.
+    pub(crate) fn command_line_active(&self) -> bool {
+        self.vim && self.vim_engine.mode() == chaus_vim::Mode::CommandLine
+    }
+
+    /// Typed, pasted or IME-committed text for the command line. It never
+    /// reaches the document or its history.
+    pub(crate) fn insert_command_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.vim_engine.set_command_preedit(None);
+        if let chaus_vim::Outcome::Message(message) = self.vim_engine.insert_command_text(text) {
+            self.flash_status(message, cx);
+        }
+        cx.notify();
+    }
+
     fn bounds_for_offset(&mut self, offset: CharOffset, geometry: Geometry) -> Point<Pixels> {
         let (line, row) = self.row_of_offset(offset);
         let line_start = self.document.line_start(line);

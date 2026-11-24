@@ -51,6 +51,10 @@ impl Editor {
             && !modifiers.shift
             && !modifiers.alt
             && matches!(keystroke.key.as_str(), "c" | "x" | "v");
+        if clipboard_shortcut && self.vim_engine.mode() == Mode::CommandLine {
+            // Paste goes into the open command line; it must stay open.
+            return false;
+        }
         if clipboard_shortcut {
             // Copy/cut/paste must still see the Visual selection, so cancel a
             // pending Vim prefix without collapsing it.
@@ -70,16 +74,6 @@ impl Editor {
             return false;
         };
         let mode = self.vim_engine.mode();
-        if mode == Mode::CommandLine
-            && matches!(
-                keystroke.key.as_str(),
-                "left" | "right" | "up" | "down" | "home" | "end" | "delete"
-            )
-        {
-            // Arrow/navigation names must not turn into `h`, `l`, `0`, `$`
-            // inside an Ex command line.
-            return false;
-        }
         if matches!(mode, Mode::Normal | Mode::VisualChar | Mode::VisualLine) {
             key = match key {
                 VimKey::Enter => VimKey::Char('j'),
@@ -167,7 +161,8 @@ impl Editor {
                 self.flash_status(message, cx);
                 cx.notify();
             }
-            Outcome::Command(command) => self.run_ex_command(&command, window, cx),
+            Outcome::Ex(command) => self.run_ex_command(command, window, cx),
+            Outcome::Complete => self.complete_command_path(cx),
             // `Outcome` is `#[non_exhaustive]`; future variants are treated as
             // informational until routed explicitly.
             _ => {}
@@ -195,110 +190,6 @@ impl Editor {
             None
         }
     }
-
-    fn run_ex_command(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let name_end = command.find(char::is_whitespace).unwrap_or(command.len());
-        let name = &command[..name_end];
-        let rest = command[name_end..].trim();
-        match name {
-            "w" => {
-                self.save_inner(false, cx);
-            }
-            "q" => {
-                if self.confirm_close(window, cx) {
-                    window.remove_window();
-                }
-            }
-            "q!" => self.discard_and_close(window, cx),
-            "wq" => {
-                self.save_inner(true, cx);
-            }
-            "e" | "e!" => {
-                if rest.is_empty() {
-                    self.set_status("usage: :e {path}");
-                    cx.notify();
-                } else {
-                    self.open_path(std::path::Path::new(rest), name == "e!", cx);
-                }
-            }
-            "set" => self.run_set_command(rest, cx),
-            "format" => self.format_document(cx),
-            "trim" => self.trim_trailing_whitespace(cx),
-            "retab" => self.convert_indentation_to_spaces(cx),
-            _ => {
-                self.set_status(format!("unknown Ex command ':{name}'"));
-                cx.notify();
-            }
-        }
-    }
-
-    fn run_set_command(&mut self, arguments: &str, cx: &mut Context<Self>) {
-        if arguments.is_empty() {
-            self.set_status(
-                "usage: :set wrap=word|char|none|wrap|nowrap|expandtab|noexpandtab|tabstop=N",
-            );
-            cx.notify();
-            return;
-        }
-        let mut settings = self.settings.clone();
-        let mut changed = false;
-        for argument in arguments.split_whitespace() {
-            match argument {
-                "wrap" => {
-                    settings.wrap = chaus_core::settings::WrapMode::Word;
-                    changed = true;
-                }
-                "nowrap" => {
-                    settings.wrap = chaus_core::settings::WrapMode::None;
-                    changed = true;
-                }
-                "expandtab" => {
-                    settings.expand_tabs = true;
-                    changed = true;
-                }
-                "noexpandtab" => {
-                    settings.expand_tabs = false;
-                    changed = true;
-                }
-                _ => {
-                    if let Some(value) = argument.strip_prefix("wrap=") {
-                        match chaus_core::settings::WrapMode::parse(value) {
-                            Some(mode) => {
-                                settings.wrap = mode;
-                                changed = true;
-                            }
-                            None => {
-                                self.set_status(format!("unknown wrap mode '{value}'"));
-                                cx.notify();
-                                return;
-                            }
-                        }
-                    } else if let Some(value) = argument.strip_prefix("tabstop=") {
-                        match value.parse::<usize>() {
-                            Ok(tab_stop) if (1..=16).contains(&tab_stop) => {
-                                settings.tab_stop = tab_stop;
-                                changed = true;
-                            }
-                            _ => {
-                                self.set_status("tabstop must be between 1 and 16");
-                                cx.notify();
-                                return;
-                            }
-                        }
-                    } else {
-                        self.set_status(format!("unsupported setting '{argument}'"));
-                        cx.notify();
-                        return;
-                    }
-                }
-            }
-        }
-        if changed {
-            self.set_settings(settings);
-            self.flash_status("Settings updated for this window", cx);
-        }
-        cx.notify();
-    }
 }
 
 fn translate(keystroke: &Keystroke, control_redo: bool) -> Option<VimKey> {
@@ -310,13 +201,15 @@ fn translate(keystroke: &Keystroke, control_redo: bool) -> Option<VimKey> {
         "enter" => Some(VimKey::Enter),
         "backspace" => Some(VimKey::Backspace),
         "tab" => Some(VimKey::Tab),
-        "left" => Some(VimKey::Char('h')),
-        "right" => Some(VimKey::Char('l')),
-        "up" => Some(VimKey::Char('k')),
-        "down" => Some(VimKey::Char('j')),
-        "home" => Some(VimKey::Char('0')),
-        "end" => Some(VimKey::Char('$')),
-        "delete" => Some(VimKey::Char('x')),
+        // The engine turns these into `h`, `l`, `0`, `$`, `x` outside the
+        // command line and edits the input line inside it.
+        "left" => Some(VimKey::Left),
+        "right" => Some(VimKey::Right),
+        "up" => Some(VimKey::Up),
+        "down" => Some(VimKey::Down),
+        "home" => Some(VimKey::Home),
+        "end" => Some(VimKey::End),
+        "delete" => Some(VimKey::Delete),
         "space" => Some(VimKey::Char(' ')),
         "pageup" | "pagedown" | "insert" => None,
         key => {

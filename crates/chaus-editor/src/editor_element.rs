@@ -59,8 +59,8 @@ impl Element for EditorElement {
         cx: &mut App,
     ) -> EditorPrepaint {
         let theme = cx.theme().clone();
-        let frame = self.editor.update(cx, |editor, _| {
-            editor.build_visible_rows(window, bounds, &theme)
+        let frame = self.editor.update(cx, |editor, cx| {
+            editor.build_visible_rows(window, bounds, &theme, cx)
         });
         EditorPrepaint { frame }
     }

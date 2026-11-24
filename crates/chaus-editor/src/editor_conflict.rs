@@ -8,6 +8,7 @@ use silvestris::controls::Button;
 use silvestris::ActiveTheme;
 
 use crate::editor::Editor;
+use crate::file_operation::CloseAfter;
 
 #[derive(Clone)]
 pub(crate) struct ConflictPromptFocus {
@@ -68,13 +69,13 @@ impl Editor {
 
     pub(crate) fn save_as_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.conflict_prompt = None;
-        let _ = self.save_as_inner(false, window, cx);
+        let _ = self.save_as_inner(CloseAfter::No, window, cx);
     }
 
     pub(crate) fn overwrite_conflict(&mut self, cx: &mut Context<Self>) {
         self.conflict_prompt = None;
         self.force_next_save = true;
-        self.save_inner(false, cx);
+        self.save_inner(CloseAfter::No, cx);
     }
 
     pub(crate) fn conflict_prompt_key(

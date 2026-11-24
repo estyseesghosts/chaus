@@ -7,7 +7,7 @@ A small native plaintext editor written in Rust on [GPUI](https://github.com/zed
 - UTF-8 editing. UTF-8 BOM and LF/CRLF/CR line endings are preserved. Saves write through a same-directory temporary file and leave the document dirty if replacement fails.
 - One window per file. Passing several paths on the command line opens one window for each.
 - Pointer and keyboard editing: drag/double/triple-click selection, soft wrap (word, character, off), undo/redo, clipboard, IME, and literal find and replace.
-- Optional Vim mode with Normal, Insert, Visual and Command states, toggled at runtime with `Ctrl+Shift+V`. Both editing modes share one document and undo history.
+- Optional Vim mode with Normal, Insert, Visual and Command states, toggled at runtime with `Ctrl+Shift+V`. Both editing modes share one document and undo history. A bounded Ex command line covers `:w`, `:saveas`, `:q`, `:wq`, `:x`, `:e`, `:enew`, `:r`, `:wa`, `:qa`, line jumps and `:set`; see the [command reference](docs/vim.md#command-line-and-ex-reference).
 - Syntax highlighting for Rust, C, C++, Python, JavaScript, TypeScript, TSX, JSON, TOML and shell. Parsers and queries are compiled into the executable; files above 2 MiB stay plain text.
 - Aqua Light/Dark and Geist Light/Dark themes, selectable in Preferences (`Ctrl+,`) or the rc file.
 - External-change detection with Reload / Save As / Overwrite / Cancel, a dirty-close prompt, and debounced crash-recovery snapshots.

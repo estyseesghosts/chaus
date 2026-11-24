@@ -205,7 +205,7 @@ pub fn write_to_with_epoch(
     temporary.write_all(&bytes)?;
     temporary.as_file().sync_all()?;
     let temporary_path = temporary.into_temp_path();
-    crate::replace_path(&temporary_path, &target)?;
+    crate::replace_path(&temporary_path, &target).map_err(|error| error.into_io())?;
     record_watermark(directory, record.id, epoch, record.revision)?;
     Ok(target)
 }

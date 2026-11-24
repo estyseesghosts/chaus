@@ -8,6 +8,7 @@ use silvestris::controls::Button;
 use silvestris::ActiveTheme;
 
 use crate::editor::Editor;
+use crate::file_operation::CloseAfter;
 
 /// Focus handles for the three choices. They live on the editor so the sheet
 /// can hand keyboard focus to one of them while it is open.
@@ -73,9 +74,9 @@ impl Editor {
     pub(crate) fn save_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_prompt = false;
         let started = if self.file.is_some() {
-            self.save_inner(true, cx)
+            self.save_inner(CloseAfter::Sheet, cx)
         } else {
-            self.save_as_inner(true, window, cx)
+            self.save_as_inner(CloseAfter::Sheet, window, cx)
         };
         if !started {
             self.restore_close_prompt(window, cx);

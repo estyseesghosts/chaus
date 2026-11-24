@@ -79,6 +79,7 @@ int main(int argc, char **argv) {
     args[n++] = "cc";
     args[n++] = "-target";
     args[n++] = "x86_64-windows-gnu";
+    args[n++] = "-fno-sanitize=undefined";
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--target=x86_64-pc-windows-gnu") == 0) continue;
         if (strcmp(argv[i], "-m64") == 0) continue;
@@ -91,7 +92,7 @@ int main(int argc, char **argv) {
 }
 ```
 
-Build it with `zig cc -target x86_64-windows-gnu wrapper.c -o x86_64-w64-mingw32-gcc.exe`. This is a build-environment workaround, not a change to the repository's compiler contract.
+Zig turns on UBSan for unoptimized C, which leaves debug and test builds with unresolved `__ubsan_handle_*` symbols; the wrapper disables it. Build it with `zig cc -target x86_64-windows-gnu wrapper.c -o x86_64-w64-mingw32-gcc.exe`. This is a build-environment workaround, not a change to the repository's compiler contract.
 
 ### Build and run
 

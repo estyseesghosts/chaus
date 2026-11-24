@@ -417,6 +417,15 @@ impl DocumentSnapshot {
     pub fn text_with_eol(&self) -> String {
         self.eol.expand(self.rope.chars(), self.preferred_eol)
     }
+
+    /// Per-hard-line text for background layout work. Called off the UI thread
+    /// by a reflow job; the live document is untouched.
+    #[must_use]
+    pub fn line_texts(&self) -> Vec<String> {
+        (0..self.rope.len_lines())
+            .map(|line| self.rope.line(line).to_string())
+            .collect()
+    }
 }
 
 /// A text document with one window's editing state.

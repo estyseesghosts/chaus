@@ -103,7 +103,7 @@ pub(crate) fn previous_word_start(rope: &Rope, from: CharOffset) -> CharOffset {
     CharOffset(index)
 }
 
-pub(crate) fn first_non_space(document: &Document, line: LineIndex) -> CharOffset {
+pub fn first_non_space(document: &Document, line: LineIndex) -> CharOffset {
     let text = document.line_text(line);
     let offset = text
         .char_indices()

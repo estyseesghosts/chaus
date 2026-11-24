@@ -15,6 +15,7 @@ use silvestris::menu::PopupMenu;
 
 use crate::editor::Editor;
 use crate::editor_keys::{Copy, Cut, Paste, Redo, Save, ToggleVim, Undo};
+use crate::file_operation::CloseAfter;
 
 fn language_command(language: LanguageId) -> String {
     format!("view.language.{}", language.as_str())
@@ -159,7 +160,7 @@ impl Editor {
             move |_, window, cx| {
                 editor
                     .update(cx, |editor, cx| {
-                        editor.save_as_inner(false, window, cx);
+                        editor.save_as_inner(CloseAfter::No, window, cx);
                     })
                     .ok();
             },
