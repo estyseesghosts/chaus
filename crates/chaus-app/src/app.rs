@@ -1,6 +1,7 @@
 //! Window lifecycle and application startup.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chaus_core::settings::Settings;
 use chaus_editor::Editor;
@@ -17,6 +18,8 @@ use crate::settings_global::SettingsGlobal;
 use crate::theme_choice::theme_id;
 
 actions!(chaus_app, [NewWindow, OpenFile, Preferences]);
+
+static WINDOW_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Result of reading and validating the rc file.
 pub(crate) struct SettingsRead {
@@ -295,6 +298,7 @@ fn window_for(
     let settings = cx.global::<SettingsGlobal>().0.clone();
     let bounds = Bounds::centered(None, size(px(900.), px(620.)), cx);
     let options = chrome::window_options(title, bounds, size(px(420.), px(300.)), cx);
+    let correlation = WINDOW_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let handle = chrome::open_window(options, cx, move |window, cx| {
         let editor = cx.new(|cx| Editor::new(cx, loaded.clone(), settings.clone()));
         register_app_commands(&editor, cx);
@@ -310,10 +314,14 @@ fn window_for(
                 vim_editor.update(cx, |editor, cx| editor.cancel_vim_prefix(cx));
             })
             .detach();
+        crate::diagnostics::event("window", correlation, "opened");
         window.on_window_should_close(cx, {
             let editor = editor.clone();
             move |window, cx| {
                 let allow = editor.update(cx, |editor, cx| editor.confirm_close(window, cx));
+                if allow {
+                    crate::diagnostics::event("window", correlation, "closed");
+                }
                 if !allow {
                     window.activate_window();
                 }

@@ -138,6 +138,11 @@ history; `None` restores horizontal scrolling.
   a portal implementation reports a picker error instead of a chooser. The
   `zenity`/`kdialog` helper in `chaus-dialog` is no longer used by either path.
   Native picker runs on real Windows and Linux desktops remain a manual gate.
+- GUI launches write bounded local events under the platform state directory,
+  with the build SHA, monotonic sequence, correlation id and redacted phase
+  outcomes. The panic hook is installed before CLI parsing; native faults are
+  identified from the Windows Event Viewer record, not from a Rust stack. See
+  [Diagnostics](diagnostics.md).
 - One typed file operation owns the editor's picker, open and write. Every
   completion checks its request id and document generation before it can
   install metadata, clear dirty state, change recovery or close the window.

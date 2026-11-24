@@ -4,6 +4,7 @@
 //! and preferences live here so they can be integration-tested.
 
 pub mod app;
+pub mod diagnostics;
 
 pub mod fonts;
 mod platform;

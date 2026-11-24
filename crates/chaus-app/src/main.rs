@@ -63,6 +63,10 @@ fn attach_parent_console() {
 }
 
 fn main() {
+    // The sink and panic hook must exist before argument parsing and GPUI
+    // initialization, which are the phases a GUI launch cannot report aloud.
+    chaus_app::diagnostics::init();
+
     #[cfg(all(windows, not(debug_assertions)))]
     attach_parent_console();
 
@@ -71,6 +75,7 @@ fn main() {
         Err(error) => {
             eprintln!("chaus: {error}");
             eprintln!("Try 'chaus --help' for usage.");
+            chaus_app::diagnostics::shutdown();
             std::process::exit(2);
         }
     };
@@ -80,9 +85,11 @@ fn main() {
         chaus_cli::Command::Run { paths, new_window } => {
             let code = app::run(paths, new_window);
             if code != 0 {
+                chaus_app::diagnostics::shutdown();
                 std::process::exit(code);
             }
         }
         _ => {}
     }
+    chaus_app::diagnostics::shutdown();
 }

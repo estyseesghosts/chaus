@@ -18,6 +18,16 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../.git/HEAD");
+    let build_sha = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned());
+    println!("cargo:rustc-env=CHAUS_BUILD_SHA={build_sha}");
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;

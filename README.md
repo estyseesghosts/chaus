@@ -77,6 +77,7 @@ Themes are `geist-dark`, `geist-light`, `aqua-light` and `aqua-dark`. Wrap modes
 
 ## Documentation
 
+- [Diagnostics](docs/diagnostics.md) — local event log, panic records and Windows crash triage
 - [Build and run](docs/build-and-run.md) — prerequisites, commands and artifact checks on Windows and Linux
 - [Implementation notes](docs/implementation-notes.md) — verified pins, build workarounds and current gaps
 - [Silvestris integration](docs/silvestris.md), [editor](docs/editor.md), [Ropey positions](docs/ropey.md), [file I/O](docs/file-io.md), [Vim](docs/vim.md), [Tree-sitter](docs/treesitter.md)
