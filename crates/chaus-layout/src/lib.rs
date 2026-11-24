@@ -521,6 +521,59 @@ pub fn segments_window(
     result
 }
 
+/// Result of locating a character offset among a hard line's visual rows.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowLookup {
+    /// Index of the visual row containing the offset.
+    pub row: usize,
+    /// Rows the walker had to visit. Equal to `row + 1` for a match, so the
+    /// work stops at the target instead of materializing every later row.
+    pub rows_visited: usize,
+}
+
+/// Locate the visual row containing `char_offset` without building segments.
+///
+/// Uses the same row walker as painting and hit testing, so caret navigation
+/// cannot disagree with the rendered rows. A long unwrapped line visits one
+/// row, and a wrapped line stops at the row holding the offset.
+#[must_use]
+pub fn row_of_char_with_stats(
+    text: &str,
+    max_columns: Option<usize>,
+    tab_stop: usize,
+    policy: WrapPolicy,
+    char_offset: usize,
+) -> RowLookup {
+    let rows = Rows::new(text, max_columns, tab_stop, policy);
+    let mut visited = 0usize;
+    for row in rows {
+        visited += 1;
+        if char_offset < row.char_end {
+            return RowLookup {
+                row: visited - 1,
+                rows_visited: visited,
+            };
+        }
+    }
+    RowLookup {
+        row: visited.saturating_sub(1),
+        rows_visited: visited,
+    }
+}
+
+/// Locate the visual row containing `char_offset`.
+#[must_use]
+pub fn row_of_char(
+    text: &str,
+    max_columns: Option<usize>,
+    tab_stop: usize,
+    policy: WrapPolicy,
+    char_offset: usize,
+) -> usize {
+    row_of_char_with_stats(text, max_columns, tab_stop, policy, char_offset).row
+}
+
 /// Visual rows occupied by a hard line under `policy`.
 ///
 /// This uses the same walker as [`segments_with`] without constructing display

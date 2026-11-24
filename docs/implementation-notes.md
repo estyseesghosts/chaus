@@ -103,6 +103,10 @@ history; `None` restores horizontal scrolling.
   re-reads an externally edited file and lists invalid lines instead of
   overwriting them. The Vim checkbox is not the live mode; `Ctrl+Shift+V` and
   View → Vim Mode remain per-window.
+- Caret/native-selection row lookup uses `chaus_layout::row_of_char`, the same
+  row walker as painting, and stops at the target row instead of building the
+  whole segment list. A 1 MiB unwrapped line visits one row. The remaining
+  layout work is chunk-friendly input and deep-row checkpoints for paint.
 - Find and replace support literal search only; regular expressions are not
   implemented. Vim `/` and `?` remain separate. Literal search streams Rope
   characters through a KMP prefix table, so a long needle over repeated

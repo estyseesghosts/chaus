@@ -227,7 +227,8 @@ impl EntityInputHandler for Editor {
                 if start >= end {
                     continue;
                 }
-                let (_, row) = self.row_of_offset(segment_start);
+                let row = self.rows.prefix(line.0)
+                    + self.local_row_in_line(&line_text, segment_start, line);
                 let y = origin.y
                     + gpui::px((row as f32 - self.scroll_row) * f32::from(geometry.line_height));
                 if y + geometry.line_height < element_bounds.top() || y > element_bounds.bottom() {

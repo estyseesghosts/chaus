@@ -523,13 +523,26 @@ impl Editor {
     }
 
     pub(crate) fn local_row_of(&self, offset: CharOffset, line: LineIndex) -> usize {
-        let segments = self.segments_for(line);
-        let line_start = self.document.line_start(line);
-        let local_char = offset.0.saturating_sub(line_start.0);
-        segments
-            .iter()
-            .position(|segment| local_char < segment.char_end)
-            .unwrap_or(segments.len().saturating_sub(1))
+        let text = self.document.line_text(line);
+        self.local_row_in_line(&text, offset, line)
+    }
+
+    /// Same lookup for a caller that already holds the line text, so a wrapped
+    /// selection does not copy the line once per segment.
+    pub(crate) fn local_row_in_line(
+        &self,
+        text: &str,
+        offset: CharOffset,
+        line: LineIndex,
+    ) -> usize {
+        let local_char = offset.0.saturating_sub(self.document.line_start(line).0);
+        chaus_layout::row_of_char(
+            text,
+            self.rows_columns,
+            self.settings.tab_stop,
+            self.rows_policy,
+            local_char,
+        )
     }
 
     pub(crate) fn row_of_offset(&mut self, offset: CharOffset) -> (LineIndex, usize) {
