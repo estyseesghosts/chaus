@@ -126,7 +126,11 @@ history; `None` restores horizontal scrolling.
   never through a shell, and discards output if the document changed. A child
   that exits zero after reading only part of stdin is rejected rather than
   replacing the document with truncated text; a nonzero exit keeps its own
-  diagnostic. Format-on-save is off and no formatter runtime is bundled.
+  diagnostic. At most one job runs per window: text expansion and the common
+  prefix/suffix diff run on the background executor, and the result is applied
+  only when its request and document revision still match. Hitting the output
+  cap kills and reaps the child immediately instead of waiting for the 10-second
+  deadline. Format-on-save is off and no formatter runtime is bundled.
 - Open and Save As use GPUI's `prompt_for_paths` / `prompt_for_new_path`. The
   pinned GPUI runs the Win32 picker on its own STA thread and serializes it per
   owner window, so no modal loop is pumped inside an editor update. Linux uses

@@ -121,6 +121,7 @@ impl Editor {
             Ok(loaded) => {
                 self.document
                     .reset(loaded.text, loaded.eol, loaded.preferred_eol);
+                self.cancel_format_job();
                 self.document_generation.bump();
                 self.file = Some(FileState { meta: loaded.meta });
                 self.reset_highlight(cx);

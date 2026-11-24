@@ -9,12 +9,29 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Longest a formatter may run before it is killed.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 /// Largest stdout or stderr accepted from a formatter.
 pub const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+
+/// Test seam: hold the next invocation before it spawns a child, so editor
+/// handlers can dispatch more work while the job is in flight.
+static FORMAT_GATE: Mutex<Option<mpsc::Receiver<()>>> = Mutex::new(None);
+
+/// Install a one-shot gate in front of the next formatter invocation.
+pub fn set_format_gate_for_test(receiver: Option<mpsc::Receiver<()>>) {
+    *FORMAT_GATE.lock().expect("formatter gate poisoned") = receiver;
+}
+
+fn wait_for_format_gate() {
+    let receiver = FORMAT_GATE.lock().expect("formatter gate poisoned").take();
+    if let Some(receiver) = receiver {
+        let _ = receiver.recv();
+    }
+}
 
 /// One externally installed formatter invocation.
 #[non_exhaustive]
@@ -137,6 +154,7 @@ pub fn run_with_timeout(
     source: &str,
     timeout: Duration,
 ) -> Result<String, FormatError> {
+    wait_for_format_gate();
     let mut child = Command::new(&formatter.program)
         .args(&formatter.arguments)
         .stdin(Stdio::piped())
@@ -149,11 +167,15 @@ pub fn run_with_timeout(
     let source = source.to_owned();
     // The writer owns stdin and closes it on completion. A short read by a
     // zero-exit child is an error, not a truncated formatting result.
-    let writer = std::thread::spawn(move || stdin.write_all(source.as_bytes()));
+    let mut writer = Some(std::thread::spawn(move || {
+        stdin.write_all(source.as_bytes())
+    }));
     let stdout = child.stdout.take().expect("stdout was requested as piped");
     let stderr = child.stderr.take().expect("stderr was requested as piped");
-    let stdout = std::thread::spawn(move || read_bounded(stdout));
-    let stderr = std::thread::spawn(move || read_bounded(stderr));
+    let mut stdout = Some(std::thread::spawn(move || read_bounded(stdout)));
+    let mut stderr = Some(std::thread::spawn(move || read_bounded(stderr)));
+    let mut stdout_result = None;
+    let mut stderr_result = None;
 
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -163,28 +185,58 @@ pub fn run_with_timeout(
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = writer.join();
-                    let _ = stdout.join();
-                    let _ = stderr.join();
+                    join_workers(writer, stdout, stderr);
                     return Err(FormatError::Timeout);
+                }
+                // A bounded reader can hit its cap while the child is still
+                // writing. Kill it now instead of waiting for the full timeout.
+                if let Some(handle) = stdout.as_mut() {
+                    if handle.is_finished() {
+                        let result = join_bytes(stdout.take().expect("stdout handle"));
+                        let oversized = matches!(result, Err(FormatError::OutputTooLarge));
+                        stdout_result = Some(result);
+                        if oversized {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            join_workers(writer, stdout, stderr);
+                            return Err(FormatError::OutputTooLarge);
+                        }
+                    }
+                }
+                if let Some(handle) = stderr.as_mut() {
+                    if handle.is_finished() {
+                        let result = join_bytes(stderr.take().expect("stderr handle"));
+                        let oversized = matches!(result, Err(FormatError::OutputTooLarge));
+                        stderr_result = Some(result);
+                        if oversized {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            join_workers(writer, stdout, stderr);
+                            return Err(FormatError::OutputTooLarge);
+                        }
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = writer.join();
-                let _ = stdout.join();
-                let _ = stderr.join();
+                join_workers(writer, stdout, stderr);
                 return Err(FormatError::Unavailable(error));
             }
         }
     };
     // Join all workers before interpreting any result so no thread or pipe is
     // left behind on an error path.
-    let stdout = join_bytes(stdout);
-    let stderr = join_bytes(stderr);
-    let written = writer.join().map_err(|_| {
+    let stdout = match stdout_result {
+        Some(result) => result,
+        None => join_bytes(stdout.take().expect("stdout handle")),
+    };
+    let stderr = match stderr_result {
+        Some(result) => result,
+        None => join_bytes(stderr.take().expect("stderr handle")),
+    };
+    let written = writer.take().expect("writer handle").join().map_err(|_| {
         FormatError::Unavailable(std::io::Error::other("formatter stdin writer panicked"))
     })?;
     let stdout = stdout?;
@@ -202,6 +254,24 @@ pub fn run_with_timeout(
     written.map_err(FormatError::InputIncomplete)?;
     let text = String::from_utf8(stdout).map_err(|_| FormatError::InvalidUtf8)?;
     Ok(text)
+}
+
+/// Reap every worker on an error path. Their results are superseded by the
+/// error already chosen, so a panicking reader must not mask it.
+fn join_workers(
+    writer: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+    stdout: Option<std::thread::JoinHandle<Result<Vec<u8>, FormatError>>>,
+    stderr: Option<std::thread::JoinHandle<Result<Vec<u8>, FormatError>>>,
+) {
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
+    if let Some(stdout) = stdout {
+        let _ = stdout.join();
+    }
+    if let Some(stderr) = stderr {
+        let _ = stderr.join();
+    }
 }
 
 fn join_bytes(

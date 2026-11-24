@@ -104,6 +104,11 @@ pub struct Editor {
     pub(crate) blink_epoch: u64,
     pub(crate) blink_key: Option<(Selection, bool)>,
     pub(crate) mapping_epoch: u64,
+    /// Test seam for a deterministic formatter invocation.
+    pub(crate) formatter_override: Option<chaus_io::format::Formatter>,
+    /// At most one formatter job owns a document at a time.
+    pub(crate) format_in_flight: bool,
+    pub(crate) format_generation: u64,
     /// One authoritative owner for picker, open and save work.
     pub(crate) file_operation: FileOperation,
     pub(crate) file_request_next: u64,
@@ -209,6 +214,9 @@ impl Editor {
             blink_epoch: 0,
             blink_key: None,
             mapping_epoch: 0,
+            formatter_override: None,
+            format_in_flight: false,
+            format_generation: 0,
             file_operation: FileOperation::Idle,
             file_request_next: 0,
             load_hook: None,
@@ -297,6 +305,11 @@ impl Editor {
     /// Install a deterministic stand-in for a background load.
     pub fn set_load_hook_for_test(&mut self, hook: LoadHook) {
         self.load_hook = Some(hook);
+    }
+
+    /// Use this formatter instead of detecting one from the file extension.
+    pub fn set_formatter_for_test(&mut self, formatter: chaus_io::format::Formatter) {
+        self.formatter_override = Some(formatter);
     }
 
     /// Current soft-wrap mode for this window.

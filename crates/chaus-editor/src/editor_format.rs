@@ -1,9 +1,10 @@
 //! Explicit Format Document action.
 //!
-//! Detection and process execution live in `chaus_io::format`; this module
-//! only snapshots the document, dispatches the work off the UI thread, rejects
-//! results for a stale revision and applies the replacement as one undo step.
+//! Detection and process execution live in `chaus_io::format`. At most one job
+//! owns a document: text expansion and the bounded diff run on the background
+//! executor, while the editor applies a revision-checked, single undo step.
 
+use chaus_core::diff::TextChange;
 use chaus_core::document::{EditCause, EditTransaction, TextEdit};
 use chaus_core::position::{CharOffset, CharRange, DocumentRevision, Selection};
 use gpui::{Context, Window};
@@ -11,6 +12,9 @@ use gpui::{Context, Window};
 use crate::editor::Editor;
 use crate::editor_edit::normalize_newlines;
 use crate::editor_keys::FormatDocument;
+
+/// Computed off the UI thread from the snapshot the job started with.
+type FormatPlan = Result<Option<TextChange>, chaus_io::format::FormatError>;
 
 impl Editor {
     pub(crate) fn format_document_action(
@@ -24,68 +28,92 @@ impl Editor {
 
     /// Run the formatter detected for the current file, if any.
     pub fn format_document(&mut self, cx: &mut Context<Self>) {
+        if self.format_in_flight {
+            self.set_status("Format already in progress");
+            cx.notify();
+            return;
+        }
         let Some(file) = self.file.as_ref() else {
             self.set_status("Save the file before formatting");
             cx.notify();
             return;
         };
         let path = file.meta.user_requested_path.clone();
-        let Some(formatter) = chaus_io::format::Formatter::for_path(&path) else {
+        let formatter = self
+            .formatter_override
+            .clone()
+            .or_else(|| chaus_io::format::Formatter::for_path(&path));
+        let Some(formatter) = formatter else {
             self.set_status("No formatter is configured for this file type");
             cx.notify();
             return;
         };
         let program = formatter.program.clone();
-        let source = self.document.text();
+        let snapshot = self.document.snapshot();
         let revision = self.document.revision();
+        self.format_generation = self.format_generation.wrapping_add(1);
+        let generation = self.format_generation;
+        self.format_in_flight = true;
         self.set_status(format!("Formatting with {program}..."));
         cx.notify();
 
-        let task = cx
-            .background_executor()
-            .spawn(async move { chaus_io::format::run(&formatter, &source) });
+        let task = cx.background_executor().spawn(async move {
+            let text = snapshot.text_with_eol();
+            let formatted = chaus_io::format::run(&formatter, &text)?;
+            let formatted = normalize_newlines(&formatted);
+            Ok(chaus_core::diff::common_change(&text, &formatted))
+        });
         cx.spawn(async move |editor, cx| {
-            let result = task.await;
+            let result: FormatPlan = task.await;
             editor
                 .update(cx, |editor, cx| {
-                    editor.finish_format(revision, program, result, cx);
+                    editor.finish_format(generation, revision, program, result, cx);
                 })
                 .ok();
         })
         .detach();
     }
 
+    /// A replacement of the document, an explicit cancellation or a new job
+    /// invalidates the previous generation.
+    pub(crate) fn cancel_format_job(&mut self) {
+        self.format_generation = self.format_generation.wrapping_add(1);
+        self.format_in_flight = false;
+    }
+
     fn finish_format(
         &mut self,
+        generation: u64,
         revision: DocumentRevision,
         program: String,
-        result: Result<String, chaus_io::format::FormatError>,
+        result: FormatPlan,
         cx: &mut Context<Self>,
     ) {
+        if generation != self.format_generation || !self.format_in_flight {
+            return;
+        }
+        self.format_in_flight = false;
         if self.document.revision() != revision {
             self.set_status("Document changed while formatting; result discarded");
             cx.notify();
             return;
         }
-        let formatted = match result {
-            Ok(text) => text,
+        match result {
+            Ok(change) => {
+                if self.apply_format_change(revision, change, cx) {
+                    self.flash_status(format!("Formatted with {program}"), cx);
+                    cx.notify();
+                }
+            }
             Err(error) => {
                 self.set_status(format!("Format failed: {error}"));
                 cx.notify();
-                return;
             }
-        };
-        let formatted = normalize_newlines(&formatted);
-        if self.apply_formatted_text(revision, &formatted, cx) {
-            self.flash_status(format!("Formatted with {program}"), cx);
-            cx.notify();
         }
     }
 
     /// Apply formatter output only when the document is still at `revision`.
-    ///
-    /// Returns `true` when the text was applied. A stale result is reported and
-    /// discarded; the document and its undo history are left untouched.
+    /// Tests use this entry point with already-normalized text.
     pub fn apply_formatted_text(
         &mut self,
         revision: DocumentRevision,
@@ -97,8 +125,22 @@ impl Editor {
             cx.notify();
             return false;
         }
-        let current = self.document.text();
-        let Some(mut change) = chaus_core::diff::common_change(&current, formatted) else {
+        let change = chaus_core::diff::common_change(&self.document.text(), formatted);
+        self.apply_format_change(revision, change, cx)
+    }
+
+    fn apply_format_change(
+        &mut self,
+        revision: DocumentRevision,
+        change: Option<TextChange>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.document.revision() != revision {
+            self.set_status("Document changed while formatting; result discarded");
+            cx.notify();
+            return false;
+        }
+        let Some(mut change) = change else {
             self.flash_status("Already formatted", cx);
             cx.notify();
             return false;
@@ -111,7 +153,11 @@ impl Editor {
         if boundary < change.old.start {
             let keep = change.old.start.0 - boundary.0;
             let mut prefix = String::with_capacity(change.insert.len() + keep);
-            prefix.extend(current.chars().skip(boundary.0).take(keep));
+            prefix.push_str(
+                &self
+                    .document
+                    .slice(CharRange::new(boundary, change.old.start)),
+            );
             prefix.push_str(&change.insert);
             change.insert = prefix;
             change.old.start = boundary;

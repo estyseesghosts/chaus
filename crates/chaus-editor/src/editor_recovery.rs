@@ -256,6 +256,7 @@ impl Editor {
         // A recovered document is a new document generation: a pending open or
         // save from before the reset must never settle against it.
         self.cancel_file_operation();
+        self.cancel_format_job();
         self.document_generation.bump();
         self.document.mark_unsaved();
         self.selection = Selection::caret(CharOffset::ZERO);
