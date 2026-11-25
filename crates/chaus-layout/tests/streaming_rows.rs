@@ -1,27 +1,44 @@
 //! The row walker must not allocate in proportion to the hard line.
 
+// The TLS initializers are already const; clippy 1.98 reports them twice.
+#![allow(clippy::missing_const_for_thread_local)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 use chaus_layout::{column_at, row_count_with, rows, WrapPolicy};
 
 struct Counting;
 
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
+// Per-thread counters. A process-wide counter also sees allocations from the
+// other tests in this binary, which run in parallel and make the measured peak
+// depend on scheduling rather than on the code under test.
+thread_local! {
+    static LIVE: Cell<usize> = const { Cell::new(0) };
+    static PEAK: Cell<usize> = const { Cell::new(0) };
+}
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() {
-            let live = LIVE.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
-            PEAK.fetch_max(live, Ordering::Relaxed);
+            let _ = LIVE.try_with(|live| {
+                let current = live.get() + layout.size();
+                live.set(current);
+                let _ = PEAK.try_with(|peak| {
+                    if current > peak.get() {
+                        peak.set(current);
+                    }
+                });
+            });
         }
         pointer
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        let _ = LIVE.try_with(|live| {
+            live.set(live.get().saturating_sub(layout.size()));
+        });
         unsafe { System.dealloc(pointer, layout) };
     }
 }
@@ -32,10 +49,10 @@ static GLOBAL: Counting = Counting;
 /// Peak bytes allocated while `measure` runs, relative to the live total when
 /// it started.
 fn peak_extra(measure: impl FnOnce()) -> usize {
-    let before = LIVE.load(Ordering::Relaxed);
-    PEAK.store(before, Ordering::Relaxed);
+    let before = LIVE.with(|live| live.get());
+    PEAK.with(|peak| peak.set(before));
     measure();
-    PEAK.load(Ordering::Relaxed) - before
+    PEAK.with(|peak| peak.get()) - before
 }
 
 #[test]
