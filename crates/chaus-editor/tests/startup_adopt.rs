@@ -81,7 +81,7 @@ fn adopting_a_load_never_replaces_unsaved_edits() {
         )
     });
     assert_eq!(text, "draft");
-    assert_eq!(title, "Untitled — Edited");
+    assert_eq!(title, "Untitled");
     assert_eq!(
         status.as_deref(),
         Some("Open cancelled: the document has unsaved edits")

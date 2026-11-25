@@ -34,6 +34,7 @@ fn run(vim: bool, test: impl FnOnce(Entity<Editor>, &mut VisualTestContext)) {
             silvestris::ThemePreference::explicit(silvestris::ThemeId::AQUA_LIGHT),
             cx,
         );
+        cx.set_reduce_motion(true);
         chaus_editor::bind_keys(cx);
     });
     let (harness, cx) = app.add_window_view(|window, cx| {
@@ -171,7 +172,7 @@ fn the_documented_shortcut_leaves_vim_normal_mode() {
 fn right_clicking_the_titlebar_opens_the_menus_without_a_toolbar() {
     run(false, |editor, cx| {
         assert!(
-            cx.debug_bounds("menu-file").is_none(),
+            cx.debug_bounds("menu-panel-0").is_none(),
             "there must be no visible menu bar"
         );
 
@@ -182,7 +183,7 @@ fn right_clicking_the_titlebar_opens_the_menus_without_a_toolbar() {
         );
         draw(cx);
         assert!(
-            cx.debug_bounds("menu-shield").is_some(),
+            cx.debug_bounds("menu-panel-0").is_some(),
             "right-clicking the titlebar must open the popup"
         );
 
@@ -199,7 +200,7 @@ fn right_clicking_the_titlebar_opens_the_menus_without_a_toolbar() {
         draw(cx);
 
         assert!(
-            cx.debug_bounds("menu-shield").is_none(),
+            cx.debug_bounds("menu-panel-0").is_none(),
             "choosing an item closes the menu"
         );
         assert!(
@@ -241,9 +242,54 @@ fn the_vim_shortcut_is_ignored_while_the_find_bar_owns_the_keyboard() {
     });
 }
 
+/// The real Silvestris Save sheet created by the last Chaus save command.
+fn last_panel(
+    editor: &Entity<Editor>,
+    cx: &mut VisualTestContext,
+) -> gpui::Entity<silvestris::file_panel::FilePanel> {
+    let _ = editor;
+    cx.update(|_, cx| {
+        cx.global::<chaus_editor::FileDialogs>()
+            .last_panel()
+            .expect("the command presented a SavePanel")
+    })
+}
+
+/// Point the open Save sheet at `target`, name it, and accept it.
+fn accept_save_into(editor: &Entity<Editor>, target: &Path, cx: &mut VisualTestContext) {
+    let panel = last_panel(editor, cx);
+    let dialogs = cx.update(|_, cx| cx.global::<chaus_editor::FileDialogs>().clone());
+    let directory = target.parent().expect("a target directory");
+    let location = dialogs
+        .provider()
+        .location_of(directory)
+        .expect("the provider interns the target directory");
+    cx.update(|_, cx| {
+        panel.update(cx, |panel, cx| {
+            panel
+                .model()
+                .update(cx, |model, cx| model.navigate(location, cx));
+        });
+    });
+    draw(cx);
+    let name = target
+        .file_name()
+        .expect("a target name")
+        .to_string_lossy()
+        .into_owned();
+    cx.update(|window, cx| {
+        panel.update(cx, |panel, cx| panel.set_name(&name, window, cx));
+    });
+    draw(cx);
+    assert!(cx.debug_bounds("panel-accept").is_some(), "Save button");
+    cx.update(|_, cx| {
+        panel.update(cx, |panel, cx| panel.submit(cx));
+    });
+    draw(cx);
+}
+
 /// Press Save on a fresh untitled window through `trigger`, then report the
-/// window title the save settled on. GPUI's test platform stands in for the
-/// native picker, so the production path is exercised without a modal dialog.
+/// window title the save settled on.
 fn save_untitled_through(
     target: &Path,
     trigger: impl FnOnce(&Entity<Editor>, &mut VisualTestContext),
@@ -252,28 +298,16 @@ fn save_untitled_through(
     run(false, |editor, cx| {
         trigger(&editor, cx);
         draw(cx);
-
-        assert!(
-            cx.did_prompt_for_new_path(),
-            "Save must open Save As, not print a refusal"
-        );
-        cx.simulate_new_path_selection(|suggested| {
-            assert!(
-                suggested.as_os_str().is_empty(),
-                "an untitled document has no directory to suggest"
-            );
-            Some(target.to_path_buf())
-        });
-        draw(cx);
-        assert!(
-            !cx.did_prompt_for_new_path(),
-            "a single Save must open exactly one picker"
-        );
         let status = cx.update(|_, cx| editor.read(cx).status_text().map(str::to_owned));
         assert_ne!(
             status.as_deref(),
             Some("Untitled document: use Save As"),
             "Save must open Save As, not print a refusal"
+        );
+        accept_save_into(&editor, target, cx);
+        assert!(
+            target.exists(),
+            "accepting the Save sheet writes the document"
         );
         title = cx.update(|_, cx| editor.read(cx).title());
     });
@@ -282,8 +316,9 @@ fn save_untitled_through(
 
 #[test]
 fn menu_save_and_the_shortcut_both_route_untitled_documents_to_save_as() {
-    let menu_target = std::env::temp_dir().join("chaus-menu-save.txt");
-    let key_target = std::env::temp_dir().join("chaus-key-save.txt");
+    let directory = tempfile::tempdir().unwrap();
+    let menu_target = directory.path().join("chaus-menu-save.txt");
+    let key_target = directory.path().join("chaus-key-save.txt");
 
     let menu_title = save_untitled_through(&menu_target, |editor, cx| {
         invoke(editor, cx, "file.save");
@@ -294,14 +329,10 @@ fn menu_save_and_the_shortcut_both_route_untitled_documents_to_save_as() {
         cx.simulate_keystrokes("ctrl-s");
     });
     assert_eq!(key_title, "chaus-key-save.txt");
-
-    let _ = std::fs::remove_file(menu_target);
-    let _ = std::fs::remove_file(key_target);
 }
 
 #[test]
 fn cancelling_the_menu_save_as_leaves_the_untitled_document_alone() {
-    let target = std::env::temp_dir().join("chaus-cancelled-save.txt");
     run(false, |editor, cx| {
         cx.simulate_input("draft");
         draw(cx);
@@ -309,21 +340,21 @@ fn cancelling_the_menu_save_as_leaves_the_untitled_document_alone() {
         invoke(&editor, cx, "file.save");
         draw(cx);
 
-        assert!(
-            cx.did_prompt_for_new_path(),
-            "cancelling still goes through the picker"
-        );
-        cx.simulate_new_path_selection(|_| None);
+        assert!(cx.debug_bounds("panel-cancel").is_some(), "Cancel button");
+        let panel = last_panel(&editor, cx);
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| panel.close(window, cx));
+        });
         draw(cx);
         cx.update(|_, cx| {
             let editor = editor.read(cx);
-            assert_eq!(editor.title(), "Untitled — Edited");
+            assert_eq!(editor.title(), "Untitled");
             assert_eq!(editor.document().text(), "draft");
             assert_eq!(editor.status_text(), Some("Save cancelled"));
         });
         assert!(
-            !target.exists(),
-            "a cancelled picker must not create the target file"
+            cx.debug_bounds("file-panel").is_none(),
+            "the sheet is gone after Cancel"
         );
     });
 }

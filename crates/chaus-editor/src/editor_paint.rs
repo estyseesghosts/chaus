@@ -36,11 +36,7 @@ impl Editor {
     ) -> PaintFrame {
         let font_size = px(self.editor_font_size());
         let line_height = px(self.editor_font_size() * self.settings.line_height);
-        let font_family = self
-            .settings
-            .font_family
-            .clone()
-            .unwrap_or_else(|| theme.type_.mono.to_string());
+        let font_family = self.editor_font_family(theme);
         let font = gpui::font(font_family.clone());
         let sample = "MMMMMMMM";
         let text_run = TextRun {

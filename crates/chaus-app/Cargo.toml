@@ -14,11 +14,12 @@ path = "src/main.rs"
 [dependencies]
 chaus-cli = { workspace = true }
 chaus-core = { workspace = true }
-chaus-dialog = { workspace = true }
 chaus-editor = { workspace = true }
 chaus-io = { workspace = true }
 silvestris = { workspace = true }
 gpui = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
 gpui_windows = { git = "https://github.com/zed-industries/zed", rev = "6b720973027999bae402df23d469026f4cced988", default-features = false }

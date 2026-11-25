@@ -2,12 +2,14 @@
 //! input handler.
 
 use gpui::{
-    point, px, size, App, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity,
-    GlobalElementId, InspectorElementId, LayoutId, Pixels, Position, Style, TextAlign, Window,
+    point, px, size, App, Bounds, ContentMask, DispatchPhase, Element, ElementId,
+    ElementInputHandler, Entity, GlobalElementId, InspectorElementId, LayoutId, MouseButton,
+    MouseDownEvent, Pixels, Position, Style, TextAlign, Window,
 };
 use silvestris::ActiveTheme;
 
 use crate::editor::Editor;
+use crate::editor_commands::MenuKind;
 use crate::editor_paint::PaintFrame;
 use crate::geometry::{Geometry, PADDING};
 
@@ -75,6 +77,29 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        // Window-level right click in the title band replaces only the frame's
+        // native window menu. Left-button drag and zoom stay with WindowFrame,
+        // and the traffic lights and resize edges are outside this filter.
+        let editor = self.editor.clone();
+        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+            if phase != DispatchPhase::Bubble || event.button != MouseButton::Right {
+                return;
+            }
+            let x = f32::from(event.position.x);
+            let y = f32::from(event.position.y);
+            if y > cx.theme().metrics.titlebar_height || x < 96.0 {
+                return;
+            }
+            cx.stop_propagation();
+            let position = event.position;
+            // `refresh` redraws the cached tree; the editor itself must be
+            // notified so `render` consumes `pending_menu` this frame.
+            editor.update(cx, |editor, cx| {
+                editor.pending_menu = Some((MenuKind::Root, position));
+                cx.notify();
+            });
+            window.refresh();
+        });
         let focus = self.editor.read(cx).focus.clone();
         window.handle_input(
             &focus,

@@ -125,7 +125,7 @@ fn a_late_open_alias_load_keeps_edits_made_while_it_was_running() {
         )
     });
     assert_eq!(text, "ne\n", "a late :o! must not wipe newer edits");
-    assert_eq!(title, "source.txt — Edited");
+    assert_eq!(title, "source.txt");
     assert_eq!(
         status.as_deref(),
         Some("Open cancelled: the document changed while loading")

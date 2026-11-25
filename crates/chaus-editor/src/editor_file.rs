@@ -2,16 +2,35 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex};
+use std::time::Duration;
 
 use chaus_core::position::{CharOffset, Selection};
 use chaus_io::{FileMeta, LoadedFile, SaveError};
 use gpui::{px, Context, Window};
+use silvestris::file_panel::{ExtensionPolicy, PanelOutcome, SaveDisposition, SavePanel};
+use silvestris::modal::ModalResult;
 
 use crate::editor::Editor;
 use crate::editor_keys::{Save, SaveAs};
+use crate::file_dialogs::FileDialogs;
 use crate::file_operation::{
     CloseAfter, FileOperation, FileRequest, FileRequestId, SaveTarget, WriteAssociation,
 };
+
+/// Map the panel's result onto the save state machine. The panel never writes;
+/// only an accepted target with a host path proceeds.
+fn save_outcome(outcome: &PanelOutcome) -> Result<(PathBuf, SaveDisposition), Option<String>> {
+    if outcome.result != ModalResult::Accepted {
+        return Err(None);
+    }
+    let Some(path) = outcome.first_path().cloned() else {
+        return Err(Some(
+            "the Save panel returned no host path for this target".to_string(),
+        ));
+    };
+    let disposition = outcome.disposition.unwrap_or(SaveDisposition::New);
+    Ok((path, disposition))
+}
 
 /// Test seam: hold the next background save so an edit, quit or second command
 /// can be dispatched while the write is still in flight.
@@ -29,6 +48,29 @@ fn wait_for_save_gate() {
     if let Some(receiver) = receiver {
         let _ = receiver.recv();
     }
+}
+
+/// Test seam: pause the next write to a named target for `delay`, without
+/// blocking the executor. The deterministic test scheduler fires the timer when
+/// the test advances its clock, so a test can edit the document or create a
+/// competing file between `start_save`'s snapshot and the commit.
+static SAVE_DELAY: Mutex<Vec<(PathBuf, Duration)>> = Mutex::new(Vec::new());
+
+/// Arm the delay for the write whose target ends with `target`. Entries are
+/// keyed per target so tests that run in parallel cannot consume each other's
+/// delay.
+pub fn set_save_delay_for_test(target: PathBuf, delay: Duration) {
+    if let Ok(mut slots) = SAVE_DELAY.lock() {
+        slots.push((target, delay));
+    }
+}
+
+fn take_save_delay_for_test(target: &Path) -> Option<Duration> {
+    let mut slots = SAVE_DELAY.lock().ok()?;
+    let index = slots
+        .iter()
+        .position(|(expected, _)| target.ends_with(expected) || expected.ends_with(target))?;
+    Some(slots.remove(index).1)
 }
 
 /// Deterministic stand-in for a background load. Tests use it to hold a load
@@ -258,39 +300,56 @@ impl Editor {
         self.set_status("Save As...");
         cx.notify();
 
-        let directory = suggested
+        let dialogs = FileDialogs::ensure(cx);
+        let absolute = suggested
+            .as_deref()
+            .map(|path| std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
+        let directory = absolute
             .as_deref()
             .and_then(Path::parent)
             .filter(|parent| !parent.as_os_str().is_empty())
             .map(Path::to_path_buf)
-            .unwrap_or_default();
+            .or_else(|| dialogs.start_path());
         let suggested_name = suggested
             .as_deref()
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
-            .map(str::to_owned);
-        let receiver = cx.prompt_for_new_path(&directory, suggested_name.as_deref());
-        cx.spawn_in(window, async move |editor, cx| {
-            let outcome = match receiver.await {
-                Ok(Ok(Some(path))) => Ok(path),
-                Ok(Ok(None)) => Err(None),
-                Ok(Err(error)) => Err(Some(format!("{error:#}"))),
-                Err(_) => Err(None),
-            };
-            editor
-                .update_in(cx, |editor, window, cx| {
-                    editor.finish_save_picker(request, outcome, window, cx);
-                })
-                .ok();
-        })
-        .detach();
+            .map(str::to_owned)
+            .unwrap_or_else(|| "Untitled".to_string());
+        let owner = window.window_handle();
+        let target_editor = cx.weak_entity();
+        let mut panel = SavePanel::new(dialogs.provider())
+            .name(suggested_name)
+            // Chaus edits arbitrary plaintext: never append or reject an
+            // extension on the user's behalf.
+            .extension_policy(ExtensionPolicy::Any)
+            .state_store(dialogs.save_state())
+            .on_finish(move |outcome, cx| {
+                let result = save_outcome(outcome);
+                // The panel can finish while its owner window is mid-update.
+                // Defer the editor hand-off, and update the owner rather than
+                // assuming the editor is the window's root view.
+                let editor = target_editor.clone();
+                cx.defer(move |cx| {
+                    let _ = owner.update(cx, |_, window, cx| {
+                        let _ = editor.update(cx, |editor, cx| {
+                            editor.finish_save_selection(request, result, window, cx);
+                        });
+                    });
+                });
+            });
+        if let Some(directory) = directory {
+            panel = panel.directory_path(directory);
+        }
+        let panel = panel.begin_sheet(owner, window, cx);
+        dialogs.remember_panel(&panel);
         true
     }
 
-    fn finish_save_picker(
+    fn finish_save_selection(
         &mut self,
         request: FileRequest,
-        outcome: Result<PathBuf, Option<String>>,
+        outcome: Result<(PathBuf, SaveDisposition), Option<String>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -305,8 +364,8 @@ impl Editor {
             } => (*close_after, *had_utf8_bom),
             _ => return,
         };
-        let path = match outcome {
-            Ok(path) => path,
+        let (path, disposition) = match outcome {
+            Ok(selection) => selection,
             Err(Some(error)) => {
                 self.file_operation = FileOperation::Idle;
                 self.set_status(format!("Save As failed: {error}"));
@@ -322,6 +381,10 @@ impl Editor {
                 return;
             }
         };
+        // The panel checked existence before returning. A target it reported
+        // as new keeps create-new semantics, so an unrelated process that
+        // creates the file in the meantime is a conflict, not a clobber.
+        let refuse_existing = disposition != SaveDisposition::ReplaceConfirmed;
         self.start_save(
             request,
             SaveTarget {
@@ -331,7 +394,7 @@ impl Editor {
                 baseline: None,
                 close_after,
                 association: WriteAssociation::Associate,
-                refuse_existing: false,
+                refuse_existing,
             },
             cx,
         );
@@ -444,7 +507,11 @@ impl Editor {
             association,
             refuse_existing,
         } = destination;
+        let executor = cx.background_executor().clone();
         let task = cx.background_executor().spawn(async move {
+            if let Some(delay) = take_save_delay_for_test(&target) {
+                executor.timer(delay).await;
+            }
             let text = snapshot.text_with_eol();
             let bytes = chaus_io::encode_for_save(&text, had_utf8_bom);
             let mut save_request = chaus_io::SaveRequest::new(

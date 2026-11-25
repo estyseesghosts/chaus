@@ -10,4 +10,5 @@ pub mod fonts;
 mod platform;
 mod preferences;
 mod settings_global;
-mod theme_choice;
+pub mod theme_choice;
+pub mod ui_preferences;

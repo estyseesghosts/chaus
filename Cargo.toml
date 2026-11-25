@@ -7,7 +7,6 @@ members = [
     "crates/chaus-io",
     "crates/chaus-cli",
     "crates/chaus-vim",
-    "crates/chaus-dialog",
     "crates/chaus-editor",
     "crates/chaus-app",
 ]
@@ -25,12 +24,11 @@ chaus-highlight = { path = "crates/chaus-highlight" }
 chaus-io = { path = "crates/chaus-io" }
 chaus-cli = { path = "crates/chaus-cli" }
 chaus-vim = { path = "crates/chaus-vim" }
-chaus-dialog = { path = "crates/chaus-dialog" }
 chaus-editor = { path = "crates/chaus-editor" }
 
 # Pinned to a pushed Silvestris revision so a fresh clone builds without a
 # sibling checkout. Bump the revision here and in Cargo.lock together.
-silvestris = { git = "https://github.com/estyseesghosts/silvestris", rev = "a62b3b2553cc4af4c109b092d234522346006d30" }
+silvestris = { git = "https://github.com/estyseesghosts/silvestris", rev = "f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7", features = ["std-fs"] }
 
 # Pinned to the same Zed commit as Silvestris (config/pins.toml [gpui]).
 gpui = { git = "https://github.com/zed-industries/zed", rev = "6b720973027999bae402df23d469026f4cced988", default-features = false }

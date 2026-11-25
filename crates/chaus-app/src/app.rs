@@ -4,20 +4,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chaus_core::settings::Settings;
-use chaus_editor::Editor;
+use chaus_editor::{Editor, FileDialogs};
 use chaus_io::LoadedFile;
-use gpui::{
-    actions, px, size, App, AppContext, Bounds, Entity, Focusable, KeyBinding, PathPromptOptions,
-    WindowHandle,
-};
+use gpui::{px, size, App, AppContext, Bounds, Entity, Focusable, Window, WindowHandle};
 use silvestris::core::command::CommandDescriptor;
+use silvestris::file_panel::{FilePanel, OpenPanel, PanelOutcome};
+use silvestris::modal::ModalResult;
+use silvestris::window_role::{role_options, WindowRole};
 use silvestris::{chrome, ThemePreference};
 
 use crate::preferences::open_preferences;
 use crate::settings_global::SettingsGlobal;
 use crate::theme_choice::theme_id;
-
-actions!(chaus_app, [NewWindow, OpenFile, Preferences]);
 
 static WINDOW_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -186,48 +184,9 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
             }
             Err(error) => eprintln!("chaus: {error}; using the theme's default UI font"),
         }
-        cx.set_global(SettingsGlobal(settings.clone()));
+        install_settings(cx, settings.clone());
+        crate::ui_preferences::install_file_dialogs(cx);
         chaus_editor::bind_keys(cx);
-        cx.bind_keys([
-            KeyBinding::new("ctrl-n", NewWindow, None),
-            KeyBinding::new("ctrl-o", OpenFile, None),
-            KeyBinding::new("ctrl-,", Preferences, None),
-        ]);
-        cx.on_action(|_: &NewWindow, cx| {
-            open_untitled(cx);
-        });
-        cx.on_action(|_: &Preferences, cx| open_preferences(cx));
-        cx.on_action(|_: &OpenFile, cx| {
-            // GPUI owns the native picker and answers on a oneshot channel, so
-            // the Win32 modal loop never runs inside this editor/app update.
-            let receiver = cx.prompt_for_paths(PathPromptOptions {
-                files: true,
-                directories: false,
-                multiple: false,
-                prompt: Some("Open".into()),
-            });
-            cx.spawn(async move |cx| {
-                let selection = match receiver.await {
-                    Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                    Ok(Ok(None)) => None,
-                    Ok(Err(error)) => {
-                        eprintln!("chaus: Open failed: {error:#}");
-                        None
-                    }
-                    Err(_) => None,
-                };
-                let Some(path) = selection else {
-                    return;
-                };
-                let load_path = path.clone();
-                let task = cx
-                    .background_executor()
-                    .spawn(async move { chaus_io::load(&load_path) });
-                let result = task.await;
-                let _ = cx.update(|cx| open_loaded_result(&path, result, cx));
-            })
-            .detach();
-        });
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -300,33 +259,104 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
     exit_code
 }
 
+/// Install the application-global settings model. Every document window reads
+/// it when it opens, so tests that present windows set it the same way `run`
+/// does.
+pub fn install_settings(cx: &mut App, settings: Settings) {
+    cx.set_global(SettingsGlobal(settings));
+}
+
 /// Register application commands on a window's registry so the File menu and
 /// keyboard shortcuts invoke the same handlers.
-fn register_app_commands(editor: &Entity<Editor>, cx: &mut App) {
+pub fn register_app_commands(editor: &Entity<Editor>, cx: &mut App) {
     let commands = editor.read(cx).commands().clone();
     commands.update(cx, |registry, cx| {
         registry
             .register(
                 CommandDescriptor::action("file.new", "New").shortcut("secondary-n"),
-                |_, _, cx| cx.dispatch_action(&NewWindow),
+                |_, _, cx| {
+                    open_untitled(cx);
+                },
                 cx,
             )
             .expect("file.new is unique");
+        let open_target = editor.clone();
         registry
             .register(
                 CommandDescriptor::action("file.open", "Open…").shortcut("secondary-o"),
-                |_, _, cx| cx.dispatch_action(&OpenFile),
+                move |_, window, cx| {
+                    open_file_panel(&open_target, window, cx);
+                },
                 cx,
             )
             .expect("file.open is unique");
         registry
             .register(
                 CommandDescriptor::action("settings.open", "Preferences…").shortcut("secondary-,"),
-                |_, _, cx| cx.dispatch_action(&Preferences),
+                |_, _, cx| open_preferences(cx),
                 cx,
             )
             .expect("settings.open is unique");
     });
+}
+
+/// File → Open through the real Silvestris `OpenPanel`. The command callback
+/// has the window `run_modal()` needs; the panel starts at the current
+/// document's directory, or the provider's home for an untitled buffer.
+/// `:e path` and command-line paths never reach this route.
+pub fn open_file_panel(
+    editor: &Entity<Editor>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<FilePanel> {
+    let dialogs = FileDialogs::ensure(cx);
+    let absolute = editor
+        .read(cx)
+        .document_path()
+        .map(|path| std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
+    let start = absolute
+        .as_deref()
+        .and_then(Path::parent)
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| dialogs.start_path());
+    let mut panel = OpenPanel::new(dialogs.provider())
+        .title("Chaus: Open")
+        .allows_multiple(false)
+        .can_choose_files(true)
+        .can_choose_directories(false)
+        .state_store(dialogs.open_state())
+        .frame_store(dialogs.open_frames())
+        .on_finish(open_panel_finished);
+    if let Some(directory) = start {
+        panel = panel.directory_path(directory);
+    }
+    let panel = panel.run_modal(window, cx);
+    dialogs.remember_panel(&panel);
+    panel
+}
+
+/// Only an accepted outcome names a file. Cancel, Escape and a closed Open
+/// window all report `Rejected`/`Cancelled` and open nothing.
+fn open_panel_finished(outcome: &PanelOutcome, cx: &mut App) {
+    if outcome.result != ModalResult::Accepted {
+        return;
+    }
+    let Some(path) = outcome.first_path().cloned() else {
+        eprintln!("chaus: Open returned no host path");
+        return;
+    };
+    let load_path = path.clone();
+    let task = cx
+        .background_executor()
+        .spawn(async move { chaus_io::load(&load_path) });
+    cx.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|cx| {
+            open_loaded_result(&path, result, cx);
+        });
+    })
+    .detach();
 }
 
 fn window_for(
@@ -337,11 +367,20 @@ fn window_for(
 ) -> Option<WindowHandle<Editor>> {
     let settings = cx.global::<SettingsGlobal>().0.clone();
     let bounds = Bounds::centered(None, size(px(900.), px(620.)), cx);
-    let options = chrome::window_options(title, bounds, size(px(420.), px(300.)), cx);
+    let mut options = role_options(WindowRole::Document, title, bounds, cx);
+    // The role's default minimum is smaller; a document window keeps Chaus's
+    // practical 420 x 300 editor minimum.
+    options.window_min_size = Some(size(px(420.), px(300.)));
     let correlation = WINDOW_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let handle = chrome::open_window(options, cx, move |window, cx| {
         let editor = cx.new(|cx| Editor::new(cx, loaded.clone(), settings.clone()));
         register_app_commands(&editor, cx);
+        let commands = editor.read(cx).commands().clone();
+        if let Err(error) =
+            silvestris::command::apply_bindings(&commands, &[chaus_editor::KEY_CONTEXT], cx)
+        {
+            eprintln!("chaus: could not bind document commands: {error}");
+        }
         if let Some(message) = message.clone() {
             let editor_handle = editor.clone();
             editor_handle.update(cx, |editor, _| editor.show_message(message));

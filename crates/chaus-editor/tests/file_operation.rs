@@ -35,6 +35,7 @@ fn open(path: &Path, hook: Option<LoadHook>) -> (Entity<Editor>, VisualTestConte
             silvestris::ThemePreference::explicit(silvestris::ThemeId::AQUA_LIGHT),
             cx,
         );
+        cx.set_reduce_motion(true);
         chaus_editor::bind_keys(cx);
     });
     let loaded = chaus_io::load(path).unwrap();
@@ -74,7 +75,7 @@ fn gated_load(path: &Path) -> Result<chaus_io::LoadedFile, chaus_io::LoadError> 
 }
 
 #[test]
-fn a_second_save_as_while_the_picker_is_open_is_rejected() {
+fn a_second_save_as_while_the_sheet_is_open_is_rejected() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source.txt");
     let target = directory.path().join("target.txt");
@@ -84,35 +85,41 @@ fn a_second_save_as_while_the_picker_is_open_is_rejected() {
     cx.simulate_input("X");
     draw(&mut cx);
     cx.simulate_keystrokes("ctrl-shift-s");
-    assert!(
-        cx.did_prompt_for_new_path(),
-        "Save As must open a nonblocking picker"
-    );
+    draw(&mut cx);
+    let panel = cx
+        .update(|_, cx| cx.global::<chaus_editor::FileDialogs>().last_panel())
+        .expect("Save As presents the real Silvestris SavePanel");
 
-    cx.simulate_keystrokes("ctrl-shift-s");
+    // Keyboard focus is in the sheet's name field, where command bindings are
+    // deliberately inert; the menu/registry route must still reject.
+    cx.update(|window, cx| {
+        let commands = editor.read(cx).commands().clone();
+        silvestris::command::CommandRegistry::invoke(
+            &commands,
+            &silvestris::core::command::CommandId::new("file.save_as"),
+            window,
+            cx,
+        );
+    });
+    draw(&mut cx);
     let status = cx.update(|_, cx| editor.read(cx).status_text().map(str::to_owned));
     assert_eq!(
         status.as_deref(),
         Some("A file operation is already in progress")
     );
-    assert!(
-        cx.did_prompt_for_new_path(),
-        "the second command must not open another picker"
+    assert_eq!(
+        cx.update(|_, cx| cx.global::<chaus_editor::FileDialogs>().last_panel()),
+        Some(panel.clone()),
+        "the second command must not open another sheet"
     );
 
-    cx.simulate_new_path_selection(|suggested| {
-        assert_eq!(
-            suggested,
-            directory.path(),
-            "the current file's directory is suggested"
-        );
-        Some(target.clone())
+    cx.update(|window, cx| {
+        panel.update(cx, |panel, cx| panel.set_name("target.txt", window, cx));
     });
     draw(&mut cx);
-    assert!(
-        !cx.did_prompt_for_new_path(),
-        "the first picker result must settle the operation"
-    );
+    let accept = cx.debug_bounds("panel-accept").expect("Save button");
+    cx.simulate_click(accept.center(), gpui::Modifiers::default());
+    draw(&mut cx);
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "Xone\n");
     assert_eq!(cx.update(|_, cx| editor.read(cx).title()), "target.txt");
 }
@@ -158,7 +165,7 @@ fn a_forced_reload_does_not_discard_edits_made_after_it_started() {
         text, "xone\n",
         "a late forced reload must not wipe newer edits"
     );
-    assert_eq!(title, "source.txt — Edited");
+    assert_eq!(title, "source.txt");
     assert_eq!(
         status.as_deref(),
         Some("Open cancelled: the document changed while loading")

@@ -6,7 +6,7 @@ Recorded 2026-11-22 while building the first chaus increment.
 
 | Component | Revision / version |
 | --- | --- |
-| Silvestris | `a62b3b2553cc4af4c109b092d234522346006d30` on `estyseesghosts/silvestris`, branch `source-list-shell` (git dependency) |
+| Silvestris | `f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7` on `estyseesghosts/silvestris`, branch `devel/sil-cocoa-fixture` (git dependency, `features = ["std-fs"]`) |
 | GPUI | `6b720973027999bae402df23d469026f4cced988` (same pin as Silvestris `config/pins.toml`) |
 | Rust | `1.98.1` (`rust-toolchain.toml`); this machine builds with the GNU host `x86_64-pc-windows-gnu`, CI uses the default MSVC host |
 | Ropey | `1.6.1` |
@@ -92,8 +92,15 @@ history; `None` restores horizontal scrolling.
   Silvestris's `CommandRegistry` and `PopupMenu`. There is no visible menu row
   or toolbar: the window is the titlebar and the document. Each window owns its
   registry, so the checked Vim Mode/Wrap items and disabled Undo/Redo/Cut/Copy
-  come from that window's state. `Ctrl+Shift+V` toggles Vim in both modes and is
-  inert while a sheet, find bar or menu owns the keyboard. `Ctrl+,` opens a
+  come from that window's state. Application and document commands are
+  registered once and their GPUI chords are generated from the same registry;
+  `CommandScope` is the responder boundary. `WindowFrame` owns left-button drag,
+  double-click zoom and the traffic lights; a paint-registered window listener
+  replaces only its native right-click menu. The document frame is
+  `WindowRole::Document` with `WindowFrame::edited(dirty)`, so the title string
+  never contains "Edited". `Ctrl+Shift+V` toggles Vim in both modes and is
+  inert while a Silvestris text control, sheet, find bar or menu owns the
+  keyboard. `Ctrl+,` opens a
   Preferences window for theme, font family, font size, line height, wrap mode,
   tab stop, spaces-vs-tabs and the Vim
   default applied to new windows. Applying a value updates every open editor
@@ -143,13 +150,20 @@ history; `None` restores horizontal scrolling.
   only when its request and document revision still match. Hitting the output
   cap kills and reaps the child immediately instead of waiting for the 10-second
   deadline. Format-on-save is off and no formatter runtime is bundled.
-- Open and Save As use GPUI's `prompt_for_paths` / `prompt_for_new_path`. The
-  pinned GPUI runs the Win32 picker on its own STA thread and serializes it per
-  owner window, so no modal loop is pumped inside an editor update. Linux uses
-  the xdg-desktop-portal implementation behind the same API; a machine without
-  a portal implementation reports a picker error instead of a chooser. The
-  `zenity`/`kdialog` helper in `chaus-dialog` is no longer used by either path.
-  Native picker runs on real Windows and Linux desktops remain a manual gate.
+- Open and Save As use Silvestris's `OpenPanel` and `SavePanel`. File → Open is
+  an application-modal `WindowRole::OpenPanel` window titled "Chaus: Open";
+  Save As is a document sheet. Both read the one `StdFsProvider` owned by
+  `chaus-editor::FileDialogs` for the whole application session, because
+  Silvestris location ids are opaque handles owned by that provider. Open and
+  Save keep separate `PanelState` values; the Open frame and both panel states
+  persist in `~/.chaus-ui.json` (Windows: `%USERPROFILE%\_chaus-ui.json`)
+  through `PreferencePanelStates` and `PreferenceFrames`, never in `.chausrc`.
+  A malformed UI document is reported and left untouched; the panels continue
+  with defaults. `SaveDisposition::New` keeps Chaus's create-new save
+  (`refuse_existing = true`), while `ReplaceConfirmed` permits overwrite.
+  Explicit `:w path`, `:saveas path`, `:e path` and `:r path` still bypass the
+  visual panel. Real-OS panel interaction, Trash, fractional DPI and Linux
+  paths remain a manual acceptance gate.
 - Startup validates positional paths with a cheap metadata check before GPUI
   starts, so missing paths and directories still produce a nonzero CLI status.
   Document decoding and the recovery scan run on the background executor after
@@ -162,11 +176,12 @@ history; `None` restores horizontal scrolling.
   outcomes. The panic hook is installed before CLI parsing; native faults are
   identified from the Windows Event Viewer record, not from a Rust stack. See
   [Diagnostics](diagnostics.md).
-- One typed file operation owns the editor's picker, open and write. Every
+- One typed file operation owns the editor's Save sheet, open and write. Every
   completion checks its request id and document generation before it can
   install metadata, clear dirty state, change recovery or close the window.
-  A second Save dispatched while a picker or write is pending is rejected, and
-  a forced reload no longer overwrites edits made while its load was in flight.
+  A second Save dispatched while the sheet or a write is pending is rejected,
+  and a forced reload no longer overwrites edits made while its load was in
+  flight.
 - The save-conflict and dirty-close sheets cover the normal paths. Reload after
   a conflict replaces the document; there is no three-way merge.
 - Dirty documents write a debounced crash-recovery snapshot under the platform
@@ -207,7 +222,11 @@ history; `None` restores horizontal scrolling.
 - Geist themes use bundled Geist Sans for application UI and Geist Mono for the
   document; Aqua keeps Lato and Source Code Pro. The app installs Geist Sans
   through Silvestris's per-theme font-override API. A user `set font=` still
-  overrides the document face.
+  overrides the document face; `None` follows the theme's mono. Preferences
+  validates a typed family against GPUI's text system, warns and keeps the theme
+  default when it is unavailable, and offers "Use Theme Default". Light/Dark
+  within one family keeps the same mono; switching family changes it only when
+  the user has not chosen a family.
 - Word motions and line-boundary behaviour are tested against the in-memory
   engine, not compared command-for-command with real Vim.
 - Tests live in `crates/*/tests/`; the native GUI still needs a real-OS smoke

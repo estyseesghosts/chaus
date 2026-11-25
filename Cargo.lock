@@ -777,12 +777,13 @@ version = "0.1.0"
 dependencies = [
  "chaus-cli",
  "chaus-core",
- "chaus-dialog",
  "chaus-editor",
  "chaus-io",
  "gpui",
  "gpui_linux",
  "gpui_windows",
+ "serde",
+ "serde_json",
  "silvestris",
  "tempfile",
  "windows-sys",
@@ -801,18 +802,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "chaus-dialog"
-version = "0.1.0"
-dependencies = [
- "windows-sys",
-]
-
-[[package]]
 name = "chaus-editor"
 version = "0.1.0"
 dependencies = [
  "chaus-core",
- "chaus-dialog",
  "chaus-highlight",
  "chaus-io",
  "chaus-layout",
@@ -4438,11 +4431,12 @@ dependencies = [
 [[package]]
 name = "silvestris"
 version = "0.1.0"
-source = "git+https://github.com/estyseesghosts/silvestris?rev=a62b3b2553cc4af4c109b092d234522346006d30#a62b3b2553cc4af4c109b092d234522346006d30"
+source = "git+https://github.com/estyseesghosts/silvestris?rev=f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7#f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7"
 dependencies = [
  "anyhow",
  "gpui",
  "image",
+ "libc",
  "log",
  "raw-window-handle",
  "serde",
@@ -4457,7 +4451,7 @@ dependencies = [
 [[package]]
 name = "silvestris-core"
 version = "0.1.0"
-source = "git+https://github.com/estyseesghosts/silvestris?rev=a62b3b2553cc4af4c109b092d234522346006d30#a62b3b2553cc4af4c109b092d234522346006d30"
+source = "git+https://github.com/estyseesghosts/silvestris?rev=f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7#f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7"
 dependencies = [
  "serde",
  "serde_json",
@@ -4466,7 +4460,7 @@ dependencies = [
 [[package]]
 name = "silvestris-fonts"
 version = "0.1.0"
-source = "git+https://github.com/estyseesghosts/silvestris?rev=a62b3b2553cc4af4c109b092d234522346006d30#a62b3b2553cc4af4c109b092d234522346006d30"
+source = "git+https://github.com/estyseesghosts/silvestris?rev=f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7#f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7"
 
 [[package]]
 name = "simd-adler32"

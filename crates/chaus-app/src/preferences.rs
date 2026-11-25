@@ -19,6 +19,7 @@ use silvestris::controls::{
     Button, CheckState, Checkbox, Segment, SegmentedControl, Stepper, TextField, TextFieldEvent,
 };
 use silvestris::preferences::{Form, FormRow};
+use silvestris::window_role::{role_options, WindowRole};
 use silvestris::{chrome, ActiveTheme, ThemePreference};
 
 use crate::app::{apply_to_open_editors, read_settings, save_settings, settings_path};
@@ -44,7 +45,7 @@ pub(crate) fn open_preferences(cx: &mut App) {
         }
     }
     let bounds = Bounds::centered(None, size(px(560.), px(660.)), cx);
-    let options = chrome::fixed_window_options("Preferences", bounds, cx);
+    let options = role_options(WindowRole::Preferences, "Preferences", bounds, cx);
     match chrome::open_window(options, cx, |window, cx| {
         cx.new(|cx| Preferences::new(window, cx))
     }) {
@@ -56,6 +57,7 @@ pub(crate) fn open_preferences(cx: &mut App) {
 struct Preferences {
     settings: Settings,
     font_field: Entity<TextField>,
+    font_warning: Option<String>,
     rc_path: Option<PathBuf>,
     diagnostics: Vec<String>,
     save_error: Option<String>,
@@ -65,10 +67,11 @@ impl Preferences {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let font_field = cx.new(|cx| TextField::new(window, cx));
         let settings = cx.global::<SettingsGlobal>().0.clone();
+        let placeholder = format!("Theme default ({})", cx.theme().type_.mono);
         font_field.update(cx, |field, cx| {
             field.set_text(settings.font_family.clone().unwrap_or_default(), cx);
             field.set_label("Font", cx);
-            field.set_placeholder("Theme default (Geist Mono)", cx);
+            field.set_placeholder(placeholder, cx);
         });
         cx.subscribe(
             &font_field,
@@ -78,8 +81,7 @@ impl Preferences {
                     TextFieldEvent::Submitted | TextFieldEvent::EndedEditing
                 ) {
                     let family = field.read(cx).text().trim().to_string();
-                    preferences.settings.font_family = (!family.is_empty()).then_some(family);
-                    preferences.apply(cx);
+                    preferences.set_font_family(family, cx);
                 }
             },
         )
@@ -91,10 +93,56 @@ impl Preferences {
         Self {
             settings,
             font_field,
+            font_warning: None,
             rc_path: read.path,
             diagnostics: read.diagnostics,
             save_error: None,
         }
+    }
+
+    /// Accept an installed family; otherwise keep the theme default and say
+    /// why, so GPUI never silently falls back to an arbitrary platform face.
+    fn set_font_family(&mut self, family: String, cx: &mut Context<Self>) {
+        if family.is_empty() {
+            self.settings.font_family = None;
+            self.font_warning = None;
+            self.apply(cx);
+            return;
+        }
+        let available = cx
+            .text_system()
+            .all_font_names()
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&family));
+        if available {
+            self.settings.font_family = Some(family);
+            self.font_warning = None;
+        } else {
+            self.settings.font_family = None;
+            self.font_warning = Some(format!(
+                "\"{family}\" is not installed; using the theme default ({}).",
+                cx.theme().type_.mono
+            ));
+        }
+        self.apply(cx);
+    }
+
+    fn reset_font(&mut self, cx: &mut Context<Self>) {
+        self.settings.font_family = None;
+        self.font_warning = None;
+        self.font_field
+            .update(cx, |field, cx| field.set_text(String::new(), cx));
+        self.apply(cx);
+    }
+
+    /// The placeholder names the active theme's monospace face. Aqua and Geist
+    /// differ, and a family switch must change it without touching the
+    /// document or an explicit user choice.
+    fn update_placeholder(&mut self, cx: &mut Context<Self>) {
+        let placeholder = format!("Theme default ({})", cx.theme().type_.mono);
+        self.font_field.update(cx, |field, cx| {
+            field.set_placeholder(placeholder, cx);
+        });
     }
 
     fn apply(&mut self, cx: &mut Context<Self>) {
@@ -103,6 +151,7 @@ impl Preferences {
             ThemePreference::explicit(theme_id(self.settings.theme)),
             cx,
         );
+        self.update_placeholder(cx);
         apply_to_open_editors(&self.settings, cx);
         self.save_error = save_settings(&self.settings)
             .err()
@@ -117,6 +166,7 @@ impl Preferences {
         self.settings = read.settings;
         self.rc_path = read.path;
         self.diagnostics = read.diagnostics;
+        self.font_warning = None;
         let family = self.settings.font_family.clone().unwrap_or_default();
         self.font_field
             .update(cx, |field, cx| field.set_text(family, cx));
@@ -125,6 +175,7 @@ impl Preferences {
             ThemePreference::explicit(theme_id(self.settings.theme)),
             cx,
         );
+        self.update_placeholder(cx);
         apply_to_open_editors(&self.settings, cx);
         self.save_error = None;
         cx.notify();
@@ -192,6 +243,20 @@ impl Render for Preferences {
                     preferences.apply(cx);
                 });
             });
+
+        let reset_entity = entity.clone();
+        let font_control = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(div().flex_1().child(self.font_field.clone()))
+            .child(
+                Button::new("preferences-font-reset", "Use Theme Default").on_click(
+                    move |_, _, cx| {
+                        reset_entity.update(cx, |preferences, cx| preferences.reset_font(cx));
+                    },
+                ),
+            );
 
         let font_size = self.settings.font_size.round() as i32;
         let font_size_control = stepper_row(
@@ -271,10 +336,10 @@ impl Render for Preferences {
                 .child(
                     Form::new(150.0)
                         .row(FormRow::new("Theme", theme_control))
-                        .row(
-                            FormRow::new("Font", self.font_field.clone())
-                                .note("A family installed in the system or bundled with the app."),
-                        )
+                        .row(FormRow::new("Font", font_control).note(
+                            "A family installed in the system or bundled with the app. \
+                                 An empty value follows the theme.",
+                        ))
                         .row(FormRow::new("Font size", font_size_control))
                         .row(FormRow::new("Line height", line_height_control))
                         .row(FormRow::new("Wrap", wrap))
@@ -292,6 +357,17 @@ impl Render for Preferences {
                                 .note("Reload after editing the file externally."),
                         ),
                 )
+                .when_some(self.font_warning.clone(), |element, warning| {
+                    element.child(
+                        div()
+                            .id("preferences-font-warning")
+                            .debug_selector(|| "preferences-font-warning".to_string())
+                            .role(gpui::Role::AlertDialog)
+                            .text_size(px(12.0))
+                            .text_color(silvestris::convert::hsla(cx.theme().colors.warning))
+                            .child(warning),
+                    )
+                })
                 .when_some(self.save_error.clone(), |element, error| {
                     element.child(
                         div()

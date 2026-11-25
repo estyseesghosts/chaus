@@ -3,7 +3,8 @@
 use chaus_core::settings::ThemeName;
 use silvestris::ThemeId;
 
-pub(crate) fn theme_id(name: ThemeName) -> ThemeId {
+#[must_use]
+pub fn theme_id(name: ThemeName) -> ThemeId {
     match name {
         ThemeName::GeistDark => ThemeId::GEIST_DARK,
         ThemeName::GeistLight => ThemeId::GEIST_LIGHT,

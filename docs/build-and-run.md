@@ -7,7 +7,7 @@ Pinned inputs come from `rust-toolchain.toml`, `Cargo.toml` and `Cargo.lock`. Al
 | Input | Value |
 | --- | --- |
 | Rust | 1.98.1, minimal profile plus rustfmt and clippy |
-| Silvestris | `a62b3b2553cc4af4c109b092d234522346006d30` |
+| Silvestris | `f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7` |
 | GPUI | `6b720973027999bae402df23d469026f4cced988` |
 | Tree-sitter | 0.25.10 |
 | Ropey | 1.6.1 |
@@ -144,7 +144,7 @@ readelf --version-info target/release/chaus | grep GLIBC_ | sort -u
 
 Launch GUI windows from a real graphical session with `DISPLAY`, `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` set correctly. Headless CI does not prove window behavior. Test native Wayland and X11 separately, including XWayland where relevant.
 
-Open and Save As use the GPUI picker for the running platform: `IFileOpenDialog`/`IFileSaveDialog` on Windows and the freedesktop file chooser portal on Linux with the Wayland and X11 features enabled. A Linux machine without a portal implementation reports a picker error; no external `zenity` or `kdialog` executable is required. Verify real dialogs, cancellation and focus restoration on a desktop session.
+Open and Save As use Silvestris's `OpenPanel` and `SavePanel` over the shared `StdFsProvider`, not the GPUI native picker. File → Open is its own application-modal window; Save As is a document sheet. Verify real panel navigation, New Folder, Move to Trash, cancellation, focus restoration, Unicode/non-UTF-8 names, symlinked directories and fractional DPI on a desktop session. Headless tests prove the outcome-to-document state machine, not native window management.
 
 ### Artifact checks
 

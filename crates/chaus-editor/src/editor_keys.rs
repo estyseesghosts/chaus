@@ -8,9 +8,11 @@ pub const KEY_CONTEXT: &str = "ChausEditor";
 /// Editing bindings are excluded so Enter, Backspace, arrows and Delete reach
 /// the modal engine instead of inserting or deleting text.
 pub const VIM_OWNED_KEY_CONTEXT: &str = "ChausEditor ChausVimNormal";
+/// Editor bindings never fire while a Silvestris text client owns the keyboard.
+const COMMAND_CONTEXT: &str = "ChausEditor && !SilvestrisText";
 /// Context predicate for bindings that only apply outside Vim's text-owning
 /// modes, including Insert mode.
-const EDIT_CONTEXT: &str = "ChausEditor && !ChausVimNormal";
+const EDIT_CONTEXT: &str = "ChausEditor && !ChausVimNormal && !SilvestrisText";
 
 actions!(
     chaus_editor,
@@ -77,9 +79,9 @@ pub fn bind_keys(cx: &mut App) {
             }
         };
     }
-    let context = Some(KEY_CONTEXT);
+    let context = Some(COMMAND_CONTEXT);
     let edit = Some(EDIT_CONTEXT);
-    let mut bindings = vec![
+    let bindings = vec![
         KeyBinding::new("backspace", Backspace, edit),
         KeyBinding::new("delete", Delete, edit),
         KeyBinding::new("left", Left, edit),
@@ -109,20 +111,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(primary!("shift-end"), SelectDocumentEnd, edit),
         KeyBinding::new("escape", Escape, context),
         KeyBinding::new(primary!("a"), SelectAll, context),
-        KeyBinding::new(primary!("c"), Copy, context),
-        KeyBinding::new(primary!("x"), Cut, context),
-        KeyBinding::new(primary!("v"), Paste, context),
-        KeyBinding::new(primary!("z"), Undo, context),
-        KeyBinding::new(primary!("shift-z"), Redo, context),
-        KeyBinding::new(primary!("y"), Redo, context),
-        KeyBinding::new(primary!("s"), Save, context),
-        KeyBinding::new(primary!("shift-s"), SaveAs, context),
-        KeyBinding::new(primary!("f"), Find, context),
-        KeyBinding::new(primary!("h"), Replace, context),
         KeyBinding::new("f3", FindNext, context),
         KeyBinding::new("shift-f3", FindPrevious, context),
-        // Bound in both modes: the toggle must be usable to leave Normal mode.
-        KeyBinding::new("ctrl-shift-v", ToggleVim, context),
         KeyBinding::new(primary!("="), ZoomIn, context),
         KeyBinding::new(primary!("shift-="), ZoomIn, context),
         KeyBinding::new(primary!("-"), ZoomOut, context),
@@ -130,14 +120,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-t", TrimTrailingWhitespace, context),
         KeyBinding::new("ctrl-alt-s", ConvertIndentationToSpaces, context),
         KeyBinding::new("ctrl-alt-t", ConvertIndentationToTabs, context),
-        KeyBinding::new(primary!("shift-i"), FormatDocument, context),
     ];
-    if !cfg!(target_os = "macos") {
-        bindings.extend([
-            KeyBinding::new("shift-delete", Cut, context),
-            KeyBinding::new("ctrl-insert", Copy, context),
-            KeyBinding::new("shift-insert", Paste, context),
-        ]);
-    }
+    // Undo, redo, cut, copy, paste, find, replace, format, save, save-as,
+    // close, preferences, New, Open and the Vim toggle are command bindings
+    // generated from the per-window `CommandRegistry`; binding them here again
+    // would make one chord dispatch twice.
     cx.bind_keys(bindings);
 }

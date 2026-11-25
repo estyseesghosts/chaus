@@ -71,14 +71,16 @@ set novim
 
 Themes are `geist-dark`, `geist-light`, `aqua-light` and `aqua-dark`. Wrap modes are `word`, `char` and `none`. The Preferences window edits the same file in place, preserving comments and lines it does not manage.
 
+File-panel view/expanded state and the Open window's frame live in a separate UI document next to the rc file: `~/.chaus-ui.json` on Linux and `%USERPROFILE%\_chaus-ui.json` on Windows. A malformed UI document is reported and left untouched; Chaus still starts with defaults.
+
 ## Source layout
 
-`chaus-core` owns the Ropey document, positions and settings parser; `chaus-layout` handles wrapping; `chaus-highlight` owns Tree-sitter parsing; `chaus-io` handles checked file I/O; `chaus-cli` parses arguments; `chaus-vim` implements the modal engine; `chaus-dialog` provides native pickers; `chaus-editor` is the GPUI view; `chaus-app` is the binary and window lifecycle.
+`chaus-core` owns the Ropey document, positions and settings parser; `chaus-layout` handles wrapping; `chaus-highlight` owns Tree-sitter parsing; `chaus-io` handles checked file I/O; `chaus-cli` parses arguments; `chaus-vim` implements the modal engine; `chaus-editor` is the GPUI view and owns the shared Silvestris file-dialog service; `chaus-app` is the binary and window lifecycle.
 
 ## Documentation
 
 - [Diagnostics](docs/diagnostics.md) — local event log, panic records and Windows crash triage
 - [Build and run](docs/build-and-run.md) — prerequisites, commands and artifact checks on Windows and Linux
 - [Implementation notes](docs/implementation-notes.md) — verified pins, build workarounds and current gaps
-- [Silvestris integration](docs/silvestris.md), [editor](docs/editor.md), [Ropey positions](docs/ropey.md), [file I/O](docs/file-io.md), [Vim](docs/vim.md), [Tree-sitter](docs/treesitter.md)
+- [Silvestris integration](docs/silvestris.md), [file panels](docs/file-panels.md), [editor](docs/editor.md), [Ropey positions](docs/ropey.md), [file I/O](docs/file-io.md), [Vim](docs/vim.md), [Tree-sitter](docs/treesitter.md)
 - [Windows build](docs/windows-build.md) and [Linux build](docs/linux-build.md) — packaging and release-validation requirements

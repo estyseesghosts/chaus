@@ -1,8 +1,30 @@
 # Silvestris integration and upstream contributions
 
-## Verified baseline (2026-11-22)
+## Verified baseline (2026-11-24)
 
-`estyseesghosts/silvestris` default branch was `source-list-shell`. Its README says it is a standalone Rust/GPUI application shell, not a complete Lotus migration. It pins GPUI to `6b720973027999bae402df23d469026f4cced988`, Rust to `1.98.1`, bundles Geist Mono and Source Code Pro, and exposes **Aqua Light/Dark and Geist Light/Dark**. Current public APIs are evolving.
+Chaus is pinned to `estyseesghosts/silvestris` `f1c2a010c1c84a90c9ad938eb307f5f2ef5a5ba7`
+on `devel/sil-cocoa-fixture`, with `features = ["std-fs"]`. The workspace keeps
+Silvestris's GPUI pin `6b720973027999bae402df23d469026f4cced988` and Rust
+`1.98.1`. The pinned tree bundles Geist Mono and Source Code Pro, exposes
+**Aqua Light/Dark and Geist Light/Dark**, and documents `StdFsProvider` as the
+production host-filesystem adapter.
+
+Public APIs used by Chaus:
+
+- `file_panel::{OpenPanel, SavePanel, SaveDisposition, ExtensionPolicy}` for
+  File → Open and Save As. The panel chooses a target; the consumer performs
+  all I/O.
+- `file_panel::StdFsProvider` behind `std-fs`. Its `LocationId`s are opaque
+  handles owned by one provider instance; `home()`, `root()` and
+  `location_of()` intern paths, and `resolve()` returns exact `PathBuf`s.
+- `file_panel::{PanelStateStore, PreferencePanelStates}` and
+  `window_role::{FrameStore, PreferenceFrames}` for consumer-owned panel state
+  and frame persistence.
+- `command::{CommandRegistry, CommandScope, apply_bindings}` for one dispatch
+  path for menu, toolbar and shortcut activation. Bindings exclude focused
+  Silvestris text clients.
+- `window_role::{WindowRole, role_options}` for document, Preferences and
+  Open-panel window semantics.
 
 - [`silvestris::init`](https://github.com/estyseesghosts/silvestris/blob/source-list-shell/crates/silvestris/src/lib.rs) registers fonts, installs theme and text-field keybindings.
 - [`chrome::window_options`, `chrome::open_window`, `WindowFrame`](https://github.com/estyseesghosts/silvestris/blob/source-list-shell/crates/silvestris/src/chrome.rs) manage native/client window chrome. macOS controls are native; Windows custom controls map to native window actions; Linux client-side decorations are implemented. The current source says macOS is **not yet validated**.
@@ -11,6 +33,29 @@
 - [`PopupMenu`](https://github.com/estyseesghosts/silvestris/blob/source-list-shell/docs/menus.md) provides context menus; native macOS menu projection exists but OS parity is not complete.
 - [`PreferencesNavigator`, `Form`, `TabView`](https://github.com/estyseesghosts/silvestris/blob/source-list-shell/crates/silvestris/src/preferences.rs) are **UI components**. Preferences persistence belongs to consumers.
 - [`controls::text_field`](https://github.com/estyseesghosts/silvestris/blob/source-list-shell/crates/silvestris/src/controls/text_field.rs) is **single-line**; it is a reference for native IME/selection handling, not the document editor.
+
+## File dialogs
+
+`chaus-editor::FileDialogs` is installed once by `chaus-app` and lives for the
+application session. It holds:
+
+- one `Rc<StdFsProvider>`, never replaced;
+- a separate `PanelStateStore` for Open and for Save;
+- the Open panel's `FrameStore`;
+- a weak handle to the last presented panel, used only for diagnostics and
+  integration tests.
+
+`save_as_inner` creates `SavePanel::begin_sheet` with `ExtensionPolicy::Any`
+and the current file's parent/name (home + `Untitled` otherwise). Its outcome
+maps directly onto the existing save engine: `New → refuse_existing = true`,
+`ReplaceConfirmed → refuse_existing = false`. The panel never writes bytes, and
+`chaus_io::save`, durability, recovery and document-generation checks are
+unchanged. `File → Open` is `OpenPanel::run_modal`; accepted paths go to the
+existing background `chaus_io::load` and open their own document window.
+
+`~/.chaus-ui.json` (Windows: `%USERPROFILE%\_chaus-ui.json`) stores the two
+panel states and the Open frame. It is separate from `.chausrc`; a malformed
+document is reported and never overwritten.
 
 ## Integration recipe
 

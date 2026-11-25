@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 
@@ -157,6 +157,9 @@ pub struct Editor {
     pub(crate) commands: Entity<silvestris::command::CommandRegistry>,
     /// Popup menu overlay, created on the first render when a window exists.
     pub(crate) menu: Option<Entity<silvestris::menu::PopupMenu>>,
+    /// Right-click in the title band, captured at window level and opened on
+    /// the next render.
+    pub(crate) pending_menu: Option<(MenuKind, gpui::Point<Pixels>)>,
     /// Detected or explicitly chosen syntax language.
     pub(crate) language: LanguageId,
     /// True when the person chose a language instead of extension detection.
@@ -265,6 +268,7 @@ impl Editor {
             suppress_text_input: false,
             commands,
             menu: None,
+            pending_menu: None,
             language,
             language_override: false,
             highlights: std::sync::Arc::new(Vec::new()),
@@ -279,6 +283,16 @@ impl Editor {
         };
         let weak = cx.weak_entity();
         editor.register_editor_commands(weak, cx);
+        // Command chords belong to the registry, not to `bind_keys`. Applying
+        // them here keeps a standalone editor (tests, embedding) consistent
+        // while `chaus-app` re-applies after adding the application commands.
+        if let Err(error) = silvestris::command::apply_bindings(
+            &editor.commands,
+            &[crate::editor_keys::KEY_CONTEXT],
+            cx,
+        ) {
+            eprintln!("chaus: could not bind document commands: {error}");
+        }
         editor.schedule_highlight(None, cx);
         editor.rebuild_rows();
         editor.start_disk_watch(cx);
@@ -293,6 +307,15 @@ impl Editor {
     #[must_use]
     pub fn selection(&self) -> Selection {
         self.selection
+    }
+
+    /// The file this window owns, when the document came from disk. Open uses
+    /// its directory as the starting location; an untitled document has none.
+    #[must_use]
+    pub fn document_path(&self) -> Option<&Path> {
+        self.file
+            .as_ref()
+            .map(|file| file.meta.user_requested_path.as_path())
     }
 
     /// Replace the selection and caret without changing the document.
@@ -314,6 +337,17 @@ impl Editor {
     #[must_use]
     pub fn editor_font_size(&self) -> f32 {
         self.zoom.unwrap_or(self.settings.font_size)
+    }
+
+    /// Family used for document rows. An explicit user family wins; otherwise
+    /// the active theme's monospace face follows family changes. `None` is
+    /// what keeps Aqua and Geist independent of any stored family name.
+    #[must_use]
+    pub fn editor_font_family(&self, theme: &silvestris::core::tokens::Theme) -> String {
+        self.settings
+            .font_family
+            .clone()
+            .unwrap_or_else(|| theme.type_.mono.to_string())
     }
 
     /// Whether a background disk conflict check is currently running.
@@ -385,11 +419,11 @@ impl Editor {
         self.vim
     }
 
-    /// Human-readable title for chrome and the OS window.
+    /// The document name for chrome and the OS window. Dirty state belongs to
+    /// the window frame's edited marker, not to the title string.
     #[must_use]
     pub fn title(&self) -> String {
-        let name = self
-            .file
+        self.file
             .as_ref()
             .map(|file| {
                 file.meta
@@ -398,12 +432,7 @@ impl Editor {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| file.meta.user_requested_path.display().to_string())
             })
-            .unwrap_or_else(|| "Untitled".to_string());
-        if self.document.is_dirty() {
-            format!("{name} — Edited")
-        } else {
-            name
-        }
+            .unwrap_or_else(|| "Untitled".to_string())
     }
 
     pub(crate) fn set_status(&mut self, message: impl Into<String>) {
@@ -776,6 +805,9 @@ impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_blink(cx);
         self.ensure_menu(window, cx);
+        if let Some((kind, position)) = self.pending_menu.take() {
+            self.open_menu(kind, position, window, cx);
+        }
         self.sync_command_state(cx);
         let theme = cx.theme().clone();
         let title = self.title();
@@ -1040,41 +1072,24 @@ impl Render for Editor {
             .when_some(conflict_prompt, |element, sheet| element.child(sheet))
             .when_some(recovery_prompt, |element, sheet| element.child(sheet));
         // No toolbar: the window is deliberately just the titlebar and the
-        // document. A transparent hit area over the title band opens the
-        // commands on right-click and forwards the drag/zoom gestures the
-        // frame's own titlebar would otherwise receive. The traffic lights and
-        // resize edges stay clear.
-        let titlebar_height = theme.metrics.titlebar_height;
-        let frame = silvestris::chrome::WindowFrame::new(title).child(content);
-        let titlebar_hit_area = div()
-            .absolute()
-            .top(px(6.))
-            .left(px(96.))
-            .right(px(8.))
-            .h(px((titlebar_height - 6.).max(1.)))
-            .on_mouse_down(MouseButton::Left, |event, window, _| {
-                if event.click_count == 2 {
-                    window.zoom_window();
-                } else {
-                    window.start_window_move();
-                }
-            })
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |editor, event: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    editor.open_menu(MenuKind::Root, event.position, window, cx);
-                }),
-            );
-        let mut root = div()
-            .relative()
-            .size_full()
-            .child(frame)
-            .child(titlebar_hit_area);
+        // document. `WindowFrame` owns left-button drag, double-click zoom and
+        // the traffic lights. A window-level bubble right-click listener
+        // replaces only the frame's native window menu with Chaus's command
+        // menu, so the two hit targets never compete.
+        let frame = silvestris::chrome::WindowFrame::new(title)
+            .role(silvestris::window_role::WindowRole::Document)
+            .edited(self.document.is_dirty())
+            .child(content);
+        let mut root = div().relative().size_full().child(frame);
         if let Some(menu) = self.menu.clone() {
             root = root.child(gpui::deferred(menu).priority(1));
         }
-        root
+        silvestris::command::CommandScope::new(
+            "chaus-command-scope",
+            KEY_CONTEXT,
+            self.commands.clone(),
+        )
+        .child(root)
     }
 }
 
