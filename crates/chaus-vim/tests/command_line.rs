@@ -222,7 +222,7 @@ fn tab_requests_completion_and_applies_only_to_the_same_line() {
     assert_eq!(
         fixture
             .engine
-            .apply_completion(request.revision, "my docs/", false),
+            .apply_completion(&request.token, "my docs/", false),
         None
     );
     assert_eq!(fixture.line().0, "e \"my docs/");
@@ -231,7 +231,7 @@ fn tab_requests_completion_and_applies_only_to_the_same_line() {
     assert_eq!(
         fixture
             .engine
-            .apply_completion(request.revision, "my docs/stale.txt", true),
+            .apply_completion(&request.token, "my docs/stale.txt", true),
         None
     );
     assert_eq!(
@@ -242,7 +242,7 @@ fn tab_requests_completion_and_applies_only_to_the_same_line() {
     let request = fixture.engine.completion_request().unwrap();
     fixture
         .engine
-        .apply_completion(request.revision, "my docs/x.txt", true);
+        .apply_completion(&request.token, "my docs/x.txt", true);
     assert_eq!(fixture.line().0, "e \"my docs/x.txt\"");
     assert_eq!(
         fixture.key(Key::Enter),

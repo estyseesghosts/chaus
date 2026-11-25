@@ -8,7 +8,11 @@
 
 use chaus_core::document::Document;
 use chaus_core::position::{CharOffset, CharRange, LineIndex, Selection};
+use ropey::iter::Chars;
 use ropey::Rope;
+
+#[cfg(test)]
+mod word_scan_tests;
 
 /// A character-find direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,6 +353,127 @@ fn run_class(character: char) -> Option<RunClass> {
     }
 }
 
+/// A forward cursor that buffers the current char and its successor.
+///
+/// Buffering lets a scan inspect the next run boundary without calling
+/// `Rope::char()` for every character of a long run.
+struct ForwardScan<'a> {
+    chars: Chars<'a>,
+    buffered: [Option<char>; 2],
+    buffered_count: usize,
+    next_index: usize,
+    length: usize,
+}
+
+impl<'a> ForwardScan<'a> {
+    fn new(rope: &'a Rope, from: usize) -> Self {
+        let next_index = from.min(rope.len_chars());
+        Self {
+            chars: rope.chars_at(next_index),
+            buffered: [None, None],
+            buffered_count: 0,
+            next_index,
+            length: rope.len_chars(),
+        }
+    }
+
+    fn fill(&mut self) {
+        while self.buffered_count < 2 && self.next_index + self.buffered_count < self.length {
+            match self.chars.next() {
+                Some(character) => {
+                    self.buffered[self.buffered_count] = Some(character);
+                    self.buffered_count += 1;
+                }
+                None => break,
+            }
+        }
+    }
+
+    fn peek(&mut self) -> Option<char> {
+        self.fill();
+        self.buffered[0]
+    }
+
+    fn peek_next(&mut self) -> Option<char> {
+        self.fill();
+        self.buffered[1]
+    }
+
+    fn advance(&mut self) -> Option<char> {
+        self.fill();
+        let character = self.buffered[0]?;
+        self.buffered[0] = self.buffered[1];
+        self.buffered[1] = None;
+        self.buffered_count -= 1;
+        self.next_index += 1;
+        Some(character)
+    }
+
+    fn skip(&mut self) {
+        let _ = self.advance();
+    }
+
+    fn index(&self) -> usize {
+        self.next_index
+    }
+}
+
+/// A backward cursor built from Ropey's reversed iterator. `peek_prev()`
+/// returns the char before the cursor, matching `character_at(index - 1)`.
+struct BackwardScan<'a> {
+    chars: Chars<'a>,
+    buffered: [Option<char>; 2],
+    buffered_count: usize,
+    prev_index: usize,
+}
+
+impl<'a> BackwardScan<'a> {
+    fn new(rope: &'a Rope, from: usize) -> Self {
+        let prev_index = from.min(rope.len_chars());
+        Self {
+            chars: rope.chars_at(prev_index).reversed(),
+            buffered: [None, None],
+            buffered_count: 0,
+            prev_index,
+        }
+    }
+
+    fn fill(&mut self) {
+        while self.buffered_count < 2 && self.prev_index >= self.buffered_count {
+            match self.chars.next() {
+                Some(character) => {
+                    self.buffered[self.buffered_count] = Some(character);
+                    self.buffered_count += 1;
+                }
+                None => break,
+            }
+        }
+    }
+
+    fn peek_prev(&mut self) -> Option<char> {
+        self.fill();
+        self.buffered[0]
+    }
+
+    fn take_prev(&mut self) -> Option<char> {
+        self.fill();
+        let character = self.buffered[0]?;
+        self.buffered[0] = self.buffered[1];
+        self.buffered[1] = None;
+        self.buffered_count -= 1;
+        self.prev_index -= 1;
+        Some(character)
+    }
+
+    fn skip_prev(&mut self) {
+        let _ = self.take_prev();
+    }
+
+    fn index(&self) -> usize {
+        self.prev_index
+    }
+}
+
 /// Keep a Normal-mode caret on a character, never past the line's content.
 pub(crate) fn clamp_normal(document: &Document, offset: CharOffset) -> CharOffset {
     let offset = offset.min(CharOffset(document.len_chars()));
@@ -366,116 +491,111 @@ pub(crate) fn clamp_normal(document: &Document, offset: CharOffset) -> CharOffse
 
 /// Skip to the start of the next Vim-style word.
 pub(crate) fn next_word_start(rope: &Rope, from: CharOffset) -> CharOffset {
-    let length = rope.len_chars();
-    let mut index = from.0.min(length);
-    if let Some(class) = character_at(rope, CharOffset(index)).and_then(run_class) {
-        while index < length
-            && character_at(rope, CharOffset(index)).and_then(run_class) == Some(class)
-        {
-            index += 1;
+    let mut scan = ForwardScan::new(rope, from.0);
+    if let Some(class) = scan.peek().and_then(run_class) {
+        while scan.peek().and_then(run_class) == Some(class) {
+            scan.skip();
         }
     }
-    while index < length && character_at(rope, CharOffset(index)).is_some_and(char::is_whitespace) {
-        index += 1;
+    while scan.peek().is_some_and(char::is_whitespace) {
+        scan.skip();
     }
-    CharOffset(index)
+    CharOffset(scan.index())
 }
 
 /// Skip to the start of the next WORD (a non-whitespace run).
 pub(crate) fn next_big_word_start(rope: &Rope, from: CharOffset) -> CharOffset {
-    let length = rope.len_chars();
-    let mut index = from.0.min(length);
-    if character_at(rope, CharOffset(index)).is_some_and(|character| !character.is_whitespace()) {
-        while index < length
-            && character_at(rope, CharOffset(index))
-                .is_some_and(|character| !character.is_whitespace())
+    let mut scan = ForwardScan::new(rope, from.0);
+    if scan
+        .peek()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        while scan
+            .peek()
+            .is_some_and(|character| !character.is_whitespace())
         {
-            index += 1;
+            scan.skip();
         }
     }
-    while index < length && character_at(rope, CharOffset(index)).is_some_and(char::is_whitespace) {
-        index += 1;
+    while scan.peek().is_some_and(char::is_whitespace) {
+        scan.skip();
     }
-    CharOffset(index)
+    CharOffset(scan.index())
 }
 
 /// End of the current or next word (`e`). From the end of one run the motion
 /// advances to the end of the next non-whitespace run, even when the class
 /// changes (`foo` to `.`).
 pub(crate) fn word_end(rope: &Rope, from: CharOffset) -> CharOffset {
-    let length = rope.len_chars();
-    let mut index = from.0.min(length);
-    while index < length && character_at(rope, CharOffset(index)).is_some_and(char::is_whitespace) {
-        index += 1;
+    let mut scan = ForwardScan::new(rope, from.0);
+    while scan.peek().is_some_and(char::is_whitespace) {
+        scan.skip();
     }
-    if index + 1 < length
-        && !character_at(rope, CharOffset(index)).is_some_and(char::is_whitespace)
-        && character_at(rope, CharOffset(index + 1)).is_some_and(|next| !next.is_whitespace())
-        && run_class(character_at(rope, CharOffset(index)).unwrap_or(' '))
-            != run_class(character_at(rope, CharOffset(index + 1)).unwrap_or(' '))
-    {
-        index += 1;
+    // A run boundary counts as the start of the next run for `e`.
+    if let (Some(current), Some(next)) = (scan.peek(), scan.peek_next()) {
+        if !current.is_whitespace()
+            && !next.is_whitespace()
+            && run_class(current) != run_class(next)
+        {
+            scan.skip();
+        }
     }
-    while index + 1 < length
-        && character_at(rope, CharOffset(index + 1)).is_some_and(|next| {
-            character_at(rope, CharOffset(index)).is_some_and(|current| {
-                run_class(current) == run_class(next) && !next.is_whitespace()
-            })
-        })
-    {
-        index += 1;
+    while let (Some(current), Some(next)) = (scan.peek(), scan.peek_next()) {
+        if next.is_whitespace() || run_class(current) != run_class(next) {
+            break;
+        }
+        scan.skip();
     }
-    CharOffset(index.min(length.saturating_sub(1)))
+    CharOffset(scan.index().min(rope.len_chars().saturating_sub(1)))
 }
 
 /// End of the current or next WORD (`E`).
 pub(crate) fn word_end_big(rope: &Rope, from: CharOffset) -> CharOffset {
-    let length = rope.len_chars();
-    let mut index = from.0.min(length);
-    while index < length && character_at(rope, CharOffset(index)).is_some_and(char::is_whitespace) {
-        index += 1;
+    let mut scan = ForwardScan::new(rope, from.0);
+    while scan.peek().is_some_and(char::is_whitespace) {
+        scan.skip();
     }
-    while index + 1 < length
-        && character_at(rope, CharOffset(index + 1)).is_some_and(|next| !next.is_whitespace())
-        && !character_at(rope, CharOffset(index)).is_some_and(char::is_whitespace)
-    {
-        index += 1;
+    while let (Some(current), Some(next)) = (scan.peek(), scan.peek_next()) {
+        if current.is_whitespace() || next.is_whitespace() {
+            break;
+        }
+        scan.skip();
     }
-    CharOffset(index.min(length.saturating_sub(1)))
+    CharOffset(scan.index().min(rope.len_chars().saturating_sub(1)))
 }
 
 /// Start of the previous word (`b`).
 pub(crate) fn previous_word_start(rope: &Rope, from: CharOffset) -> CharOffset {
-    let mut index = from.0.min(rope.len_chars());
-    while index > 0 && character_at(rope, CharOffset(index - 1)).is_some_and(char::is_whitespace) {
-        index -= 1;
+    let mut scan = BackwardScan::new(rope, from.0);
+    while scan.peek_prev().is_some_and(char::is_whitespace) {
+        scan.skip_prev();
     }
-    if index == 0 {
-        return CharOffset(0);
+    if scan.index() == 0 {
+        return CharOffset::ZERO;
     }
-    let class = character_at(rope, CharOffset(index - 1)).and_then(run_class);
-    while index > 0
-        && character_at(rope, CharOffset(index - 1)).and_then(run_class) == class
-        && !character_at(rope, CharOffset(index - 1)).is_some_and(char::is_whitespace)
+    let class = scan.peek_prev().and_then(run_class);
+    while scan.index() > 0
+        && scan.peek_prev().and_then(run_class) == class
+        && !scan.peek_prev().is_some_and(char::is_whitespace)
     {
-        index -= 1;
+        scan.skip_prev();
     }
-    CharOffset(index)
+    CharOffset(scan.index())
 }
 
 /// Start of the previous WORD (`B`).
 pub(crate) fn previous_big_word_start(rope: &Rope, from: CharOffset) -> CharOffset {
-    let mut index = from.0.min(rope.len_chars());
-    while index > 0 && character_at(rope, CharOffset(index - 1)).is_some_and(char::is_whitespace) {
-        index -= 1;
+    let mut scan = BackwardScan::new(rope, from.0);
+    while scan.peek_prev().is_some_and(char::is_whitespace) {
+        scan.skip_prev();
     }
-    while index > 0
-        && character_at(rope, CharOffset(index - 1))
-            .is_some_and(|character| !character.is_whitespace())
+    while scan
+        .peek_prev()
+        .is_some_and(|character| !character.is_whitespace())
     {
-        index -= 1;
+        scan.skip_prev();
     }
-    CharOffset(index)
+    CharOffset(scan.index())
 }
 
 /// Backward to the end of the previous word (`ge`). From the middle of a run
@@ -489,40 +609,47 @@ pub(crate) fn word_end_back(rope: &Rope, from: CharOffset) -> CharOffset {
     if index == 0 {
         return CharOffset::ZERO;
     }
-    if character_at(rope, CharOffset(index)).is_some_and(|character| !character.is_whitespace()) {
-        let class = character_at(rope, CharOffset(index)).and_then(run_class);
-        while index > 0
-            && character_at(rope, CharOffset(index - 1)).and_then(run_class) == class
-            && !character_at(rope, CharOffset(index - 1)).is_some_and(char::is_whitespace)
+    let at_caret = ForwardScan::new(rope, index).peek();
+    if at_caret.is_some_and(|character| !character.is_whitespace()) {
+        let class = at_caret.and_then(run_class);
+        let mut scan = BackwardScan::new(rope, index);
+        while scan.index() > 0
+            && scan.peek_prev().and_then(run_class) == class
+            && !scan.peek_prev().is_some_and(char::is_whitespace)
         {
-            index -= 1;
+            scan.skip_prev();
         }
+        index = scan.index();
     }
     if index == 0 {
         return CharOffset::ZERO;
     }
-    index -= 1;
-    while index > 0 && character_at(rope, CharOffset(index)).is_some_and(char::is_whitespace) {
-        index -= 1;
+    // Step back one char, then skip whitespace. The cursor is kept one past
+    // the scan index so `peek_prev()` reads the char at that index.
+    let mut whitespace = BackwardScan::new(rope, index);
+    while whitespace.index() > 1 && whitespace.peek_prev().is_some_and(char::is_whitespace) {
+        whitespace.skip_prev();
     }
-    if character_at(rope, CharOffset(index)).is_some_and(char::is_whitespace) {
-        return CharOffset(index);
+    let at_index = whitespace.peek_prev();
+    if at_index.is_some_and(char::is_whitespace) {
+        return CharOffset(whitespace.index() - 1);
     }
-    let class = character_at(rope, CharOffset(index)).and_then(run_class);
-    while index > 0
-        && character_at(rope, CharOffset(index - 1)).and_then(run_class) == class
-        && !character_at(rope, CharOffset(index - 1)).is_some_and(char::is_whitespace)
+    let class = at_index.and_then(run_class);
+    let mut scan = BackwardScan::new(rope, whitespace.index() - 1);
+    while scan.index() > 0
+        && scan.peek_prev().and_then(run_class) == class
+        && !scan.peek_prev().is_some_and(char::is_whitespace)
     {
-        index -= 1;
+        scan.skip_prev();
     }
-    let mut end = index;
-    while end + 1 < length
-        && character_at(rope, CharOffset(end + 1)).and_then(run_class) == class
-        && !character_at(rope, CharOffset(end + 1)).is_some_and(char::is_whitespace)
+    let mut end = ForwardScan::new(rope, scan.index());
+    while end
+        .peek_next()
+        .is_some_and(|next| run_class(next) == class && !next.is_whitespace())
     {
-        end += 1;
+        end.skip();
     }
-    CharOffset(end)
+    CharOffset(end.index())
 }
 
 pub fn first_non_space(document: &Document, line: LineIndex) -> CharOffset {

@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use chaus_core::document::Document;
 use chaus_core::position::{CharOffset, LineIndex, Selection};
 
-use crate::command_line::{CommandLine, CommandPrefix, History};
+use crate::command_line::{CommandLine, CommandPrefix, CompletionToken, History};
 use crate::ex_command::ExCommand;
 use crate::key::Key;
 use crate::mapping::Mapping;
@@ -88,6 +88,13 @@ pub struct Engine {
     queue: VecDeque<QueuedKey>,
     visual_anchor: Option<CharOffset>,
     command_line: Option<CommandLine>,
+    /// Per-engine, monotonically increasing identity of the current input
+    /// line. Never shared between editor windows.
+    pub(crate) command_generation: u64,
+    /// Orders Tab requests inside one line, including ones with no text change.
+    pub(crate) completion_sequence: u64,
+    /// The only request whose result may still be applied.
+    pub(crate) latest_completion: Option<CompletionToken>,
     ex_history: History,
     search_history: History,
     last_search: Option<(String, bool)>,
@@ -130,6 +137,9 @@ impl Engine {
             queue: VecDeque::new(),
             visual_anchor: None,
             command_line: None,
+            command_generation: 0,
+            completion_sequence: 0,
+            latest_completion: None,
             ex_history: History::default(),
             search_history: History::default(),
             last_search: None,
@@ -172,6 +182,7 @@ impl Engine {
         self.mapping_prefix.clear();
         self.queue.clear();
         self.command_line = None;
+        self.latest_completion = None;
         self.visual_anchor = None;
         if matches!(
             self.mode,
@@ -191,6 +202,7 @@ impl Engine {
         self.mapping_prefix.clear();
         self.queue.clear();
         self.command_line = None;
+        self.latest_completion = None;
         self.visual_anchor = None;
         self.insert_start = None;
         self.insert_keys = None;
@@ -405,7 +417,10 @@ impl Engine {
     /// Open an empty input line of the given kind.
     pub(crate) fn start_command_line(&mut self, prefix: CommandPrefix) -> Outcome {
         self.set_mode(Mode::CommandLine);
-        self.command_line = Some(CommandLine::new(prefix));
+        self.command_generation = self.command_generation.wrapping_add(1);
+        self.completion_sequence = 0;
+        self.latest_completion = None;
+        self.command_line = Some(CommandLine::new(prefix, self.command_generation));
         self.reset_count();
         Outcome::Handled
     }
@@ -419,7 +434,11 @@ impl Engine {
     }
 
     pub(crate) fn take_command_line(&mut self) -> Option<CommandLine> {
-        self.command_line.take()
+        let line = self.command_line.take();
+        if line.is_some() {
+            self.latest_completion = None;
+        }
+        line
     }
 
     /// The command line and the history that belongs to its kind.

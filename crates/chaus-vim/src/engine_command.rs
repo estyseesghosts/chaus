@@ -3,7 +3,7 @@
 use chaus_core::document::Document;
 use chaus_core::position::Selection;
 
-use crate::command_line::{CommandFull, CommandPrefix, MAX_COMMAND_CHARS};
+use crate::command_line::{CommandFull, CommandPrefix, CompletionToken, MAX_COMMAND_CHARS};
 use crate::engine::{Engine, Outcome};
 use crate::ex_command;
 use crate::key::Key;
@@ -20,11 +20,14 @@ pub struct CommandLineView<'a> {
     pub preedit: Option<&'a str>,
 }
 
-/// A path argument that Tab may complete. `revision` ties the eventual answer
-/// to the exact line it was computed for.
+/// A path argument that Tab may complete. `token` ties the eventual answer to
+/// the exact request it was computed for; no other state is needed to reject
+/// a late result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionRequest {
-    pub revision: u64,
+    /// Opaque identity of this request; a result is applied only if it still
+    /// matches the current line and the newest request.
+    pub token: CompletionToken,
     /// The partial path, with command-line quoting removed.
     pub typed: String,
     /// Whether the path was typed inside `"..."`. A quoted path never expands
@@ -177,34 +180,52 @@ impl Engine {
 
     /// Path completion is offered only for the path argument of `:e`, `:w`,
     /// `:saveas` and `:r`, and only with the caret at the end of the line.
-    #[must_use]
-    pub fn completion_request(&self) -> Option<CompletionRequest> {
-        let line = self.command_line_ref()?;
-        if line.prefix() != CommandPrefix::Ex || !line.caret_at_end() {
-            return None;
-        }
-        let argument = ex_command::path_argument(line.text())?;
+    /// Every call issues a new request; an earlier request from the same line
+    /// is no longer current even when the text did not change.
+    pub fn completion_request(&mut self) -> Option<CompletionRequest> {
+        let argument = {
+            let line = self.command_line_ref()?;
+            if line.prefix() != CommandPrefix::Ex || !line.caret_at_end() {
+                return None;
+            }
+            ex_command::path_argument(line.text())?
+        };
+        let sequence = self.completion_sequence.wrapping_add(1);
+        let token = self.command_line_ref()?.token(sequence);
+        self.completion_sequence = sequence;
+        self.latest_completion = Some(token);
         Some(CompletionRequest {
-            revision: line.revision(),
+            token,
             typed: argument.typed,
             quoted: argument.quoted,
         })
     }
 
-    /// Replace the path argument with `completed`, if the line is unchanged
-    /// since `revision`. `finished` closes an opened quote (a file was
-    /// chosen); a directory leaves it open for more typing. Returns a message
-    /// when the result cannot be applied.
+    /// Whether `token` is still the newest request of the open line. Callers
+    /// must check this before *any* observable effect, including error and
+    /// candidate-list statuses.
+    #[must_use]
+    pub fn is_completion_current(&self, token: &CompletionToken) -> bool {
+        self.latest_completion == Some(*token)
+            && self
+                .command_line_ref()
+                .is_some_and(|line| line.token(self.completion_sequence) == *token)
+    }
+
+    /// Replace the path argument with `completed` only if `token` is still the
+    /// newest request of the open line. `finished` closes an opened quote (a
+    /// file was chosen); a directory leaves it open for more typing. Returns
+    /// a message when a current result cannot be applied.
     pub fn apply_completion(
         &mut self,
-        revision: u64,
+        token: &CompletionToken,
         completed: &str,
         finished: bool,
     ) -> Option<String> {
-        let line = self.command_line_mut()?;
-        if line.revision() != revision {
+        if !self.is_completion_current(token) {
             return None;
         }
+        let line = self.command_line_mut()?;
         let argument = ex_command::path_argument(line.text())?;
         let spelled = if argument.quoted {
             if completed.contains('"') {

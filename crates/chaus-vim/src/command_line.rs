@@ -64,14 +64,40 @@ impl History {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CommandFull;
 
+/// Opaque identity of one Tab request on one command line.
+///
+/// `generation` changes when a new line opens, `revision` changes with the
+/// line's text, and `sequence` orders repeated Tab presses that leave the text
+/// alone. All three are owned by the `Engine` (and therefore by one editor
+/// window); no process-wide counter is involved. A result is applied only when
+/// the whole token still matches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompletionToken {
+    generation: u64,
+    revision: u64,
+    sequence: u64,
+}
+
+impl CompletionToken {
+    pub(crate) fn new(generation: u64, revision: u64, sequence: u64) -> Self {
+        Self {
+            generation,
+            revision,
+            sequence,
+        }
+    }
+}
+
 /// The active input line.
 #[derive(Debug)]
 pub(crate) struct CommandLine {
     prefix: CommandPrefix,
     text: String,
     caret: usize,
-    /// Bumped on every text change so an asynchronous completion can tell
-    /// whether the line it was computed for still exists.
+    /// Identifies this session. It changes for every new line, so a revision
+    /// from a previous line cannot collide with one from this line.
+    generation: u64,
+    /// Bumped on every text change within this session.
     revision: u64,
     /// Index into the history while browsing it, and the unsent draft that
     /// returning past the newest entry restores.
@@ -82,11 +108,12 @@ pub(crate) struct CommandLine {
 }
 
 impl CommandLine {
-    pub(crate) fn new(prefix: CommandPrefix) -> Self {
+    pub(crate) fn new(prefix: CommandPrefix, generation: u64) -> Self {
         Self {
             prefix,
             text: String::new(),
             caret: 0,
+            generation,
             revision: 0,
             browsing: None,
             draft: String::new(),
@@ -116,6 +143,10 @@ impl CommandLine {
 
     pub(crate) fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub(crate) fn token(&self, sequence: u64) -> CompletionToken {
+        CompletionToken::new(self.generation, self.revision(), sequence)
     }
 
     pub(crate) fn caret_at_end(&self) -> bool {

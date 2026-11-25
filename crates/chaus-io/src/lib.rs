@@ -186,15 +186,41 @@ fn looks_binary(bytes: &[u8]) -> bool {
     nul_count as f64 / sample.len() as f64 > BINARY_NUL_RATIO
 }
 
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+/// Fixed working buffer: hashing a 100 MiB target must not allocate 100 MiB.
+const FINGERPRINT_CHUNK: usize = 64 * 1024;
+
+fn fnv1a(hash: u64, bytes: &[u8]) -> u64 {
+    let mut hash = hash;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
 /// FNV-1a, used only for change detection inside one process lifetime.
 #[must_use]
 pub fn fingerprint(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    fnv1a(FNV_OFFSET_BASIS, bytes)
+}
+
+/// Streams the same FNV-1a fingerprint as [`fingerprint`] through a fixed buffer.
+///
+/// Every chunk folds into the running hash, so the result is identical to
+/// hashing the whole byte sequence at once. Read errors reach the caller:
+/// inspection must not silently degrade into "unchanged".
+pub fn fingerprint_reader<R: Read>(mut reader: R) -> Result<u64, std::io::Error> {
+    let mut hash = FNV_OFFSET_BASIS;
+    let mut buffer = [0_u8; FINGERPRINT_CHUNK];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(hash);
+        }
+        hash = fnv1a(hash, &buffer[..read]);
     }
-    hash
 }
 
 fn file_identity(path: &Path) -> Option<FileIdentity> {
@@ -325,8 +351,11 @@ pub fn metadata_matches(meta: &FileMeta) -> bool {
 /// never as "unchanged": proceeding with the save would overwrite content that
 /// could not be inspected.
 pub fn check_conflict(meta: &FileMeta) -> Result<(), ConflictCheckError> {
-    let current = match fs::read(&meta.canonical_target) {
-        Ok(bytes) => bytes,
+    // Open first so a missing target stays a deletion conflict. A directory or
+    // a read error after a successful open is an inspection failure, never a
+    // clean result: callers may be about to overwrite it.
+    let file = match File::open(&meta.canonical_target) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(ConflictCheckError::Conflict(SaveConflict::DeletedOnDisk));
         }
@@ -337,11 +366,17 @@ pub fn check_conflict(meta: &FileMeta) -> Result<(), ConflictCheckError> {
             });
         }
     };
+    let current = fingerprint_reader(file).map_err(|source| ConflictCheckError::Io {
+        path: meta.canonical_target.clone(),
+        source,
+    })?;
+    // Identity is checked after hashing, not as a shortcut: an unreadable
+    // replacement must still surface as Io rather than an already-known change.
     let identity_changed = match (meta.identity, platform_identity(&meta.canonical_target)) {
         (Some(expected), Some(actual)) => expected != actual,
         _ => false,
     };
-    if identity_changed || fingerprint(&current) != meta.fingerprint {
+    if identity_changed || current != meta.fingerprint {
         return Err(ConflictCheckError::Conflict(SaveConflict::ChangedOnDisk));
     }
     Ok(())

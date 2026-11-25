@@ -19,7 +19,7 @@ mod operator;
 mod register;
 mod viewport;
 
-pub use command_line::{CommandPrefix, MAX_COMMAND_CHARS, MAX_HISTORY};
+pub use command_line::{CommandPrefix, CompletionToken, MAX_COMMAND_CHARS, MAX_HISTORY};
 pub use engine::{Engine, Outcome};
 pub use engine_command::{CommandLineView, CompletionRequest};
 pub use ex_command::{ExCommand, ExPath};
