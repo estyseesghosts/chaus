@@ -3,25 +3,31 @@
     Native Windows smoke test for a packaged chaus executable.
 
 .DESCRIPTION
-    Copies the executable and a fixture into a temporary directory and a
-    temporary profile, launches it, and drives it with real keyboard/mouse
-    input. It proves window creation, focus, typing, clipboard, save, resize,
-    Vim toggle, the dirty-close sheet, and (unless -SkipDialogs) the Win32
-    open/save dialogs.
+    Copies the executable and fixtures into a temporary work directory and a
+    temporary profile, launches the packaged copy, and drives it with real
+    keyboard and mouse input. It proves window creation, focus, typing,
+    clipboard, save, resize, Vim toggle and the dirty-close sheet.
 
-    This script controls the real desktop. Run it on a dedicated machine or CI
-    runner, never while using the computer.
+    The file-panel phase uses the real Silvestris OpenPanel and SavePanel at
+    the pinned Chaus revision. Open is an application-modal browser window;
+    Save As is a sheet with a Name field that resolves relative to the
+    panel's current location. No Win32 file dialog is involved and no panel
+    internals are called. The fixture document is opened from the temporary
+    work directory so both panels start at a deterministic location.
+
+    This script controls the real desktop. Run it on a dedicated machine or
+    an interactive runner, never while using the computer.
 
 .PARAMETER Exe
-    Path to chaus.exe. It is copied before launch; the checkout is not used as
-    the working directory.
+    Path to chaus.exe. It is copied before launch; the checkout is not used
+    as the working directory.
 
 .PARAMETER ReportDir
     Directory for smoke-report.json. Defaults to a new directory under TEMP.
 
-.PARAMETER SkipDialogs
-    Skip the Open/Save As dialog phase (for runners without a usable desktop
-    dialog stack).
+.PARAMETER SkipPanels
+    Skip the OpenPanel/SavePanel phase for machines without a usable desktop.
+    Alias: SkipDialogs (the old name from the Win32-dialog script).
 
 .PARAMETER Screenshots
     Save PNG screenshots at the end of each phase. They are evidence only and
@@ -34,7 +40,8 @@ param(
 
     [string]$ReportDir = "",
 
-    [switch]$SkipDialogs,
+    [Alias('SkipDialogs')]
+    [switch]$SkipPanels,
 
     [switch]$Screenshots
 )
@@ -46,10 +53,15 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public static class ChausSmokeNative {
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+    public delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr l);
+    [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int max);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, IntPtr e);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
@@ -102,6 +114,125 @@ function Send-Literal([string]$Text) {
     Send-Keys $escaped
 }
 
+function Set-ClipboardText([string]$Text) {
+    [System.Windows.Forms.Clipboard]::SetText($Text)
+    Start-Sleep -Milliseconds 150
+}
+
+function Paste-Literal([string]$Text) {
+    Set-ClipboardText $Text
+    Send-Keys "^a"
+    Send-Keys "^v"
+}
+
+function Get-ForegroundTitle() {
+    $handle = [ChausSmokeNative]::GetForegroundWindow()
+    $builder = New-Object System.Text.StringBuilder 512
+    [void][ChausSmokeNative]::GetWindowText($handle, $builder, 512)
+    return $builder.ToString()
+}
+
+function Get-AppWindows([int]$ProcessId) {
+    $windows = New-Object System.Collections.ArrayList
+    $callback = [ChausSmokeNative+EnumWindowsProc]{
+        param($handle, $unused)
+        if (-not [ChausSmokeNative]::IsWindowVisible($handle)) { return $true }
+        $owner = [uint32]0
+        [void][ChausSmokeNative]::GetWindowThreadProcessId($handle, [ref]$owner)
+        if ($owner -ne $ProcessId) { return $true }
+        $builder = New-Object System.Text.StringBuilder 512
+        [void][ChausSmokeNative]::GetWindowText($handle, $builder, 512)
+        if ($builder.Length -gt 0) {
+            [void]$windows.Add([pscustomobject]@{
+                handle = $handle
+                title = $builder.ToString()
+            })
+        }
+        return $true
+    }
+    [void][ChausSmokeNative]::EnumWindows($callback, [IntPtr]::Zero)
+    return ,$windows.ToArray()
+}
+
+function Get-AppWindowTitles([int]$ProcessId) {
+    return @(Get-AppWindows $ProcessId | ForEach-Object { $_.title })
+}
+
+function Wait-WindowTitle(
+    [System.Diagnostics.Process]$Process,
+    [string]$Title,
+    [int]$Seconds = 15
+) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Get-AppWindowTitles $Process.Id -contains $Title) { return }
+        Start-Sleep -Milliseconds 150
+    }
+    $titles = Get-AppWindowTitles $Process.Id
+    throw "the window titled '$Title' did not appear (windows: $($titles -join ', '))"
+}
+
+function Wait-WindowGone(
+    [System.Diagnostics.Process]$Process,
+    [string]$Title,
+    [int]$Seconds = 15
+) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Get-AppWindowTitles $Process.Id -notcontains $Title) { return }
+        Start-Sleep -Milliseconds 150
+    }
+    throw "the window titled '$Title' did not close"
+}
+
+function Assert-ForegroundOwner(
+    [System.Diagnostics.Process]$Process,
+    [string]$ExpectedTitle = ""
+) {
+    $title = Get-ForegroundTitle
+    $window = Get-AppWindows $Process.Id | Where-Object { $_.title -eq $title } | Select-Object -First 1
+    Assert-True ($null -ne $window) "foreground window '$title' does not belong to the app"
+    if ($ExpectedTitle) {
+        Assert-True ($title -eq $ExpectedTitle) "expected '$ExpectedTitle' in the foreground, got '$title'"
+    }
+}
+
+function Focus-AppWindow(
+    [System.Diagnostics.Process]$Process,
+    [string]$Title
+) {
+    $window = Get-AppWindows $Process.Id | Where-Object { $_.title -eq $Title } | Select-Object -First 1
+    Assert-True ($null -ne $window) "cannot focus missing window '$Title'"
+    [void][ChausSmokeNative]::ShowWindow($window.handle, 9)
+    [void][ChausSmokeNative]::SetForegroundWindow($window.handle)
+    Start-Sleep -Milliseconds 400
+    $rect = New-Object ChausSmokeNative+RECT
+    Assert-True ([ChausSmokeNative]::GetWindowRect($window.handle, [ref]$rect)) "GetWindowRect failed"
+    [void][ChausSmokeNative]::SetCursorPos(
+        [int](($rect.Left + $rect.Right) / 2),
+        [int](($rect.Top + $rect.Bottom) / 2)
+    )
+    [ChausSmokeNative]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
+    [ChausSmokeNative]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 400
+    Assert-ForegroundOwner $Process $Title
+}
+
+function Wait-PanelForeground(
+    [System.Diagnostics.Process]$Process,
+    [string]$Title
+) {
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $deadline) {
+        if ((Get-ForegroundTitle) -eq $Title) {
+            Assert-ForegroundOwner $Process $Title
+            return
+        }
+        Start-Sleep -Milliseconds 150
+    }
+    throw "the Silvestris panel '$Title' did not take the foreground (got '$(Get-ForegroundTitle)')"
+}
+
 function Get-AppRect([System.Diagnostics.Process]$Process) {
     $Process.Refresh()
     Assert-True ($Process.MainWindowHandle -ne [IntPtr]::Zero) "the process has no main window"
@@ -145,10 +276,7 @@ function Focus-App([System.Diagnostics.Process]$Process) {
     [ChausSmokeNative]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 400
 
-    $foreground = [ChausSmokeNative]::GetForegroundWindow()
-    $foregroundPid = [uint32]0
-    [void][ChausSmokeNative]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
-    Assert-True ($foregroundPid -eq $Process.Id) "the app window did not become foreground (got pid $foregroundPid)"
+    Assert-ForegroundOwner $Process
 }
 
 function Save-Screenshot([System.Diagnostics.Process]$Process, [string]$Name) {
@@ -217,7 +345,7 @@ function Close-App([System.Diagnostics.Process]$Process, [int]$Seconds = 15) {
 }
 
 function Read-Fixture([string]$Name) {
-    return Get-Content -Raw (Join-Path $script:WorkDir $Name)
+    return Get-Content -Raw -LiteralPath (Join-Path $script:WorkDir $Name)
 }
 
 function Write-Fixture([string]$Name, [string]$Text) {
@@ -229,8 +357,8 @@ function Write-Fixture([string]$Name, [string]$Text) {
 function Wait-FileText([string]$Path, [scriptblock]$Predicate, [int]$Seconds = 10) {
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
-        if (Test-Path $Path) {
-            $text = Get-Content -Raw $Path
+        if (Test-Path -LiteralPath $Path) {
+            $text = Get-Content -Raw -LiteralPath $Path
             if (& $Predicate $text) { return $text }
         }
         Start-Sleep -Milliseconds 150
@@ -246,14 +374,132 @@ function New-Marker() {
     return "SMOKE" + (Get-Date).ToUniversalTime().ToString("HHmmss")
 }
 
-function Run-Smoke() {
-    New-SmokeDir $script:Root
-    New-SmokeDir $script:AppDir
-    New-SmokeDir $script:WorkDir
-    New-SmokeDir $script:ReportDir
-    Copy-Item -LiteralPath $Exe -Destination (Join-Path $script:AppDir "chaus.exe") -Force
-    Assert-True (Test-Path (Join-Path $script:AppDir "chaus.exe")) "the executable was not copied"
+function Open-SaveSheet([string]$Name, [bool]$UseClipboard = $false) {
+    Send-Keys "^+s"
+    Start-Sleep -Milliseconds 1200
+    if ($UseClipboard) {
+        Paste-Literal $Name
+    } else {
+        Send-Literal $Name
+    }
+}
 
+function Invoke-SaveSheet([string]$Name, [bool]$UseClipboard = $false) {
+    Open-SaveSheet $Name $UseClipboard
+    Send-Keys "{ENTER}"
+}
+
+function Run-PanelPhases() {
+    # The named document makes both panels start in the temporary work
+    # directory instead of the provider's home or the checkout.
+    $baseName = "panel-base.txt"
+    $basePath = Write-Fixture $baseName "panel starting document"
+    $openName = "open-me.txt"
+    $openPath = Write-Fixture $openName "opened through the browser"
+    $panelApp = Start-SmokeApp $baseName $basePath
+
+    # Open: keyboard acceptance through the real browser.
+    Send-Keys "^o"
+    Wait-PanelForeground $panelApp "Chaus: Open"
+    Add-Step "open-panel" "Ctrl+O presented the Silvestris browser at the work directory"
+    Send-Keys "{TAB}{TAB}" # sidebar, then the file browser
+    Start-Sleep -Milliseconds 300
+    Send-Literal $openName # type-select in the browser
+    Start-Sleep -Milliseconds 300
+    Send-Keys "{ENTER}"
+    Wait-WindowTitle $panelApp $openName 15
+    Assert-ForegroundOwner $panelApp $openName
+    Assert-True ((Get-Content -Raw -LiteralPath $openPath) -eq "opened through the browser") `
+        "the accepted document was modified"
+    Add-Step "open-accept" "selected $openName in the browser and accepted with Return"
+    Assert-True ((Get-AppWindowTitles $panelApp.Id) -contains $baseName) `
+        "opening a document replaced the original editor window"
+
+    # Open: Escape cancels without creating a window and restores focus.
+    Focus-AppWindow $panelApp $openName
+    Send-Keys "^o"
+    Wait-PanelForeground $panelApp "Chaus: Open"
+    Send-Keys "{ESC}"
+    Wait-WindowGone $panelApp "Chaus: Open" 8
+    Assert-ForegroundOwner $panelApp $openName
+    Add-Step "open-cancel" "Escape dismissed the browser, opened nothing and restored editor focus"
+
+    # Save As: only the target filename is typed; the panel resolves it
+    # relative to the current location.
+    $saveName = "saved-as.txt"
+    $savePath = Join-Path $script:WorkDir $saveName
+    Invoke-SaveSheet $saveName
+    Wait-FileText $savePath { param($value) $value.Contains("opened through the browser") }
+    Wait-WindowTitle $panelApp $saveName 15
+    Add-Step "save-as-accept" "typed only $saveName in the Name field; the panel resolved it in the work directory"
+
+    # Save As: Escape writes nothing and restores focus.
+    $cancelName = "cancel-as.txt"
+    Open-SaveSheet $cancelName
+    Send-Keys "{ESC}"
+    Start-Sleep -Milliseconds 700
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:WorkDir $cancelName))) `
+        "a cancelled Save As still wrote a file"
+    Assert-ForegroundOwner $panelApp $saveName
+    Add-Step "save-as-cancel" "Escape dismissed the Save sheet without writing"
+
+    # Replace existing: the panel asks first; Return takes the default
+    # Replace button and the document becomes associated with the target.
+    $replaceName = "replace-target.txt"
+    $replacePath = Write-Fixture $replaceName "old contents"
+    Invoke-SaveSheet $replaceName
+    Wait-WindowTitle $panelApp "Replace" 15
+    Assert-ForegroundOwner $panelApp "Replace"
+    Send-Keys "{ENTER}"
+    Wait-FileText $replacePath { param($value) $value.Contains("opened through the browser") }
+    Wait-WindowTitle $panelApp $replaceName 15
+    Add-Step "replace-existing" "Replace confirmed the collision and wrote the existing target"
+
+    # Replace cancel returns to the sheet; a second Escape leaves the target
+    # and the document association alone.
+    $keepName = "keep-target.txt"
+    $keepPath = Write-Fixture $keepName "keep me"
+    Invoke-SaveSheet $keepName
+    Wait-WindowTitle $panelApp "Replace" 15
+    Send-Keys "{ESC}"
+    Start-Sleep -Milliseconds 500
+    Send-Keys "{ESC}"
+    Start-Sleep -Milliseconds 700
+    Assert-True ((Get-Content -Raw -LiteralPath $keepPath) -eq "keep me") `
+        "cancelling Replace overwrote the existing target"
+    Assert-ForegroundOwner $panelApp $replaceName
+    Add-Step "replace-cancel" "Escape on the alert returned to the sheet; Escape there kept the target"
+
+    # Unicode filename: paste avoids layout-dependent SendKeys behaviour but
+    # still goes through the real Name field and the real browser provider.
+    $unicodeName = "n" + [char]0x00F6 + "te-" + [char]0x6587 + [char]0x4EF6 + ".txt"
+    $unicodePath = Join-Path $script:WorkDir $unicodeName
+    Invoke-SaveSheet $unicodeName $true
+    Wait-FileText $unicodePath { param($value) $value.Contains("opened through the browser") }
+    Wait-WindowTitle $panelApp $unicodeName 15
+    Add-Step "unicode-save-as" "a pasted Unicode name round-tripped through the Name field"
+
+    # Dirty close on an untitled window routes Save through SavePanel.
+    Send-Keys "^n"
+    Start-Sleep -Milliseconds 800
+    Send-Literal "DIRTYCLOSE"
+    Send-Keys "%{F4}"
+    Start-Sleep -Milliseconds 1200
+    $untitledSaved = "dirty-close-save.txt"
+    $untitledPath = Join-Path $script:WorkDir $untitledSaved
+    Assert-True (-not $panelApp.HasExited) "the dirty window closed without asking"
+    Send-Keys "{ENTER}" # the close sheet focuses its Save button
+    Start-Sleep -Milliseconds 1200
+    Paste-Literal $untitledSaved
+    Send-Keys "{ENTER}"
+    Wait-FileText $untitledPath { param($value) $value.Contains("DIRTYCLOSE") }
+    Add-Step "dirty-close-save-as" "dirty close -> Save used the real Save sheet for an untitled document"
+    Assert-ForegroundOwner $panelApp $unicodeName
+
+    Close-App $panelApp
+}
+
+function Run-BasicPhases() {
     $marker = New-Marker
     $path = Write-Fixture "sample.txt" "titlebar smoke"
     $app = Start-SmokeApp "sample.txt" $path
@@ -319,34 +565,18 @@ function Run-Smoke() {
     [void](Wait-FileText $closePath { param($value) $value.Contains($marker) })
     Add-Step "dirty-close" "Alt+F4 showed the sheet, Escape cancelled, save preserved the edit"
     Close-App $close
+}
 
-    if (-not $SkipDialogs) {
-        $openPath = Write-Fixture "open-me.txt" "dialog smoke"
-        $dialog = Start-SmokeApp "Untitled"
-        Send-Keys "^o"
-        Start-Sleep -Milliseconds 1200
-        $foreground = [ChausSmokeNative]::GetForegroundWindow()
-        $foregroundPid = [uint32]0
-        [void][ChausSmokeNative]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
-        Assert-True ($foregroundPid -eq $dialog.Id) "the Open dialog did not take foreground"
-        Send-Literal $openPath
-        Send-Keys "{ENTER}"
-        Wait-AppWindow $dialog "open-me.txt" 15
-        Add-Step "open-dialog" "typed a full path into the Win32 Open dialog"
+function Run-Smoke() {
+    New-SmokeDir $script:Root
+    New-SmokeDir $script:AppDir
+    New-SmokeDir $script:WorkDir
+    New-SmokeDir $script:ReportDir
+    Copy-Item -LiteralPath $Exe -Destination (Join-Path $script:AppDir "chaus.exe") -Force
+    Assert-True (Test-Path -LiteralPath (Join-Path $script:AppDir "chaus.exe")) "the executable was not copied"
 
-        $saveAs = Join-Path $script:WorkDir "saved-as.txt"
-        Send-Keys "^+s"
-        Start-Sleep -Milliseconds 1200
-        Send-Literal $saveAs
-        Send-Keys "{ENTER}"
-        $deadline = (Get-Date).AddSeconds(10)
-        while (-not (Test-Path $saveAs) -and (Get-Date) -lt $deadline) {
-            Start-Sleep -Milliseconds 150
-        }
-        Assert-True (Test-Path $saveAs) "Save As did not create $saveAs"
-        Add-Step "save-as-dialog" "typed a full path into the Win32 Save As dialog"
-        Close-App $dialog
-    }
+    Run-BasicPhases
+    if (-not $SkipPanels) { Run-PanelPhases }
 }
 
 $failure = $null
@@ -374,9 +604,10 @@ try {
         executable = $exePath
         sha256 = (Get-FileHash -Algorithm SHA256 -Path $exePath).Hash.ToLowerInvariant()
         os = [Environment]::OSVersion.VersionString
+        panels = "Silvestris OpenPanel/SavePanel (pinned f1c2a010)"
         steps = $script:Steps
         failure = $failure
-        skipped_dialogs = [bool]$SkipDialogs
+        skipped_panels = [bool]$SkipPanels
         root = $script:Root
     }
     $report | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $script:ReportDir "smoke-report.json")

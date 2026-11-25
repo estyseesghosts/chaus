@@ -95,8 +95,12 @@ becomes a loaded or written document.
 ## Manual acceptance still required
 
 Headless tests prove the panel-outcome → load/save state machine and GPUI
-dispatch, not native window management. Before release, run this matrix on real
-Windows and Linux desktops:
+dispatch, not native window management. Before release, run the interactive
+`.github/workflows/native-gui.yml` gate on self-hosted Windows and X11 runners;
+`scripts/smoke/windows.ps1` and `scripts/smoke/linux.sh` cover panel accept,
+Escape cancel, filename-only Save As, Replace and Replace-cancel, Unicode
+names, focus restoration and dirty-close routing with real keyboard input.
+Before release, also run this manual matrix on real Windows and Linux desktops:
 
 - File → Open and Save As in Aqua Light, Aqua Dark, Geist Light, Geist Dark.
 - List, Icon and Column views; large directories; hidden files; inaccessible

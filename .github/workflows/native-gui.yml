@@ -1,0 +1,83 @@
+name: Native GUI smoke
+
+# Hosted runners do not provide a reliable interactive foreground desktop, so
+# GUI automation is a separate gate on self-hosted runners with real sessions.
+# This workflow never replaces verify.yml: fmt, clippy, unit tests and the CLI
+# check stay there and in release.yml. Both release jobs must have a recent
+# green run of this workflow recorded in the release checklist.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-gui
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    # The runner must be logged into an interactive desktop and left alone for
+    # the duration of the job. The script moves the real mouse and keyboard.
+    runs-on: [self-hosted, desktop, windows]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the packaged executable
+        run: cargo build --release --locked -p chaus-app --bin chaus
+
+      - name: Drive the Silvestris panels on the real desktop
+        shell: pwsh
+        run: |
+          ./scripts/smoke/windows.ps1 `
+            -Exe (Resolve-Path 'target/release/chaus.exe') `
+            -ReportDir "${{ runner.temp }}/chaus-native-gui"
+
+      - name: Upload the smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-gui-windows
+          path: ${{ runner.temp }}/chaus-native-gui/**
+          if-no-files-found: warn
+
+  linux:
+    # Requires an X11 session (XWayland is acceptable for this smoke, not for
+    # native Wayland DPI acceptance), xdotool, wmctrl, xclip and ImageMagick.
+    runs-on: [self-hosted, desktop, linux]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install desktop automation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xdotool wmctrl xclip imagemagick
+
+      - name: Install GPUI build dependencies
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake clang lld llvm \
+            libasound2-dev libfontconfig-dev libglib2.0-dev libssl-dev \
+            libva-dev libvulkan1 libwayland-dev libx11-xcb-dev \
+            libxkbcommon-x11-dev libzstd-dev
+
+      - name: Build the packaged executable
+        run: cargo build --release --locked -p chaus-app --bin chaus
+
+      - name: Drive the Silvestris panels on the real desktop
+        shell: bash
+        run: |
+          ./scripts/smoke/linux.sh \
+            --exe target/release/chaus \
+            --report-dir "${RUNNER_TEMP}/chaus-native-gui"
+
+      - name: Upload the smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-gui-linux
+          path: ${{ runner.temp }}/chaus-native-gui/**
+          if-no-files-found: warn

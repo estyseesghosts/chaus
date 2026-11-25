@@ -152,4 +152,18 @@ The output is one ELF, not a universally static binary. Ordinary glibc, libstdc+
 
 ## What a release build does not prove
 
-`cargo test`, `cargo clippy` and a successful link do not cover window creation, focus, IME, clipboard, file dialogs, DPI scaling, theme switching or clean-machine startup. Run a native smoke pass on a machine with a desktop before shipping, and record the toolchain target, dependency pins, source SHA and binary hash with the release.
+`cargo test`, `cargo clippy` and a successful link do not cover window creation, focus, IME, clipboard, the Silvestris file panels, DPI scaling, theme switching or clean-machine startup. `verify.yml` deliberately stops at the CLI smoke check: a hosted runner cannot be trusted to keep a foreground desktop.
+
+The native GUI gate is a separate workflow, `.github/workflows/native-gui.yml`, on self-hosted runners with interactive Windows and X11 desktops. It builds the release binary outside the checkout's working directory and runs:
+
+```powershell
+./scripts/smoke/windows.ps1 -Exe target/release/chaus.exe
+```
+
+```sh
+./scripts/smoke/linux.sh --exe target/release/chaus
+```
+
+Both scripts open a named document in a temporary work directory, then drive the pinned `OpenPanel` and `SavePanel` with real input: Open accept and Escape cancel through the browser, Save As accept with a filename only, Save As cancel, Replace accept and cancel, a Unicode name, and dirty-close routing through Save As. The Windows script also checks typing, clipboard, resize, Vim toggle and the close sheet. Each writes `smoke-report.json` with the binary hash and the executed steps.
+
+Release checklist: require a green `Native GUI smoke` run for both platforms against the exact source SHA, attach both reports to the release record, then record the toolchain target, dependency pins, source SHA and binary hash. Manual DPI, theme and native-Wayland rows from [file panels](file-panels.md#manual-acceptance-still-required) remain a human sign-off; the automation does not replace them.
