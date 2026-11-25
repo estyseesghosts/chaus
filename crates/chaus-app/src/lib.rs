@@ -6,9 +6,11 @@
 pub mod app;
 pub mod diagnostics;
 
+pub mod font_validation;
 pub mod fonts;
 mod platform;
 mod preferences;
 mod settings_global;
+pub mod settings_writer;
 pub mod theme_choice;
 pub mod ui_preferences;

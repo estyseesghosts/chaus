@@ -15,6 +15,7 @@ use silvestris::{chrome, ThemePreference};
 
 use crate::preferences::open_preferences;
 use crate::settings_global::SettingsGlobal;
+use crate::settings_writer::{install_writer, SettingsWriterGlobal};
 use crate::theme_choice::theme_id;
 
 static WINDOW_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -92,15 +93,6 @@ pub(crate) fn settings_path() -> Option<PathBuf> {
         .map(|home| home.join(".chausrc"))
 }
 
-/// Persist Preferences-owned settings to the rc file, preserving comments and
-/// unrelated settings.
-pub(crate) fn save_settings(settings: &Settings) -> std::io::Result<()> {
-    let Some(path) = settings_path() else {
-        return Ok(());
-    };
-    chaus_io::write_settings_rc(&path, settings)
-}
-
 /// Push a settings snapshot to every open editor window.
 ///
 /// Preferences changes must not recreate document entities: `set_settings`
@@ -115,7 +107,7 @@ pub(crate) fn apply_to_open_editors(settings: &Settings, cx: &mut App) {
         };
         let settings = settings.clone();
         let _ = handle.update(cx, |editor, _, cx| {
-            editor.set_settings(settings);
+            editor.set_settings(settings, cx);
             cx.notify();
         });
     }
@@ -185,10 +177,14 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
             Err(error) => eprintln!("chaus: {error}; using the theme's default UI font"),
         }
         install_settings(cx, settings.clone());
+        install_writer(cx, settings_path());
         crate::ui_preferences::install_file_dialogs(cx);
         chaus_editor::bind_keys(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
+                if let Some(writer) = cx.try_global::<SettingsWriterGlobal>() {
+                    writer.0.read(cx).flush_on_exit();
+                }
                 cx.quit();
             }
         })

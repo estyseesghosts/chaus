@@ -22,7 +22,7 @@ use silvestris::preferences::{Form, FormRow};
 use silvestris::window_role::{role_options, WindowRole};
 use silvestris::{chrome, ActiveTheme, ThemePreference};
 
-use crate::app::{apply_to_open_editors, read_settings, save_settings, settings_path};
+use crate::app::{apply_to_open_editors, read_settings, settings_path};
 use crate::settings_global::SettingsGlobal;
 use crate::theme_choice::theme_id;
 
@@ -100,31 +100,34 @@ impl Preferences {
         }
     }
 
-    /// Accept an installed family; otherwise keep the theme default and say
-    /// why, so GPUI never silently falls back to an arbitrary platform face.
+    /// Accept an installed family, or an explicit empty reset to the theme
+    /// default. An uninstalled typo keeps the last committed family and surface
+    /// a warning; it never clears a valid explicit choice or writes settings.
     fn set_font_family(&mut self, family: String, cx: &mut Context<Self>) {
-        if family.is_empty() {
-            self.settings.font_family = None;
-            self.font_warning = None;
-            self.apply(cx);
-            return;
+        let available = cx.text_system().all_font_names();
+        let decision = crate::font_validation::decide_font_family(
+            &family,
+            self.settings.font_family.as_deref(),
+            |name| available.iter().any(|item| item.eq_ignore_ascii_case(name)),
+            cx.theme().type_.mono,
+        );
+        match decision {
+            crate::font_validation::FontDecision::Reset => {
+                self.settings.font_family = None;
+                self.font_warning = None;
+                self.apply(cx);
+            }
+            crate::font_validation::FontDecision::Accept(family) => {
+                self.settings.font_family = Some(family);
+                self.font_warning = None;
+                self.apply(cx);
+            }
+            crate::font_validation::FontDecision::Keep { retained, warning } => {
+                self.settings.font_family = retained;
+                self.font_warning = Some(warning);
+                cx.notify();
+            }
         }
-        let available = cx
-            .text_system()
-            .all_font_names()
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(&family));
-        if available {
-            self.settings.font_family = Some(family);
-            self.font_warning = None;
-        } else {
-            self.settings.font_family = None;
-            self.font_warning = Some(format!(
-                "\"{family}\" is not installed; using the theme default ({}).",
-                cx.theme().type_.mono
-            ));
-        }
-        self.apply(cx);
     }
 
     fn reset_font(&mut self, cx: &mut Context<Self>) {
@@ -153,9 +156,14 @@ impl Preferences {
         );
         self.update_placeholder(cx);
         apply_to_open_editors(&self.settings, cx);
-        self.save_error = save_settings(&self.settings)
-            .err()
-            .map(|error| format!("Could not save preferences: {error}"));
+        // Apply in memory immediately; persistence runs independently on the
+        // serialized background writer. Errors are bound to their generation
+        // and shown until a newer write succeeds.
+        if let Some(writer) = cx.try_global::<crate::settings_writer::SettingsWriterGlobal>() {
+            let handle = writer.0.clone();
+            handle.update(cx, |writer, cx| writer.enqueue(self.settings.clone(), cx));
+            self.save_error = handle.read(cx).visible_error();
+        }
         cx.notify();
     }
 
