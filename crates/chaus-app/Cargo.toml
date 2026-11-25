@@ -33,7 +33,7 @@ windows-sys = { version = "0.61", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_linux = { git = "https://github.com/zed-industries/zed", rev = "6b720973027999bae402df23d469026f4cced988", default-features = false, features = ["wayland", "x11"] }
 
-[target.'cfg(windows)'.build-dependencies]
+[build-dependencies]
 embed-resource = "3.0.12"
 
 [dev-dependencies]
