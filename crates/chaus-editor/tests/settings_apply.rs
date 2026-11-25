@@ -73,7 +73,7 @@ fn applying_settings_keeps_text_selection_history_focus_and_file_state() {
     settings.vim = true;
 
     cx.update(|_, cx| {
-        editor.update(cx, |editor, _| editor.set_settings(settings));
+        editor.update(cx, |editor, cx| editor.set_settings(settings, cx));
     });
     draw(cx);
 

@@ -245,7 +245,7 @@ impl Editor {
             }
         }
         if changed {
-            self.set_settings(settings);
+            self.set_settings(settings, cx);
         }
         if !answers.is_empty() {
             self.flash_status(answers.join("  "), cx);

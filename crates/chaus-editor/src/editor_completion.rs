@@ -8,7 +8,10 @@
 //! `~/...` spelling so the command still means the same thing when it runs.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Duration;
 
+use chaus_vim::CompletionToken;
 use gpui::Context;
 
 use crate::editor::Editor;
@@ -20,6 +23,18 @@ const MAX_CANDIDATES: usize = 256;
 /// Names listed in the status when several match.
 const SHOWN_CANDIDATES: usize = 8;
 
+/// Test seam: delays the next completed listing after the scan has finished.
+/// Production never installs a delay. A timer keeps the test scheduler free,
+/// unlike a blocking wait, and no cancellation touches the directory scan.
+static COMPLETION_DELAY: Mutex<Option<Duration>> = Mutex::new(None);
+
+fn take_completion_delay() -> Option<Duration> {
+    COMPLETION_DELAY
+        .lock()
+        .ok()
+        .and_then(|mut delay| delay.take())
+}
+
 #[derive(Debug, Default)]
 struct Listing {
     /// Matching UTF-8 names and whether each is a directory, sorted.
@@ -30,6 +45,21 @@ struct Listing {
 }
 
 impl Editor {
+    /// Test seam: delay the next finished listing by `delay`. Only tests
+    /// install a delay; the scan itself still runs on the background executor.
+    pub fn delay_next_completion_for_test(&self, delay: Duration) {
+        if let Ok(mut slot) = COMPLETION_DELAY.lock() {
+            *slot = Some(delay);
+        }
+    }
+
+    /// Remove a test delay, including one no request ever consumed.
+    pub fn clear_completion_delay_for_test() {
+        if let Ok(mut slot) = COMPLETION_DELAY.lock() {
+            *slot = None;
+        }
+    }
+
     pub(crate) fn complete_command_path(&mut self, cx: &mut Context<Self>) {
         let Some(request) = self.vim_engine.completion_request() else {
             self.flash_status(
@@ -52,14 +82,21 @@ impl Editor {
             chaus_io::expand_home(Path::new(display_dir(&directory)))
         };
         let listed_prefix = prefix.clone();
-        let task = cx
-            .background_executor()
-            .spawn(async move { list_matches(&listed_directory, &listed_prefix) });
+        let token = request.token;
+        let delay = take_completion_delay();
+        let executor = cx.background_executor().clone();
+        let task = cx.background_executor().spawn(async move {
+            let listing = list_matches(&listed_directory, &listed_prefix);
+            if let Some(delay) = delay {
+                executor.timer(delay).await;
+            }
+            listing
+        });
         cx.spawn(async move |editor, cx| {
             let listing = task.await;
             editor
                 .update(cx, |editor, cx| {
-                    editor.finish_completion(request.revision, &directory, &prefix, listing, cx);
+                    editor.finish_completion(&token, &directory, &prefix, listing, cx);
                 })
                 .ok();
         })
@@ -68,12 +105,18 @@ impl Editor {
 
     fn finish_completion(
         &mut self,
-        revision: u64,
+        token: &CompletionToken,
         directory: &str,
         prefix: &str,
         listing: Listing,
         cx: &mut Context<Self>,
     ) {
+        // Verification precedes every observable effect: an error, a
+        // candidate list, a command-line edit and a repaint all belong to the
+        // request that is still current.
+        if !self.vim_engine.is_completion_current(token) {
+            return;
+        }
         if let Some(error) = listing.error {
             self.flash_status(
                 format!("Cannot list {}: {error}", display_dir(directory)),
@@ -116,7 +159,7 @@ impl Editor {
         };
         if let Some(message) = self
             .vim_engine
-            .apply_completion(revision, &completed, finished)
+            .apply_completion(token, &completed, finished)
         {
             self.flash_status(message, cx);
         }

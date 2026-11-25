@@ -17,11 +17,76 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 /// granularity can hide a same-size edit, so metadata alone is never trusted
 /// forever.
 const FORCED_HASH_TICKS: u32 = 15;
+/// Consecutive failed inspections before the watcher reports one warning.
+///
+/// One failure is usually a transient lock or a rename in progress. Three in a
+/// row mean the file cannot be inspected, but reporting on every two-second
+/// tick would turn that into a permanent status flash.
+const INSPECTION_FAILURE_WARNING_THRESHOLD: u32 = 3;
+
+/// Bounded per-window state for watcher inspection failures. It lives in the
+/// watcher task, so no editor or global state is needed and it cannot grow with
+/// the number of failed ticks.
+#[derive(Debug, Default)]
+struct WatchErrorState {
+    consecutive_failures: u32,
+    warning: Option<String>,
+}
+
+#[derive(Debug)]
+enum WatchErrorAction {
+    None,
+    Warn(String),
+    Clear(String),
+}
+
+impl WatchErrorState {
+    fn observe(&mut self, result: &Result<(), ConflictCheckError>) -> WatchErrorAction {
+        match result {
+            // A conflict means inspection succeeded; only I/O failures count.
+            Ok(()) | Err(ConflictCheckError::Conflict(_)) => {
+                let cleared = self.warning.take();
+                self.consecutive_failures = 0;
+                match cleared {
+                    Some(message) => WatchErrorAction::Clear(message),
+                    None => WatchErrorAction::None,
+                }
+            }
+            Err(ConflictCheckError::Io { path, source }) => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                if self.consecutive_failures != INSPECTION_FAILURE_WARNING_THRESHOLD
+                    || self.warning.is_some()
+                {
+                    return WatchErrorAction::None;
+                }
+                let message = format!(
+                    "Cannot inspect {} for changes: {source}; edits may go unnoticed",
+                    path.display()
+                );
+                self.warning = Some(message.clone());
+                WatchErrorAction::Warn(message)
+            }
+            // Future non-exhaustive variants are not actionable yet.
+            Err(_) => WatchErrorAction::None,
+        }
+    }
+}
 
 impl Editor {
+    /// Clear a watcher warning only if it is still the visible status. A save
+    /// or another action may have replaced it, and that message must survive.
+    fn clear_watch_warning(&mut self, message: &str, cx: &mut Context<Self>) {
+        if self.status.as_deref() == Some(message) {
+            self.status = None;
+            self.status_epoch = self.status_epoch.wrapping_add(1);
+            cx.notify();
+        }
+    }
+
     pub(crate) fn start_disk_watch(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |editor, cx| {
             let mut ticks: u32 = 0;
+            let mut error_state = WatchErrorState::default();
             loop {
                 cx.background_executor().timer(WATCH_INTERVAL).await;
                 let snapshot = editor.update(cx, |editor, _| {
@@ -61,12 +126,22 @@ impl Editor {
                     }
                 });
                 let result = task.await;
-                if editor
-                    .update(cx, |editor, cx| {
-                        editor.apply_disk_check(epoch, result, cx);
-                    })
-                    .is_err()
-                {
+                let applied = editor.update(cx, |editor, cx| {
+                    // A result from a previous file must not move this file's
+                    // error state or overwrite its status.
+                    if editor.disk_epoch != epoch {
+                        return;
+                    }
+                    match error_state.observe(&result) {
+                        WatchErrorAction::Warn(message) => editor.set_status(message),
+                        WatchErrorAction::Clear(message) => {
+                            editor.clear_watch_warning(&message, cx);
+                        }
+                        WatchErrorAction::None => {}
+                    }
+                    editor.apply_disk_check(epoch, result, cx);
+                });
+                if applied.is_err() {
                     break;
                 }
             }

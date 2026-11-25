@@ -64,7 +64,12 @@ fn row_and_x(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> (usize, usi
                 .position(|segment| local >= segment.char_start && local <= segment.char_end)
                 .unwrap_or(segments.len().saturating_sub(1));
             let column = chaus_layout::column_at(&text, local, editor.settings().tab_stop);
-            (row, column.saturating_sub(segments[row].start_column))
+            (
+                row,
+                column
+                    .get()
+                    .saturating_sub(segments[row].start_column.get()),
+            )
         })
     })
 }

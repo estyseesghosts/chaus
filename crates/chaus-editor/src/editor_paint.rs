@@ -82,26 +82,35 @@ impl Editor {
         let base_x = bounds.left() + px(PADDING) - self.scroll_x;
         let base_y = bounds.top() + px(PADDING);
 
+        let mut paint_walked = 0usize;
+        let mut paint_skipped = 0usize;
+        let mut paint_chars = 0usize;
+        let mut paint_display_bytes = 0usize;
         for line_index in first_line.0..self.document.len_lines() {
             let line = LineIndex(line_index);
             let line_start = self.document.line_start(line);
-            let line_text = self.document.line_text(line);
+            let source = Self::line_source(&self.document, line);
+            let checkpoints = self.checkpoints_for(line);
             // Start at the first visible row of the first line and stop once
-            // the viewport is covered, so a giant wrapped line never builds
-            // every one of its rows just to draw a screenful.
+            // the viewport is covered. Checkpoints keep a deep row from walking
+            // the thousands of rows above it.
             let skip = if line_index == first_line.0 {
                 first_row.saturating_sub(self.rows.prefix(line_index))
             } else {
                 0
             };
-            let segments = chaus_layout::segments_window(
-                &line_text,
+            let (segments, stats) = chaus_layout::segments_window_source(
+                &source,
                 columns,
                 self.settings.tab_stop,
                 policy,
-                skip,
+                chaus_layout::WrapRowIndex::new(skip),
                 visible.saturating_add(4),
+                &checkpoints,
             );
+            paint_chars += stats.window_chars;
+            paint_walked += stats.rows_walked;
+            paint_skipped += stats.rows_skipped_via_checkpoint;
             for (offset, segment) in segments.into_iter().enumerate() {
                 let segment_index = skip + offset;
                 let y = base_y + px((row as f32 - self.scroll_row) * f32::from(line_height));
@@ -110,6 +119,10 @@ impl Editor {
                     continue;
                 }
                 if y > bounds.bottom() {
+                    self.layout_work.source_chars_read += paint_chars as u64;
+                    self.layout_work.rows_walked += paint_walked as u64;
+                    self.layout_work.rows_skipped_via_checkpoint += paint_skipped as u64;
+                    self.layout_work.display_bytes_built += paint_display_bytes as u64;
                     return self.finish_frame(
                         bounds,
                         PaintMetrics {
@@ -122,27 +135,29 @@ impl Editor {
                         theme,
                     );
                 }
-                let segment_start = CharOffset(line_start.0 + segment.char_start);
-                let segment_end = CharOffset(line_start.0 + segment.char_end);
+                let segment_start = CharOffset(line_start.0 + segment.char_start.get());
+                let segment_end = CharOffset(line_start.0 + segment.char_end.get());
                 if !selection.is_empty()
                     && selection.start < segment_end.max(CharOffset(segment_start.0 + 1))
                     && selection.end > segment_start
                 {
                     let start = selection.start.max(segment_start);
                     let end = selection.end.min(segment_end);
-                    let absolute_start = chaus_layout::column_at(
-                        &line_text,
-                        start.0.saturating_sub(line_start.0),
+                    let absolute_start = chaus_layout::column_at_source(
+                        &source,
+                        chaus_layout::LineCharOffset::new(start.0.saturating_sub(line_start.0)),
                         self.settings.tab_stop,
+                        &checkpoints,
                     )
                     .max(segment.start_column);
                     let absolute_end = if selection.end >= segment_end {
                         segment.end_column()
                     } else {
-                        chaus_layout::column_at(
-                            &line_text,
-                            end.0.saturating_sub(line_start.0),
+                        chaus_layout::column_at_source(
+                            &source,
+                            chaus_layout::LineCharOffset::new(end.0.saturating_sub(line_start.0)),
                             self.settings.tab_stop,
+                            &checkpoints,
                         )
                     }
                     .max(segment.start_column)
@@ -155,8 +170,8 @@ impl Editor {
                         absolute_start,
                         absolute_end,
                     ) {
-                        let left = base_x + px(start_column as f32 * f32::from(char_width));
-                        let right = base_x + px(end_column as f32 * f32::from(char_width));
+                        let left = base_x + px(start_column.get() as f32 * f32::from(char_width));
+                        let right = base_x + px(end_column.get() as f32 * f32::from(char_width));
                         selection_quads.push(fill(
                             Bounds::from_corners(point(left, y), point(right, y + line_height)),
                             selection_color,
@@ -167,13 +182,24 @@ impl Editor {
                 let shaped = match self.shaped_rows.get(&paint_key, line_index, segment_index) {
                     Some(shaped) => shaped,
                     None => {
+                        let window_start = segment.char_start.get();
+                        let line_window = source.window(
+                            chaus_layout::LineCharOffset::new(window_start),
+                            segment.char_end,
+                        );
+                        let mut local = segment.clone();
+                        local.char_start = chaus_layout::LineCharOffset::new(0);
+                        local.char_end =
+                            chaus_layout::LineCharOffset::new(line_window.chars().count());
                         let runs = self.highlighted_runs(
-                            &line_text,
-                            line_start.0,
-                            &segment,
+                            &line_window,
+                            line_start.0 + window_start,
+                            &local,
                             &text_run,
                             theme,
+                            segment.start_column,
                         );
+                        paint_display_bytes += segment.display.len();
                         let shaped = window.text_system().shape_line(
                             SharedString::new(segment.display),
                             font_size,
@@ -199,6 +225,10 @@ impl Editor {
                 break;
             }
         }
+        self.layout_work.source_chars_read += paint_chars as u64;
+        self.layout_work.rows_walked += paint_walked as u64;
+        self.layout_work.rows_skipped_via_checkpoint += paint_skipped as u64;
+        self.layout_work.display_bytes_built += paint_display_bytes as u64;
         self.finish_frame(
             bounds,
             PaintMetrics {
@@ -223,16 +253,26 @@ impl Editor {
         line: LineIndex,
         segment_index: usize,
     ) -> Option<Vec<(usize, Option<TokenKind>)>> {
-        let text = self.document.line_text(line);
+        let source = Self::line_source(&self.document, line);
         let segments = self.segments_for(line);
         let segment = segments.get(segment_index)?;
+        let start = segment.char_start.get();
+        let end = segment.char_end.get();
+        let window = source.window(
+            chaus_layout::LineCharOffset::new(start),
+            chaus_layout::LineCharOffset::new(end),
+        );
+        let mut local = segment.clone();
+        local.char_start = chaus_layout::LineCharOffset::new(0);
+        local.char_end = chaus_layout::LineCharOffset::new(window.chars().count());
         let spans = self.highlight_spans();
         Some(syntax_run_lengths(
             spans,
-            &text,
-            self.document.line_start(line).0,
-            segment,
+            &window,
+            self.document.line_start(line).0 + start,
+            &local,
             self.settings.tab_stop,
+            segment.start_column,
         ))
     }
 
@@ -248,6 +288,7 @@ impl Editor {
         segment: &chaus_layout::Segment,
         base: &TextRun,
         theme: &Theme,
+        start_column: chaus_layout::VisualColumn,
     ) -> Vec<TextRun> {
         let spans = self.highlight_spans();
         if spans.is_empty() || segment.display.is_empty() {
@@ -257,7 +298,14 @@ impl Editor {
                 ..base.clone()
             }];
         }
-        let pieces = syntax_run_lengths(spans, line, line_start, segment, self.settings.tab_stop);
+        let pieces = syntax_run_lengths(
+            spans,
+            line,
+            line_start,
+            segment,
+            self.settings.tab_stop,
+            start_column,
+        );
         let runs: Vec<TextRun> = pieces
             .into_iter()
             .map(|(len, kind)| run(len, kind, base, theme))
@@ -308,19 +356,28 @@ impl Editor {
             return None;
         }
         let line_start = self.document.line_start(line);
-        let line_text = self.document.line_text(line);
-        let absolute_column = chaus_layout::column_at(
-            &line_text,
-            head.0.saturating_sub(line_start.0),
+        let source = Self::line_source(&self.document, line);
+        let checkpoints = self.checkpoints_for(line);
+        let absolute_column = chaus_layout::column_at_source(
+            &source,
+            chaus_layout::LineCharOffset::new(head.0.saturating_sub(line_start.0)),
             self.settings.tab_stop,
+            &checkpoints,
         );
-        let segments = self.segments_for(line);
         let local_row = self.local_row_of(head, line);
-        let segment = segments.get(local_row).or_else(|| segments.last())?;
+        let segment = chaus_layout::segment_at_source(
+            &source,
+            self.rows_columns,
+            self.settings.tab_stop,
+            self.rows_policy,
+            chaus_layout::WrapRowIndex::new(local_row),
+            &checkpoints,
+        )?;
         let x = bounds.left() + px(PADDING) - self.scroll_x
-            + px(
-                absolute_column.saturating_sub(segment.start_column) as f32 * f32::from(char_width)
-            );
+            + px(absolute_column
+                .get()
+                .saturating_sub(segment.start_column.get()) as f32
+                * f32::from(char_width));
         Some(fill(
             Bounds::new(point(x, row_top), size(px(1.5), line_height)),
             hsla(theme.colors.text),
@@ -340,17 +397,19 @@ fn syntax_run_lengths(
     line_start: usize,
     segment: &chaus_layout::Segment,
     tab_stop: usize,
+    start_column: chaus_layout::VisualColumn,
 ) -> Vec<(usize, Option<TokenKind>)> {
-    let boundaries = chaus_layout::display_boundaries(line, segment, tab_stop);
-    let segment_start = line_start + segment.char_start;
+    let boundaries =
+        chaus_layout::display_boundaries_from_column(line, segment, tab_stop, start_column);
+    let segment_start = line_start + segment.char_start.get();
     let mut span_index = spans.partition_point(|span| span.range.end <= segment_start);
     let mut run_start = 0usize;
     let mut run_kind: Option<TokenKind> = None;
     let mut runs = Vec::new();
     let mut first = true;
     for pair in boundaries.windows(2) {
-        let offset = line_start + pair[0].char_offset;
-        let display_start = pair[0].display_byte;
+        let offset = line_start + pair[0].char_offset.get();
+        let display_start = pair[0].display_byte.get();
         while span_index < spans.len() && spans[span_index].range.end <= offset {
             span_index += 1;
         }

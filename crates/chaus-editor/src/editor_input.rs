@@ -231,27 +231,35 @@ impl EntityInputHandler for Editor {
         let last_line = selected_last_line.0.min(visible_last_line.0);
         let origin = geometry.text_origin();
         let mut rectangles = Vec::new();
+        let mut walked = 0usize;
+        let mut skipped = 0usize;
+        let mut chars_read = 0usize;
         for line_number in first_line..=last_line {
             let line = LineIndex(line_number);
             let line_start = self.document.line_start(line);
-            let line_text = self.document.line_text(line);
+            let source = Self::line_source(&self.document, line);
+            let checkpoints = self.checkpoints_for(line);
             let line_prefix = self.rows.prefix(line.0);
             let skip = first_visible_row.saturating_sub(line_prefix);
             let limit = last_visible_row
                 .saturating_sub(line_prefix)
                 .saturating_sub(skip)
                 + 1;
-            let segments = chaus_layout::segments_window(
-                &line_text,
+            let (segments, stats) = chaus_layout::segments_window_source(
+                &source,
                 self.rows_columns,
                 self.settings.tab_stop,
                 self.rows_policy,
-                skip,
+                chaus_layout::WrapRowIndex::new(skip),
                 limit,
+                &checkpoints,
             );
+            walked += stats.rows_walked;
+            skipped += stats.rows_skipped_via_checkpoint;
+            chars_read += stats.window_chars;
             for (index, segment) in segments.iter().enumerate() {
-                let segment_start = CharOffset(line_start.0 + segment.char_start);
-                let segment_end = CharOffset(line_start.0 + segment.char_end);
+                let segment_start = CharOffset(line_start.0 + segment.char_start.get());
+                let segment_end = CharOffset(line_start.0 + segment.char_end.get());
                 let start = range.start.max(segment_start);
                 let end = range.end.min(segment_end);
                 if start >= end {
@@ -263,19 +271,21 @@ impl EntityInputHandler for Editor {
                 if y + geometry.line_height < element_bounds.top() || y > element_bounds.bottom() {
                     continue;
                 }
-                let absolute_start = chaus_layout::column_at(
-                    &line_text,
-                    start.0.saturating_sub(line_start.0),
+                let absolute_start = chaus_layout::column_at_source(
+                    &source,
+                    chaus_layout::LineCharOffset::new(start.0.saturating_sub(line_start.0)),
                     self.settings.tab_stop,
+                    &checkpoints,
                 )
                 .max(segment.start_column);
                 let absolute_end = if range.end >= segment_end {
                     segment.end_column()
                 } else {
-                    chaus_layout::column_at(
-                        &line_text,
-                        end.0.saturating_sub(line_start.0),
+                    chaus_layout::column_at_source(
+                        &source,
+                        chaus_layout::LineCharOffset::new(end.0.saturating_sub(line_start.0)),
                         self.settings.tab_stop,
+                        &checkpoints,
                     )
                 }
                 .max(segment.start_column)
@@ -286,9 +296,10 @@ impl EntityInputHandler for Editor {
                     continue;
                 };
                 let x = origin.x - self.scroll_x
-                    + gpui::px(start_column as f32 * f32::from(geometry.char_width));
-                let width =
-                    gpui::px((end_column - start_column) as f32 * f32::from(geometry.char_width));
+                    + gpui::px(start_column.get() as f32 * f32::from(geometry.char_width));
+                let width = gpui::px(
+                    (end_column.get() - start_column.get()) as f32 * f32::from(geometry.char_width),
+                );
                 rectangles.push(Bounds::from_corners(
                     Point { x, y },
                     Point {
@@ -298,6 +309,9 @@ impl EntityInputHandler for Editor {
                 ));
             }
         }
+        self.layout_work.rows_walked += walked as u64;
+        self.layout_work.rows_skipped_via_checkpoint += skipped as u64;
+        self.layout_work.source_chars_read += chars_read as u64;
         rectangles
     }
 
@@ -352,19 +366,25 @@ impl Editor {
     fn bounds_for_offset(&mut self, offset: CharOffset, geometry: Geometry) -> Point<Pixels> {
         let (line, row) = self.row_of_offset(offset);
         let line_start = self.document.line_start(line);
-        let text = self.document.line_text(line);
-        let column = chaus_layout::column_at(
-            &text,
-            offset.0.saturating_sub(line_start.0),
+        let source = Self::line_source(&self.document, line);
+        let checkpoints = self.checkpoints_for(line);
+        let column = chaus_layout::column_at_source(
+            &source,
+            chaus_layout::LineCharOffset::new(offset.0.saturating_sub(line_start.0)),
             self.settings.tab_stop,
+            &checkpoints,
         );
-        let segments = self.segments_for(line);
         let local_row = self.local_row_of(offset, line);
-        let segment_start = segments
-            .get(local_row)
-            .map(|segment| segment.start_column)
-            .unwrap_or(0);
-        let local_column = column.saturating_sub(segment_start);
+        let segment_start = chaus_layout::segment_at_source(
+            &source,
+            self.rows_columns,
+            self.settings.tab_stop,
+            self.rows_policy,
+            chaus_layout::WrapRowIndex::new(local_row),
+            &checkpoints,
+        )
+        .map_or(0, |segment| segment.start_column.get());
+        let local_column = column.get().saturating_sub(segment_start);
         let origin = geometry.text_origin();
         Point {
             x: origin.x - self.scroll_x

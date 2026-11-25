@@ -87,10 +87,14 @@ fn word_mode_breaks_after_whitespace_and_keeps_every_character() {
         for row in &rows {
             let start: usize = source
                 .chars()
-                .take(row.char_start)
+                .take(row.char_start.get())
                 .map(char::len_utf8)
                 .sum();
-            let end: usize = source.chars().take(row.char_end).map(char::len_utf8).sum();
+            let end: usize = source
+                .chars()
+                .take(row.char_end.get())
+                .map(char::len_utf8)
+                .sum();
             if !source[start..end].contains('\t') {
                 assert_eq!(row.display, &source[start..end]);
             }
@@ -207,8 +211,8 @@ fn continuation_rows_start_at_the_normal_left_inset() {
     run_text(&long_text(), false, |editor, cx| {
         let rows = segments(&editor, cx, 0);
         assert!(rows.len() >= 2);
-        let first = rows[0].char_start;
-        let next = rows[1].char_start;
+        let first = rows[0].char_start.get();
+        let next = rows[1].char_start.get();
         let (first_rect, next_rect) = cx.update(|window, cx| {
             editor.update(cx, |editor, cx| {
                 let bounds = window.bounds();
@@ -232,8 +236,8 @@ fn a_selection_across_word_rows_returns_one_positive_rectangle_per_row() {
     run_text(&long_text(), false, |editor, cx| {
         let rows = segments(&editor, cx, 0);
         assert!(rows.len() >= 3);
-        let start = CharOffset(rows[0].char_start);
-        let end = CharOffset(rows[2].char_end);
+        let start = CharOffset(rows[0].char_start.get());
+        let end = CharOffset(rows[2].char_end.get());
         let rectangles = cx.update(|window, cx| {
             editor.update(cx, |editor, cx| {
                 editor.selection_bounds_for_range(start.0..end.0, window.bounds(), window, cx)

@@ -2,6 +2,8 @@
 
 use chaus_core::position::{CharOffset, CharRange, LineIndex, Selection};
 use gpui::{px, Context, Window};
+use ropey::iter::Chars;
+use ropey::Rope;
 
 use crate::editor::Editor;
 use crate::editor_keys::{
@@ -9,6 +11,9 @@ use crate::editor_keys::{
     SelectDocumentStart, SelectDown, SelectEnd, SelectHome, SelectLeft, SelectRight, SelectUp,
     SelectWordLeft, SelectWordRight, Up, WordLeft, WordRight,
 };
+
+#[cfg(test)]
+mod word_scan_tests;
 
 impl Editor {
     pub(crate) fn move_to(&mut self, offset: CharOffset, extend: bool, cx: &mut Context<Self>) {
@@ -117,57 +122,15 @@ impl Editor {
     }
 
     pub(crate) fn word_left(&self, offset: CharOffset) -> CharOffset {
-        let rope = self.document.rope();
-        let mut index = offset.0.min(self.document.len_chars());
-        while index > 0 && !is_word_char(rope.char(index - 1)) {
-            index -= 1;
-        }
-        while index > 0 && is_word_char(rope.char(index - 1)) {
-            index -= 1;
-        }
-        CharOffset(index)
+        scan_word_left(self.document.rope(), offset)
     }
 
     pub(crate) fn word_right(&self, offset: CharOffset) -> CharOffset {
-        let rope = self.document.rope();
-        let length = self.document.len_chars();
-        let mut index = offset.0.min(length);
-        while index < length && !is_word_char(rope.char(index)) {
-            index += 1;
-        }
-        while index < length && is_word_char(rope.char(index)) {
-            index += 1;
-        }
-        CharOffset(index)
+        scan_word_right(self.document.rope(), offset)
     }
 
     pub(crate) fn word_bounds(&self, offset: CharOffset) -> CharRange {
-        let rope = self.document.rope();
-        let length = self.document.len_chars();
-        if length == 0 {
-            return CharRange::empty(offset);
-        }
-        let mut start = offset.0.min(length - 1);
-        let mut end = start;
-        if is_word_char(rope.char(start)) {
-            while start > 0 && is_word_char(rope.char(start - 1)) {
-                start -= 1;
-            }
-            while end < length && is_word_char(rope.char(end)) {
-                end += 1;
-            }
-        } else {
-            while start > 0 && !is_word_char(rope.char(start - 1)) && rope.char(start - 1) != '\n' {
-                start -= 1;
-            }
-            while end < length && !is_word_char(rope.char(end)) && rope.char(end) != '\n' {
-                end += 1;
-            }
-            if end == start && end < length {
-                end += 1;
-            }
-        }
-        CharRange::new(CharOffset(start), CharOffset(end))
+        scan_word_bounds(self.document.rope(), offset)
     }
 
     pub(crate) fn scroll_to_caret(&mut self) {
@@ -314,6 +277,148 @@ impl Editor {
     ) {
         self.move_document_boundary(true, true, cx);
     }
+}
+
+/// A forward cursor over Rope chars. One buffered char avoids repeated tree
+/// lookups while walking a long word or whitespace run.
+struct ForwardChars<'a> {
+    chars: Chars<'a>,
+    buffered: Option<char>,
+    index: usize,
+    length: usize,
+}
+
+impl<'a> ForwardChars<'a> {
+    fn new(rope: &'a Rope, from: usize) -> Self {
+        let index = from.min(rope.len_chars());
+        Self {
+            chars: rope.chars_at(index),
+            buffered: None,
+            index,
+            length: rope.len_chars(),
+        }
+    }
+
+    fn peek(&mut self) -> Option<char> {
+        if self.buffered.is_none() && self.index < self.length {
+            self.buffered = self.chars.next();
+        }
+        self.buffered
+    }
+
+    fn skip(&mut self) {
+        if self.peek().is_some() {
+            self.buffered = None;
+            self.index += 1;
+        }
+    }
+
+    fn index(&self) -> usize {
+        self.index
+    }
+}
+
+/// A backward cursor over Rope chars, built from Ropey's reversed iterator.
+struct BackwardChars<'a> {
+    chars: Chars<'a>,
+    buffered: Option<char>,
+    index: usize,
+}
+
+impl<'a> BackwardChars<'a> {
+    fn new(rope: &'a Rope, from: usize) -> Self {
+        let index = from.min(rope.len_chars());
+        Self {
+            chars: rope.chars_at(index).reversed(),
+            buffered: None,
+            index,
+        }
+    }
+
+    fn peek_prev(&mut self) -> Option<char> {
+        if self.buffered.is_none() && self.index > 0 {
+            self.buffered = self.chars.next();
+        }
+        self.buffered
+    }
+
+    fn skip_prev(&mut self) {
+        if self.peek_prev().is_some() {
+            self.buffered = None;
+            self.index -= 1;
+        }
+    }
+
+    fn index(&self) -> usize {
+        self.index
+    }
+}
+
+fn scan_word_left(rope: &Rope, offset: CharOffset) -> CharOffset {
+    let mut scan = BackwardChars::new(rope, offset.0);
+    while scan.peek_prev().is_some_and(|ch| !is_word_char(ch)) {
+        scan.skip_prev();
+    }
+    while scan.peek_prev().is_some_and(is_word_char) {
+        scan.skip_prev();
+    }
+    CharOffset(scan.index())
+}
+
+fn scan_word_right(rope: &Rope, offset: CharOffset) -> CharOffset {
+    let mut scan = ForwardChars::new(rope, offset.0);
+    while scan.peek().is_some_and(|ch| !is_word_char(ch)) {
+        scan.skip();
+    }
+    while scan.peek().is_some_and(is_word_char) {
+        scan.skip();
+    }
+    CharOffset(scan.index())
+}
+
+/// Double-click word range. Unlike Vim, this word model has only word and
+/// non-word characters, and it stops a non-word run at a hard line break.
+fn scan_word_bounds(rope: &Rope, offset: CharOffset) -> CharRange {
+    let length = rope.len_chars();
+    if length == 0 {
+        return CharRange::empty(offset);
+    }
+    let pivot = offset.0.min(length - 1);
+    if ForwardChars::new(rope, pivot)
+        .peek()
+        .is_some_and(is_word_char)
+    {
+        let mut back = BackwardChars::new(rope, pivot);
+        while back.peek_prev().is_some_and(is_word_char) {
+            back.skip_prev();
+        }
+        let start = back.index();
+        let mut forward = ForwardChars::new(rope, pivot);
+        while forward.peek().is_some_and(is_word_char) {
+            forward.skip();
+        }
+        return CharRange::new(CharOffset(start), CharOffset(forward.index()));
+    }
+    let mut back = BackwardChars::new(rope, pivot);
+    while back
+        .peek_prev()
+        .is_some_and(|ch| !is_word_char(ch) && ch != '\n')
+    {
+        back.skip_prev();
+    }
+    let start = back.index();
+    let mut forward = ForwardChars::new(rope, pivot);
+    while forward
+        .peek()
+        .is_some_and(|ch| !is_word_char(ch) && ch != '\n')
+    {
+        forward.skip();
+    }
+    let mut end = forward.index();
+    if end == start && end < length {
+        end += 1;
+    }
+    CharRange::new(CharOffset(start), CharOffset(end))
 }
 
 fn is_word_char(ch: char) -> bool {

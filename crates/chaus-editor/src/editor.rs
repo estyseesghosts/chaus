@@ -63,6 +63,22 @@ fn wait_for_reflow_gate() {
     }
 }
 
+/// Work performed by the layout primitives, for long-line diagnostics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LayoutWorkCounters {
+    /// Whole hard lines materialized as `String` by paint/layout. Must stay
+    /// zero while painting a giant single line.
+    pub hard_lines_materialized: u64,
+    /// Unicode scalars read from Ropey windows.
+    pub source_chars_read: u64,
+    /// Visual rows visited by the shared walker.
+    pub rows_walked: u64,
+    /// Rows skipped by starting at a checkpoint.
+    pub rows_skipped_via_checkpoint: u64,
+    /// UTF-8 bytes built into display strings for visible rows.
+    pub display_bytes_built: u64,
+}
+
 /// One editor window.
 pub struct Editor {
     pub(crate) document: Document,
@@ -82,6 +98,10 @@ pub struct Editor {
     pub(crate) geometry: Option<Geometry>,
     /// Per-line visual-row counts with an `O(log lines)` prefix index.
     pub(crate) rows: crate::row_index::RowIndex,
+    /// Numeric wrap checkpoints per hard line, rebuilt with the row counts.
+    pub(crate) wrap_checkpoints: Vec<chaus_layout::WrapCheckpoints>,
+    /// Bounded-work counters for the long-line layout path.
+    pub(crate) layout_work: LayoutWorkCounters,
     /// Shaped visible rows reused across text-preserving repaints.
     pub(crate) shaped_rows: crate::paint_cache::ShapedRowCache,
     /// Number of `shape_line` calls made for document rows, for diagnostics.
@@ -221,6 +241,8 @@ impl Editor {
             selecting: false,
             geometry: None,
             rows: crate::row_index::RowIndex::default(),
+            wrap_checkpoints: Vec::new(),
+            layout_work: LayoutWorkCounters::default(),
             shaped_rows: crate::paint_cache::ShapedRowCache::default(),
             shaped_row_calls: 0,
             rows_columns: None,
@@ -367,22 +389,37 @@ impl Editor {
         &self.commands
     }
 
-    pub fn set_settings(&mut self, settings: Settings) {
-        let mode = settings.wrap;
+    /// Apply a new settings snapshot without recreating this editor.
+    ///
+    /// Only settings that change glyph advances, tab expansion or the break
+    /// policy force a background re-measure. Cheap preferences (indent style,
+    /// the default Vim mode) and pure geometry changes leave the committed row
+    /// index alone. No change synchronously rebuilds the whole document.
+    pub fn set_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
+        let effect = settings_effect(&self.settings, &settings);
         self.settings = settings;
-        self.rows_policy = Self::wrap_policy(mode);
-        if mode == WrapMode::None {
-            self.rows_columns = None;
-        }
-        self.invalidate_reflow();
-        self.rebuild_rows();
-    }
 
-    /// Drop any pending width measurement whose inputs are no longer valid.
-    fn invalidate_reflow(&mut self) {
-        self.reflow_generation = self.reflow_generation.wrapping_add(1);
-        self.reflow_columns = self.rows_columns;
-        self.reflow_policy = self.rows_policy;
+        if effect.remeasure {
+            // Publish the new policy and width only with the measured rows in
+            // `finish_reflow`. Committing either field here would pair a new
+            // policy with an old row index for a frame. The generation check
+            // drops a result that is stale when it lands.
+            let columns = if self.settings.wrap == WrapMode::None {
+                None
+            } else {
+                self.rows_columns
+            };
+            self.reflow_columns = columns;
+            self.reflow_policy = Self::wrap_policy(self.settings.wrap);
+            self.reflow_generation = self.reflow_generation.wrapping_add(1);
+            if self.reflow_in_flight.is_none() {
+                self.spawn_reflow(cx);
+            }
+        }
+        if effect.geometry {
+            self.clamp_scroll();
+        }
+        cx.notify();
     }
 
     /// Install a deterministic stand-in for a background load.
@@ -408,7 +445,7 @@ impl Editor {
         }
         let mut settings = self.settings.clone();
         settings.wrap = mode;
-        self.set_settings(settings);
+        self.set_settings(settings, cx);
         self.clamp_scroll();
         self.scroll_to_caret();
         cx.notify();
@@ -495,6 +532,8 @@ impl Editor {
 
     pub(crate) fn rebuild_rows(&mut self) {
         let line_count = self.document.len_lines();
+        self.wrap_checkpoints
+            .resize_with(line_count, chaus_layout::WrapCheckpoints::default);
         let mut counts = Vec::with_capacity(line_count);
         for line in 0..line_count {
             counts.push(self.measure_line(line));
@@ -502,14 +541,45 @@ impl Editor {
         self.rows.rebuild(counts);
     }
 
-    fn measure_line(&self, line: usize) -> usize {
-        let text = self.document.line_text(LineIndex(line));
-        chaus_layout::row_count_with(
-            &text,
+    /// Bounded Ropey source for one hard line, excluding its hard break.
+    pub(crate) fn line_source(
+        document: &chaus_core::document::Document,
+        line: LineIndex,
+    ) -> chaus_layout::LineSource<'_> {
+        let start = document.line_start(line).0;
+        let end = document.line_content_end(line).0;
+        chaus_layout::LineSource::from_rope(document.rope().slice(start..end))
+    }
+
+    /// Measure one hard line and store its numeric checkpoints instead of a
+    /// cached copy of the line's text.
+    fn measure_line(&mut self, line: usize) -> usize {
+        let (count, checkpoints) = self.measure_line_data(LineIndex(line));
+        if line >= self.wrap_checkpoints.len() {
+            self.wrap_checkpoints
+                .resize_with(line + 1, chaus_layout::WrapCheckpoints::default);
+        }
+        self.wrap_checkpoints[line] = checkpoints;
+        count
+    }
+
+    fn measure_line_data(&self, line: LineIndex) -> (usize, chaus_layout::WrapCheckpoints) {
+        let source = Self::line_source(&self.document, line);
+        let checkpoints = chaus_layout::build_checkpoints(
+            &source,
             self.rows_columns,
             self.settings.tab_stop,
             self.rows_policy,
-        )
+            128,
+        );
+        let count = chaus_layout::row_count_source(
+            &source,
+            self.rows_columns,
+            self.settings.tab_stop,
+            self.rows_policy,
+            &checkpoints,
+        );
+        (count, checkpoints)
     }
 
     /// Update wrap metadata for only the touched hard lines.
@@ -531,8 +601,21 @@ impl Editor {
         if self.rows.len() != line_count {
             let delta = line_count as i64 - self.rows.len() as i64;
             let old_end = (end as i64 - delta).max(start as i64) as usize;
-            let counts: Vec<usize> = (start..end).map(|line| self.measure_line(line)).collect();
+            let mut counts = Vec::with_capacity(end - start);
+            let mut checkpoints = Vec::with_capacity(end - start);
+            for line in start..end {
+                let (count, index) = self.measure_line_data(LineIndex(line));
+                counts.push(count);
+                checkpoints.push(index);
+            }
             self.rows.splice(start, old_end, counts);
+            let old_checkpoints_end = old_end.min(self.wrap_checkpoints.len());
+            self.wrap_checkpoints.splice(
+                start.min(old_checkpoints_end)..old_checkpoints_end,
+                checkpoints,
+            );
+            self.wrap_checkpoints
+                .resize_with(line_count, chaus_layout::WrapCheckpoints::default);
             return;
         }
         for line in start..end {
@@ -570,6 +653,13 @@ impl Editor {
     #[must_use]
     pub fn shaped_row_calls(&self) -> u64 {
         self.shaped_row_calls
+    }
+
+    /// Bounded-work counters for the Ropey-backed layout path. A giant hard
+    /// line must never materialize the whole line through these paths.
+    #[must_use]
+    pub fn layout_work_counters(&self) -> LayoutWorkCounters {
+        self.layout_work
     }
 
     /// Break policy implied by the current wrap mode.
@@ -642,7 +732,7 @@ impl Editor {
         self.reflow_in_flight = Some(generation);
         let task = cx.background_executor().spawn(async move {
             wait_for_reflow_gate();
-            measure_rows(&snapshot.line_texts(), columns, tab_stop, policy)
+            measure_rows(&snapshot, columns, tab_stop, policy)
         });
         cx.spawn(async move |editor, cx| {
             let counts = task.await;
@@ -714,37 +804,42 @@ impl Editor {
         self.segments_for(line)
     }
 
+    pub(crate) fn checkpoints_for(&self, line: LineIndex) -> chaus_layout::WrapCheckpoints {
+        self.wrap_checkpoints
+            .get(line.0)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub(crate) fn segments_for(&self, line: LineIndex) -> Vec<chaus_layout::Segment> {
-        let text = self.document.line_text(line);
-        chaus_layout::segments_with(
-            &text,
+        let source = Self::line_source(&self.document, line);
+        let checkpoints = self.checkpoints_for(line);
+        chaus_layout::segments_window_source(
+            &source,
             self.rows_columns,
             self.settings.tab_stop,
             self.rows_policy,
+            chaus_layout::WrapRowIndex::new(0),
+            usize::MAX,
+            &checkpoints,
         )
+        .0
     }
 
     pub(crate) fn local_row_of(&self, offset: CharOffset, line: LineIndex) -> usize {
-        let text = self.document.line_text(line);
-        self.local_row_in_line(&text, offset, line)
-    }
-
-    /// Same lookup for a caller that already holds the line text, so a wrapped
-    /// selection does not copy the line once per segment.
-    pub(crate) fn local_row_in_line(
-        &self,
-        text: &str,
-        offset: CharOffset,
-        line: LineIndex,
-    ) -> usize {
+        let source = Self::line_source(&self.document, line);
+        let checkpoints = self.checkpoints_for(line);
         let local_char = offset.0.saturating_sub(self.document.line_start(line).0);
-        chaus_layout::row_of_char(
-            text,
+        chaus_layout::row_of_char_source(
+            &source,
             self.rows_columns,
             self.settings.tab_stop,
             self.rows_policy,
-            local_char,
+            chaus_layout::LineCharOffset::new(local_char),
+            &checkpoints,
         )
+        .row
+        .get()
     }
 
     pub(crate) fn row_of_offset(&mut self, offset: CharOffset) -> (LineIndex, usize) {
@@ -758,29 +853,46 @@ impl Editor {
     pub(crate) fn row_span(&mut self, row: usize) -> (LineIndex, Range<usize>) {
         let line = self.line_at_row(row);
         let local_row = row.saturating_sub(self.rows.prefix(line.0));
-        let segments = self.segments_for(line);
-        let span = segments
-            .get(local_row)
-            .or_else(|| segments.last())
-            .map_or(0..0, |segment| segment.start_column..segment.end_column());
+        let source = Self::line_source(&self.document, line);
+        let checkpoints = self.checkpoints_for(line);
+        let span = chaus_layout::segment_at_source(
+            &source,
+            self.rows_columns,
+            self.settings.tab_stop,
+            self.rows_policy,
+            chaus_layout::WrapRowIndex::new(local_row),
+            &checkpoints,
+        )
+        .map_or(0..0, |segment| {
+            segment.start_column.get()..segment.end_column().get()
+        });
         (line, span)
     }
 
     pub(crate) fn caret_column(&self, offset: CharOffset) -> usize {
         let line = self.document.line_of(offset);
-        let start = self.document.line_start(line);
-        let text = self.document.line_text(line);
-        chaus_layout::column_at(
-            &text,
-            offset.0.saturating_sub(start.0),
+        let source = Self::line_source(&self.document, line);
+        let checkpoints = self.checkpoints_for(line);
+        let local = offset.0.saturating_sub(self.document.line_start(line).0);
+        chaus_layout::column_at_source(
+            &source,
+            chaus_layout::LineCharOffset::new(local),
             self.settings.tab_stop,
+            &checkpoints,
         )
+        .get()
     }
 
     pub(crate) fn offset_at(&mut self, line: LineIndex, column: usize) -> CharOffset {
-        let text = self.document.line_text(line);
-        let local = chaus_layout::char_at_column(&text, column, self.settings.tab_stop);
-        CharOffset(self.document.line_start(line).0 + local)
+        let source = Self::line_source(&self.document, line);
+        let checkpoints = self.checkpoints_for(line);
+        let local = chaus_layout::char_at_column_source(
+            &source,
+            chaus_layout::VisualColumn::new(column),
+            self.settings.tab_stop,
+            &checkpoints,
+        );
+        CharOffset(self.document.line_start(line).0 + local.get())
     }
 
     pub(crate) fn clamp_scroll(&mut self) {
@@ -1093,14 +1205,42 @@ impl Render for Editor {
     }
 }
 
+/// Which expensive work a settings change actually requires.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SettingsEffect {
+    /// Measurement inputs changed (wrap, width, tabs, shaping or theme).
+    remeasure: bool,
+    /// Only pixel geometry changed; refresh scroll without re-wrapping.
+    geometry: bool,
+}
+
+fn settings_effect(previous: &Settings, next: &Settings) -> SettingsEffect {
+    let wrap = previous.wrap != next.wrap;
+    let remeasure = wrap
+        || previous.tab_stop != next.tab_stop
+        || (previous.font_size - next.font_size).abs() > f32::EPSILON
+        || previous.font_family != next.font_family
+        || previous.theme != next.theme;
+    let geometry = (previous.line_height - next.line_height).abs() > f32::EPSILON
+        || (previous.font_size - next.font_size).abs() > f32::EPSILON;
+    SettingsEffect {
+        remeasure,
+        geometry,
+    }
+}
+
 fn measure_rows(
-    lines: &[String],
+    snapshot: &chaus_core::document::DocumentSnapshot,
     columns: Option<usize>,
     tab_stop: usize,
     policy: chaus_layout::WrapPolicy,
 ) -> Vec<usize> {
-    lines
-        .iter()
-        .map(|text| chaus_layout::row_count_with(text, columns, tab_stop, policy))
+    let checkpoints = chaus_layout::WrapCheckpoints::default();
+    (0..snapshot.line_count())
+        .map(|line| {
+            let slice = snapshot.line_slice(line);
+            let source = chaus_layout::LineSource::from_rope(slice);
+            chaus_layout::row_count_source(&source, columns, tab_stop, policy, &checkpoints)
+        })
         .collect()
 }
