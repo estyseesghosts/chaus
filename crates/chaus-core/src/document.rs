@@ -418,13 +418,30 @@ impl DocumentSnapshot {
         self.eol.expand(self.rope.chars(), self.preferred_eol)
     }
 
-    /// Per-hard-line text for background layout work. Called off the UI thread
-    /// by a reflow job; the live document is untouched.
+    /// Number of hard lines in the captured text.
     #[must_use]
-    pub fn line_texts(&self) -> Vec<String> {
-        (0..self.rope.len_lines())
-            .map(|line| self.rope.line(line).to_string())
-            .collect()
+    pub fn line_count(&self) -> usize {
+        self.rope.len_lines()
+    }
+
+    /// Borrow one hard line, including its trailing `\n` when present.
+    /// Background layout walks these slices through `chaus_layout`'s bounded
+    /// source path instead of materializing every line up front.
+    #[must_use]
+    pub fn line_slice(&self, line: usize) -> ropey::RopeSlice<'_> {
+        self.rope.line(line)
+    }
+
+    /// Number of shared newline chunks captured by this snapshot.
+    #[must_use]
+    pub fn eol_chunk_count(&self) -> usize {
+        self.eol.chunk_count()
+    }
+
+    /// Upper bound on newline heap bytes captured by this snapshot.
+    #[must_use]
+    pub fn eol_heap_bytes(&self) -> usize {
+        self.eol.estimated_heap_bytes()
     }
 }
 
@@ -914,13 +931,7 @@ impl Document {
             let break_index = self.rope.char_to_line(edit.range.start.0);
             let removed_breaks: Vec<Eol> = {
                 let count = removed.chars().filter(|c| *c == '\n').count();
-                self.eol
-                    .kinds()
-                    .iter()
-                    .skip(break_index)
-                    .take(count)
-                    .copied()
-                    .collect()
+                self.eol.kinds_range(break_index, count)
             };
             let inserted_breaks: Vec<Eol> = edit
                 .insert

@@ -31,7 +31,7 @@ fn long_trailing_runs_wrap_instead_of_widening_one_row() {
         let mut end = 0usize;
         for (index, segment) in segments.iter().enumerate() {
             assert_eq!(segment.char_start, end, "rows stay contiguous");
-            end = segment.char_end;
+            end = segment.char_end.into();
             assert!(
                 !segment.display.is_empty(),
                 "row {index} of {spaces} spaces must not be empty"
@@ -74,7 +74,7 @@ fn mixed_trailing_whitespace_is_bounded_too() {
     let mut end = 0usize;
     for segment in &segments {
         assert_eq!(segment.char_start, end);
-        end = segment.char_end;
+        end = segment.char_end.into();
     }
     assert_eq!(end, text.chars().count());
 }
@@ -89,7 +89,7 @@ fn all_whitespace_lines_terminate_and_cover_the_text() {
             let mut end = 0usize;
             for segment in &segments {
                 assert_eq!(segment.char_start, end);
-                end = segment.char_end;
+                end = segment.char_end.into();
             }
             assert_eq!(end, spaces, "width {width}, {spaces} spaces");
             assert_eq!(

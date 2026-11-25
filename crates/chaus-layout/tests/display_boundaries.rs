@@ -17,13 +17,13 @@ fn assert_mapping(line: &str, tab_stop: usize) {
     assert_eq!(
         boundaries
             .first()
-            .map(|boundary| (boundary.char_offset, boundary.display_byte)),
+            .map(|boundary| (boundary.char_offset.get(), boundary.display_byte.get())),
         Some((0, 0))
     );
     assert_eq!(
         boundaries
             .last()
-            .map(|boundary| (boundary.char_offset, boundary.display_byte)),
+            .map(|boundary| (boundary.char_offset.get(), boundary.display_byte.get())),
         Some((line.chars().count(), segment.display.len())),
         "the mapping must end at the source and display ends"
     );
@@ -33,9 +33,9 @@ fn assert_mapping(line: &str, tab_stop: usize) {
             "display bytes must advance monotonically: {pair:?}"
         );
         assert!(
-            segment.display.is_char_boundary(pair[0].display_byte),
+            segment.display.is_char_boundary(pair[0].display_byte.get()),
             "boundary {} is not a UTF-8 boundary in {:?}",
-            pair[0].display_byte,
+            pair[0].display_byte.get(),
             segment.display
         );
         assert!(
@@ -57,12 +57,18 @@ fn tab_expansion_is_measured_from_the_logical_line_start() {
         4,
     );
     assert_eq!(
-        (boundaries[1].char_offset, boundaries[1].display_byte),
+        (
+            boundaries[1].char_offset.get(),
+            boundaries[1].display_byte.get()
+        ),
         (3, "👩‍💻".len()),
         "the ZWJ emoji is one source grapheme and one display byte run"
     );
     assert_eq!(
-        (boundaries[2].char_offset, boundaries[2].display_byte),
+        (
+            boundaries[2].char_offset.get(),
+            boundaries[2].display_byte.get()
+        ),
         (4, "👩‍💻  ".len()),
         "the tab expands to two spaces after a width-2 emoji"
     );
@@ -87,12 +93,18 @@ fn combining_cjk_and_variation_sequences_keep_grapheme_boundaries() {
         4,
     );
     assert_eq!(
-        (boundaries[1].char_offset, boundaries[1].display_byte),
+        (
+            boundaries[1].char_offset.get(),
+            boundaries[1].display_byte.get()
+        ),
         (2, "e\u{301}".len()),
         "the combining mark stays attached to its base"
     );
     assert_eq!(
-        (boundaries[2].char_offset, boundaries[2].display_byte),
+        (
+            boundaries[2].char_offset.get(),
+            boundaries[2].display_byte.get()
+        ),
         (3, "e\u{301}   ".len()),
         "a width-1 grapheme leaves three spaces before the tab stop"
     );
@@ -113,14 +125,16 @@ fn wrapped_segments_map_only_their_own_source_range() {
             Some(segment.char_end)
         );
         assert_eq!(
-            boundaries.last().map(|boundary| boundary.display_byte),
+            boundaries
+                .last()
+                .map(|boundary| boundary.display_byte.get()),
             Some(segment.display.len())
         );
         assert_eq!(
             segment.char_start, previous_end,
             "segments must partition the hard line"
         );
-        previous_end = segment.char_end;
+        previous_end = segment.char_end.into();
     }
     assert_eq!(previous_end, line.chars().count());
 }

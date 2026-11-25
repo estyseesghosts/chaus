@@ -60,7 +60,7 @@ fn a_megabyte_line_is_walked_in_constant_memory() {
     let mut previous_end = 0usize;
     for row in rows(&line, Some(80), 4, WrapPolicy::Word) {
         assert_eq!(row.char_start, previous_end, "rows must stay contiguous");
-        previous_end = row.char_end;
+        previous_end = row.char_end.into();
     }
     assert_eq!(previous_end, line.chars().count());
     assert_eq!(

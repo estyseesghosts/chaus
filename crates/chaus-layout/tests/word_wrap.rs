@@ -7,14 +7,26 @@ use chaus_layout::{
 fn word(text: &str, max: usize) -> Vec<(String, usize, usize)> {
     segments_with(text, Some(max), 4, WrapPolicy::Word)
         .into_iter()
-        .map(|segment| (segment.display, segment.char_start, segment.char_end))
+        .map(|segment| {
+            (
+                segment.display,
+                segment.char_start.get(),
+                segment.char_end.get(),
+            )
+        })
         .collect()
 }
 
 fn character(text: &str, max: usize) -> Vec<(String, usize, usize)> {
     segments_with(text, Some(max), 4, WrapPolicy::Character)
         .into_iter()
-        .map(|segment| (segment.display, segment.char_start, segment.char_end))
+        .map(|segment| {
+            (
+                segment.display,
+                segment.char_start.get(),
+                segment.char_end.get(),
+            )
+        })
         .collect()
 }
 

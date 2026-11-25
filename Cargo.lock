@@ -848,6 +848,7 @@ dependencies = [
 name = "chaus-layout"
 version = "0.1.0"
 dependencies = [
+ "ropey",
  "unicode-linebreak",
  "unicode-segmentation",
  "unicode-width",

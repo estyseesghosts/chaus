@@ -6,7 +6,7 @@ use chaus_core::eol::{Eol, EolMap};
 fn normalizes_and_records_each_break_kind() {
     let (text, map) = EolMap::from_source("a\r\nb\nc\rd");
     assert_eq!(text, "a\nb\nc\nd");
-    assert_eq!(map.kinds(), &[Eol::CrLf, Eol::Lf, Eol::Cr]);
+    assert_eq!(map.kinds(), vec![Eol::CrLf, Eol::Lf, Eol::Cr]);
 }
 
 #[test]
@@ -20,7 +20,7 @@ fn round_trips_mixed_endings() {
 fn splices_preserve_untouched_breaks() {
     let mut map = EolMap::new(vec![Eol::Lf, Eol::CrLf, Eol::Lf]);
     map.splice(1, 1, [Eol::Cr, Eol::Lf]);
-    assert_eq!(map.kinds(), &[Eol::Lf, Eol::Cr, Eol::Lf, Eol::Lf]);
+    assert_eq!(map.kinds(), vec![Eol::Lf, Eol::Cr, Eol::Lf, Eol::Lf]);
 }
 
 #[test]
