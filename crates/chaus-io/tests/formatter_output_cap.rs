@@ -22,7 +22,9 @@ fn noisy_formatter() -> Formatter {
         "sh",
         vec![
             "-c".to_owned(),
-            "yes x | head -c 9437184; sleep 30".to_owned(),
+            // exec makes the child itself the long-lived process; otherwise a
+            // shell may leave `sleep` as a grandchild holding the pipes open.
+            "yes x | head -c 9437184; exec sleep 30".to_owned(),
         ],
     )
 }

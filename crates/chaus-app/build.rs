@@ -52,7 +52,12 @@ fn main() {
         println!("cargo:rerun-if-changed={}", manifest_file.display());
         println!("cargo:rerun-if-changed={}", icon_file.display());
         let resource_object = out_dir.join("chaus-resources.res");
-        let result = Command::new("rc.exe")
+        // The Windows SDK bin directory is not on PATH in a plain CI shell.
+        // Resolve rc.exe from the SDK registry so the resource script compiles
+        // on both developer machines and hosted runners.
+        let rc = embed_resource::find_windows_sdk_tool("rc.exe")
+            .unwrap_or_else(|| PathBuf::from("rc.exe"));
+        let result = Command::new(rc)
             .args([
                 "/nologo",
                 "/i",
