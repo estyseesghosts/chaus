@@ -1,9 +1,13 @@
-//! Embeds the Windows application manifest into the `chaus` executable.
+//! Embeds the Windows application manifest and icon into the `chaus` executable.
 //!
 //! The manifest is what makes the loader bind Common-Controls 6 instead of the
 //! legacy 5.82 library. `TaskDialogIndirect` exists only in version 6, and a
 //! statically imported function is resolved before `main` runs, so without this
 //! resource every launch ends in `STATUS_ENTRYPOINT_NOT_FOUND`.
+//!
+//! The icon is resource ID 1 because GPUI's Windows platform calls `LoadImageW`
+//! with that ID when it registers its window class. Without it Explorer and the
+//! taskbar show the generic executable icon instead of the Chaus mark.
 //!
 //! GPUI ships an equivalent manifest behind its `windows-manifest` feature, but
 //! that feature's resource compilation breaks with the devkitPro `windres` on
@@ -38,24 +42,39 @@ fn main() {
     let resources = manifest_dir.join("resources/windows");
     let resource_file = resources.join("chaus.rc");
     let manifest_file = resources.join("chaus.manifest.xml");
+    let icon_file = resources.join("chaus.ico");
 
-    // MSVC has no windres. Hand the manifest straight to link.exe, which
-    // embeds it into the executable's resource section. Skipping this is the
-    // STATUS_ENTRYPOINT_NOT_FOUND failure described above.
+    // MSVC has no windres. Its rc.exe compiles the whole resource script, so
+    // the manifest and icon go into one object instead of separate linker
+    // flags. Skipping them is the STATUS_ENTRYPOINT_NOT_FOUND failure above.
     if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rerun-if-changed={}", resource_file.display());
         println!("cargo:rerun-if-changed={}", manifest_file.display());
-        println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
-        println!(
-            "cargo:rustc-link-arg-bins=/MANIFESTINPUT:{}",
-            forward_slashes(&manifest_file)
-        );
+        println!("cargo:rerun-if-changed={}", icon_file.display());
+        let resource_object = out_dir.join("chaus-resources.res");
+        let result = Command::new("rc.exe")
+            .args([
+                "/nologo",
+                "/i",
+                &forward_slashes(&resources),
+                "/fo",
+                &forward_slashes(&resource_object),
+                &forward_slashes(&resource_file),
+            ])
+            .output()
+            .expect("rc.exe is required to embed the Windows resources");
+        if !result.status.success() {
+            panic!(
+                "rc.exe could not compile {}:\n{}",
+                resource_file.display(),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        let resource_arg = forward_slashes(&resource_object);
         // Integration tests link the application library directly and need the
         // same Common-Controls 6 manifest as the binary.
-        println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
-        println!(
-            "cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}",
-            forward_slashes(&manifest_file)
-        );
+        println!("cargo:rustc-link-arg-bins={resource_arg}");
+        println!("cargo:rustc-link-arg-tests={resource_arg}");
         return;
     }
 
@@ -63,6 +82,7 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", resource_file.display());
     println!("cargo:rerun-if-changed={}", manifest_file.display());
+    println!("cargo:rerun-if-changed={}", icon_file.display());
 
     let input = forward_slashes(&resource_file);
     let include_dir = forward_slashes(&resources);
@@ -78,7 +98,7 @@ fn main() {
             &include_dir,
         ])
         .output()
-        .expect("windres is required to embed the Windows manifest");
+        .expect("windres is required to embed the Windows resources");
 
     if !result.status.success() {
         panic!(

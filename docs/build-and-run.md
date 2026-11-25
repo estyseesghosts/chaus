@@ -50,7 +50,7 @@ The build verified here used the GNU host `x86_64-pc-windows-gnu` with the 1.98.
 Two repo details matter on Windows:
 
 - `.cargo/config.toml` adds `-C target-feature=+crt-static` for `x86_64-pc-windows-gnu`. Without it the executable imports MinGW runtime DLLs that are absent on a clean machine.
-- `crates/chaus-app/build.rs` embeds a Common-Controls 6 application manifest through `windres` on GNU and through `link.exe` on MSVC. `TaskDialogIndirect` is a static import that resolves only in Common-Controls 6; without the manifest the process exits with `0xC0000139` before `main`, including for `--help`. On MSVC the same file is passed with `/MANIFEST:EMBED` and `/MANIFESTINPUT:`.
+- `crates/chaus-app/build.rs` embeds a Common-Controls 6 application manifest and the ID 1 icon from `resources/windows/chaus.rc`. GNU builds use `windres`; MSVC builds use `rc.exe`. `TaskDialogIndirect` is a static import that resolves only in Common-Controls 6; without the manifest the process exits with `0xC0000139` before `main`, including for `--help`. GPUI's Windows platform loads resource ID 1 as the window icon, so the same `.ico` also covers the taskbar and titlebar.
 
 ### C compiler for GNU builds
 
