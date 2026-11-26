@@ -85,6 +85,11 @@ impl EntityInputHandler for Editor {
         // consumed by the modal engine. In Normal/Visual/Command modes the
         // engine owns those keys; letting the character through would insert
         // `j`, `d`, `:` and so on as literal text.
+        if self.modal_sheet_open() {
+            // A modal sheet owns the window. Character messages can arrive
+            // after the key-down that opened or was consumed by the sheet.
+            return;
+        }
         if self.suppress_text_input {
             // The OS delivered WM_CHAR for a key the modal engine already
             // consumed. Drop exactly this character message.
@@ -326,6 +331,9 @@ impl EntityInputHandler for Editor {
     }
 
     fn accepts_text_input(&self, _: &mut Window, _: &mut Context<Self>) -> bool {
+        if self.modal_sheet_open() {
+            return false;
+        }
         // GPUI derives `prefers_ime_for_printable_keys` from this method, so
         // Normal mode sends printable keys through the command grammar while
         // Insert mode and standard editing defer to an active IME. The
@@ -334,6 +342,9 @@ impl EntityInputHandler for Editor {
     }
 
     fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal_sheet_open() {
+            return;
+        }
         if self.command_line_active() {
             if let Some(text) = item.text() {
                 self.insert_command_text(&text, cx);

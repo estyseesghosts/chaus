@@ -10,8 +10,8 @@ use chaus_core::position::{CharOffset, Selection};
 use chaus_io::recovery::{PendingRecoveryOp, RecoveryEntry, RecoveryError, RecoveryRecord};
 use gpui::{
     div, px, AnyElement, App, AsyncApp, Context, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyDownEvent, MouseButton, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
-    WeakEntity, Window,
+    MouseButton, ParentElement as _, StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    Window,
 };
 use silvestris::controls::Button;
 use silvestris::ActiveTheme;
@@ -185,17 +185,26 @@ impl Editor {
             return false;
         }
         self.recovery_queue = records.into();
+        self.recovery_selection = 0;
+        self.recovery_window = Some(window.window_handle().window_id());
+        self.ensure_recovery_interceptor(cx);
         window.focus(&self.recovery_focus.recover, cx);
-        // The sheet has not rendered yet, so its button focus handle is not in
-        // the key dispatch tree at this instant. Re-apply focus after the
-        // effect cycle; otherwise Tab and typing fall through to the editor
-        // behind the modal sheet.
+        // Focus the button again after the sheet has rendered so mouse focus
+        // and the focus ring agree. Keys are handled by the interceptor, which
+        // does not depend on the rendered focus node.
         let focus = self.recovery_focus.recover.clone();
         window.defer(cx, move |window, cx| {
             window.focus(&focus, cx);
         });
         cx.notify();
         true
+    }
+
+    /// Whether a modal sheet (recovery, close or save-conflict) owns the
+    /// window. While true, editor key bindings and text input are disabled.
+    #[must_use]
+    pub(crate) fn modal_sheet_open(&self) -> bool {
+        !self.recovery_queue.is_empty() || self.close_prompt || self.conflict_prompt.is_some()
     }
 
     pub(crate) fn schedule_recovery(&mut self, cx: &mut Context<Self>) {
@@ -497,33 +506,56 @@ impl Editor {
         cx.notify();
     }
 
-    pub(crate) fn recovery_prompt_key(
+    /// Install the app-level key interceptor that makes the sheet modal.
+    ///
+    /// GPUI dispatches key bindings before element key handlers, and the
+    /// launched window can still have the document focused when the background
+    /// scan lands. An interceptor runs before both, so it is the only place
+    /// that can reliably keep Tab/Enter out of the editor.
+    pub(crate) fn ensure_recovery_interceptor(&mut self, cx: &mut Context<Self>) {
+        if self.recovery_interceptor.is_some() {
+            return;
+        }
+        let weak = cx.weak_entity();
+        self.recovery_interceptor = Some(cx.intercept_keystrokes(move |event, window, cx| {
+            let keystroke = event.keystroke.clone();
+            let _ = weak.update(cx, |editor, cx| {
+                if editor.recovery_queue.is_empty()
+                    || editor.recovery_window != Some(window.window_handle().window_id())
+                {
+                    return;
+                }
+                // Suppress both the binding behind the sheet and the button's
+                // key-up click; the interceptor performs the action once.
+                window.prevent_default();
+                cx.stop_propagation();
+                editor.recovery_intercept_key(&keystroke, window, cx);
+            });
+        }));
+    }
+
+    pub(crate) fn recovery_intercept_key(
         &mut self,
-        event: &KeyDownEvent,
+        keystroke: &gpui::Keystroke,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match event.keystroke.key.as_str() {
-            "escape" => self.dismiss_recovery(window, cx),
+        match keystroke.key.as_str() {
             "tab" => {
-                cx.stop_propagation();
-                let reverse = event.keystroke.modifiers.shift;
-                let order = [
-                    &self.recovery_focus.recover,
-                    &self.recovery_focus.discard,
-                    &self.recovery_focus.discard_all,
-                ];
-                let current = order
-                    .iter()
-                    .position(|focus| focus.is_focused(window))
-                    .unwrap_or(0);
-                let next = if reverse {
-                    (current + order.len() - 1) % order.len()
+                let reverse = keystroke.modifiers.shift;
+                self.recovery_selection = if reverse {
+                    (self.recovery_selection + 2) % 3
                 } else {
-                    (current + 1) % order.len()
+                    (self.recovery_selection + 1) % 3
                 };
-                window.focus(order[next], cx);
+                cx.notify();
             }
+            "enter" | "space" => match self.recovery_selection {
+                1 => self.discard_next(window, cx),
+                2 => self.discard_all(window, cx),
+                _ => self.recover_next(window, cx),
+            },
+            "escape" => self.dismiss_recovery(window, cx),
             _ => {}
         }
     }
@@ -554,10 +586,6 @@ impl Editor {
             .bg(silvestris::convert::hsla(theme.colors.scrim))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            .on_key_down(cx.listener(|editor, event: &KeyDownEvent, window, cx| {
-                cx.stop_propagation();
-                editor.recovery_prompt_key(event, window, cx);
-            }))
             .child(
                 div()
                     .w(px(500.0))
@@ -594,6 +622,7 @@ impl Editor {
                             .child(
                                 Button::new("recovery-discard-all", "Discard All")
                                     .focus_handle(self.recovery_focus.discard_all.clone())
+                                    .selected(self.recovery_selection == 2)
                                     .destructive(true)
                                     .on_click(cx.listener(|editor, _, window, cx| {
                                         editor.discard_all(window, cx);
@@ -602,6 +631,7 @@ impl Editor {
                             .child(
                                 Button::new("recovery-discard", "Discard")
                                     .focus_handle(self.recovery_focus.discard.clone())
+                                    .selected(self.recovery_selection == 1)
                                     .destructive(true)
                                     .on_click(cx.listener(|editor, _, window, cx| {
                                         editor.discard_next(window, cx);
@@ -610,6 +640,7 @@ impl Editor {
                             .child(
                                 Button::new("recovery-recover", "Recover")
                                     .focus_handle(self.recovery_focus.recover.clone())
+                                    .selected(self.recovery_selection == 0)
                                     .default_button(true)
                                     .on_click(cx.listener(|editor, _, window, cx| {
                                         editor.recover_next(window, cx);

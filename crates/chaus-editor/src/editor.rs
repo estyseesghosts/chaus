@@ -36,7 +36,7 @@ use crate::editor_keys::{
     Replace, Right, Save, SaveAs, SelectAll, SelectDocumentEnd, SelectDocumentStart, SelectDown,
     SelectEnd, SelectHome, SelectLeft, SelectRight, SelectUp, SelectWordLeft, SelectWordRight,
     ToggleVim, TrimTrailingWhitespace, Undo, Up, WordLeft, WordRight, ZoomIn, ZoomOut, ZoomReset,
-    KEY_CONTEXT, VIM_OWNED_KEY_CONTEXT,
+    KEY_CONTEXT, MODAL_KEY_CONTEXT, VIM_OWNED_KEY_CONTEXT,
 };
 use crate::editor_recovery::{new_recovery_id, RecoveryPromptFocus};
 use crate::file_operation::{CloseAfter, DocumentGeneration, FileOperation};
@@ -143,6 +143,14 @@ pub struct Editor {
     pub(crate) recovery_focus: RecoveryPromptFocus,
     pub(crate) recovery_key: u64,
     pub(crate) recovery_epoch: u64,
+    /// Keyboard target while the recovery sheet is up: 0 Recover, 1 Discard,
+    /// 2 Discard All. Driven by the app-level key interceptor so the sheet
+    /// works even when no button owns the rendered focus node.
+    pub(crate) recovery_selection: usize,
+    /// Subscription keeping the recovery key interceptor alive.
+    pub(crate) recovery_interceptor: Option<gpui::Subscription>,
+    /// Window the interceptor should act on.
+    pub(crate) recovery_window: Option<gpui::WindowId>,
     /// Original path/bom retained by a recovered document until it is saved.
     /// The document itself stays untitled so recovery never overwrites the
     /// original file by accident.
@@ -286,6 +294,9 @@ impl Editor {
             recovery_focus,
             recovery_key: new_recovery_id(),
             recovery_epoch: 0,
+            recovery_selection: 0,
+            recovery_interceptor: None,
+            recovery_window: None,
             recovery_original_path: None,
             recovery_had_utf8_bom: false,
             recovery_directory: None,
@@ -1055,6 +1066,15 @@ impl Render for Editor {
             .then(|| self.render_conflict_prompt(cx));
         let recovery_prompt =
             (!self.recovery_queue.is_empty()).then(|| self.render_recovery_prompt(cx));
+        // Repair focus on the sheet's first frame when the background scan
+        // landed after this window focused the document. The app-level key
+        // interceptor is what actually keeps keys out of the document; this
+        // only gives the buttons a real focus ring and mouse-focus parity.
+        if !self.recovery_queue.is_empty()
+            && (self.focus.is_focused(window) || window.focused(cx).is_none())
+        {
+            window.focus(&self.recovery_focus.recover, cx);
+        }
         let command_line = self.render_command_line(window, &theme);
         let vim_label = if command_line.is_some() {
             None
@@ -1062,7 +1082,15 @@ impl Render for Editor {
             self.vim_mode_label()
         };
         let vim_owns_keys = self.vim && !self.vim_engine.mode().accepts_text();
-        let key_context = if vim_owns_keys {
+        // Key bindings are dispatched before element key handlers, so the
+        // recovery sheet cannot block Indent/Newline by stopping propagation.
+        // Drop the editor context while it is up; the app-level interceptor
+        // then owns Tab, Enter/Space and Escape. Close/conflict sheets keep
+        // the editor context so their existing Escape handling still runs.
+        let recovery_modal = !self.recovery_queue.is_empty();
+        let key_context = if recovery_modal {
+            MODAL_KEY_CONTEXT
+        } else if vim_owns_keys {
             VIM_OWNED_KEY_CONTEXT
         } else {
             KEY_CONTEXT

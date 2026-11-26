@@ -8,6 +8,11 @@ pub const KEY_CONTEXT: &str = "ChausEditor";
 /// Editing bindings are excluded so Enter, Backspace, arrows and Delete reach
 /// the modal engine instead of inserting or deleting text.
 pub const VIM_OWNED_KEY_CONTEXT: &str = "ChausEditor ChausVimNormal";
+/// Key context while a modal sheet owns the window. GPUI dispatches key
+/// bindings before element key handlers, so `ChausEditor` must disappear from
+/// the context stack or Indent/Newline would still edit the document behind
+/// the sheet.
+pub const MODAL_KEY_CONTEXT: &str = "ChausModal";
 /// Editor bindings never fire while a Silvestris text client owns the keyboard.
 const COMMAND_CONTEXT: &str = "ChausEditor && !SilvestrisText";
 /// Context predicate for bindings that only apply outside Vim's text-owning

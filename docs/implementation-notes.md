@@ -195,9 +195,16 @@ history; `None` restores horizontal scrolling.
   Discovery skips snapshots older than 30 days, retires snapshots whose saved
   file already matches, and collapses exact duplicates for one path while
   keeping genuinely different unsaved text. The sheet shows the full original
-  path and snapshot age, and offers Recover / Discard / Discard All. Recovery
-  refuses a host window that has become dirty after startup; the app then opens
-  a separate recovery window rather than replacing typed text. A recovered
+  path and snapshot age, and offers Recover / Discard / Discard All. Focus
+  starts on Recover; Tab cycles the three buttons and Enter/Space activate the
+  focused one, so the sheet is fully keyboard-operable. A scan that lands after
+  the window already focused the document repairs focus on the sheet's first
+  frame. Because GPUI resolves key bindings before element handlers, the sheet
+  also drops the editor key context and installs an app-level keystroke
+  interceptor, so bindings such as Indent/Newline and text input cannot reach
+  the document behind it. Recovery refuses a host window that has become dirty
+  after startup; the app then opens a separate recovery window rather than
+  replacing typed text. A recovered
   document keeps its original path and BOM state for Save As even though its
   live `file` is intentionally `None`. Snapshot writes and retirements carry an
   application-owned ticket; the last-window exit path drains them (like the
