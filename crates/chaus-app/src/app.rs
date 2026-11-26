@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use chaus_core::settings::Settings;
 use chaus_editor::{Editor, FileDialogs};
@@ -182,9 +183,7 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
         chaus_editor::bind_keys(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
-                if let Some(writer) = cx.try_global::<SettingsWriterGlobal>() {
-                    writer.0.read(cx).flush_on_exit();
-                }
+                flush_and_drain_on_exit(cx);
                 cx.quit();
             }
         })
@@ -192,7 +191,7 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
 
         let recovery_task = cx
             .background_executor()
-            .spawn(async { chaus_io::recovery::list() });
+            .spawn(async { chaus_io::recovery::scan() });
 
         // Each requested path owns one window from the start. Its title says
         // "Opening …" until the deferred load succeeds, so a failure never
@@ -228,23 +227,31 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
             .detach();
         }
         let recovery_host = if !has_paths { open_untitled(cx) } else { None };
-        if new_window {
-            open_untitled(cx);
-        }
+        let extra_host = if new_window { open_untitled(cx) } else { None };
 
-        // Recovery never replaces a CLI file: records get their own untitled
-        // window, which is the initial window when no paths were requested.
+        // Recovery never replaces a CLI file, and never replaces text typed
+        // while the background scan was running. A pristine host window is the
+        // only window that may adopt the queue in place; otherwise records get
+        // their own window.
         cx.spawn(async move |cx| {
-            let records = recovery_task.await;
-            if records.is_empty() {
+            let entries = recovery_task.await;
+            if entries.is_empty() {
                 return;
             }
             cx.update(|cx| {
-                let handle =
-                    recovery_host.or_else(|| if has_paths { open_untitled(cx) } else { None });
-                if let Some(handle) = handle {
+                let remaining = entries;
+                if let Some(handle) = recovery_host {
+                    let accepted = handle.update(cx, |editor, window, cx| {
+                        editor.queue_recovery(remaining.clone(), window, cx)
+                    });
+                    if accepted.unwrap_or(false) {
+                        return;
+                    }
+                }
+                let fallback = extra_host.or_else(|| open_untitled(cx));
+                if let Some(handle) = fallback {
                     let _ = handle.update(cx, |editor, window, cx| {
-                        editor.queue_recovery(records, window, cx);
+                        editor.queue_recovery(remaining, window, cx);
                     });
                 }
             });
@@ -253,6 +260,28 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
         cx.activate(true);
     });
     exit_code
+}
+
+/// Final flush before the process exits.
+///
+/// Settings use a synchronous write; recovery retirement and snapshot writes
+/// are background work with an application-owned ticket, so shutdown waits for
+/// them. Without this, closing the last window can exit before a `.rec` file
+/// is deleted and every discard comes back on the next launch.
+pub fn flush_and_drain_on_exit(cx: &mut App) {
+    if let Some(writer) = cx.try_global::<SettingsWriterGlobal>() {
+        writer.0.read(cx).flush_on_exit();
+    }
+    let pending = chaus_io::recovery::pending_operations();
+    if pending == 0 {
+        return;
+    }
+    if !chaus_io::recovery::drain_pending(Duration::from_secs(30)) {
+        eprintln!(
+            "chaus: recovery cleanup did not finish before exit ({} operation(s) pending)",
+            chaus_io::recovery::pending_operations()
+        );
+    }
 }
 
 /// Install the application-global settings model. Every document window reads

@@ -186,20 +186,44 @@ history; `None` restores horizontal scrolling.
   a conflict replaces the document; there is no three-way merge.
 - Dirty documents write a debounced crash-recovery snapshot under the platform
   state directory (`%LOCALAPPDATA%\Chaus\Recovery`, `$XDG_STATE_HOME/chaus/recovery`,
-  or `~/.local/state/chaus/recovery`). The 64 MiB reader limit is now checked
-  on the serialized record before writing, so an accepted snapshot is always
+  or `~/.local/state/chaus/recovery`). The 64 MiB reader limit is checked on the
+  serialized record before writing, so an accepted snapshot is always
   listable; exceeding it returns a typed error and a visible editor status
-  instead of replacing a usable snapshot with an unreadable one. Legacy records
-  larger than the cap are still skipped at startup. Launch offers
-  Recover/Discard per snapshot, and saving or discarding removes it. Snapshot
-  retirement and removal run on the background executor; the epoch watermark
-  remains the ordering barrier, and cleanup failures become a visible editor
-  status. Recovery is best-effort and does not replace a power-failure test.
+  instead of replacing a usable snapshot with an unreadable one. Launch scans
+  headers only: the body is read when a person chooses Recover. The filename's
+  id must match the embedded id, so a copied/renamed `.rec` is not a ghost.
+  Discovery skips snapshots older than 30 days, retires snapshots whose saved
+  file already matches, and collapses exact duplicates for one path while
+  keeping genuinely different unsaved text. The sheet shows the full original
+  path and snapshot age, and offers Recover / Discard / Discard All. Recovery
+  refuses a host window that has become dirty after startup; the app then opens
+  a separate recovery window rather than replacing typed text. A recovered
+  document keeps its original path and BOM state for Save As even though its
+  live `file` is intentionally `None`. Snapshot writes and retirements carry an
+  application-owned ticket; the last-window exit path drains them (like the
+  settings flush) before quitting, so a discard cannot lose its deletion to
+  process exit. The epoch watermark remains the ordering barrier, and cleanup
+  failures become a visible editor status. Recovery is best-effort and does not
+  replace a power-failure test.
 - A 2-second background watcher checks identity, size and mtime first and only
   hashes when one changed, with a forced hash every 30 seconds for coarse
-  timestamps. A check in flight suppresses the next tick. Review opens the
+  timestamps. A check in flight suppresses the next tick. A result from a
+  superseded epoch still clears the in-flight flag, so a save or reload during
+  an inspection cannot wedge the watcher permanently. Review opens the
   Reload / Save As / Overwrite / Cancel sheet. The watcher never reloads or
   overwrites the document automatically.
+- Save-conflict resolution preserves the intent that started the save. A
+  conflict reached from the dirty-close sheet keeps the close sheet/close
+  intent; Overwrite or Save As finishes the close, Reload forces the reload and
+  then closes, and Cancel returns to the close decision. `:wq`/`:x` retain
+  their Ex close intent through the same sheet.
+- Replace-one first tests the current selection against the search term and
+  replaces it when it matches; only otherwise does it search forward. The Tab
+  order in the find bar depends on whether the Replace row is visible.
+  Wrapped-line hit testing clamps the clicked column to that visual row's span,
+  so blank area to the right cannot select a later visual row. In no-wrap
+  mode horizontal scrolling clamps to the widest visible row, and dragging
+  outside the viewport keeps autoscrolling while the pointer is held still.
 - Edits refresh only the hard lines reported by `Document`. A Fenwick tree
   answers "rows above this line" and "which line owns this row" in
   `O(log lines)`; a point edit updates one leaf, and a hard-line splice

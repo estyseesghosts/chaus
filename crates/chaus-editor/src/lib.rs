@@ -41,5 +41,6 @@ pub use editor::{set_reflow_gate_for_test, Editor};
 pub use editor_file::{set_save_delay_for_test, set_save_gate_for_test, FileState, LoadHook};
 pub use editor_highlight::HighlightStatistics;
 pub use editor_keys::{bind_keys, KEY_CONTEXT};
+pub use editor_watch::set_disk_check_gate_for_test;
 pub use file_dialogs::{FileDialogs, MemoryFrameStore};
 pub use geometry::Geometry;

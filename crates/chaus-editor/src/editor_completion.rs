@@ -128,7 +128,7 @@ impl Editor {
         let separator = if directory.contains('\\') { '\\' } else { '/' };
         let (completed, finished) = match listing.names.as_slice() {
             [] => {
-                self.flash_status("No matching files", cx);
+                self.flash_status(empty_listing_message(listing.truncated), cx);
                 cx.notify();
                 return;
             }
@@ -193,10 +193,29 @@ fn matches_prefix(name: &str, prefix: &str) -> bool {
     }
 }
 
+/// An empty result must not claim a match does not exist when the scan stopped
+/// before reaching it.
+fn empty_listing_message(truncated: bool) -> &'static str {
+    if truncated {
+        "No matching files in the first 4096 directory entries; listing was truncated"
+    } else {
+        "No matching files"
+    }
+}
+
 /// List names in `directory` that start with `prefix`. The caller has already
 /// expanded a leading `~`; non-UTF-8 names are skipped because they cannot be
 /// spelled back into the command line losslessly.
 fn list_matches(directory: &Path, prefix: &str) -> Listing {
+    list_matches_with_limit(directory, prefix, MAX_SCANNED, MAX_CANDIDATES)
+}
+
+fn list_matches_with_limit(
+    directory: &Path,
+    prefix: &str,
+    max_scanned: usize,
+    max_candidates: usize,
+) -> Listing {
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) => {
@@ -208,7 +227,7 @@ fn list_matches(directory: &Path, prefix: &str) -> Listing {
     };
     let mut listing = Listing::default();
     for (scanned, entry) in entries.enumerate() {
-        if scanned >= MAX_SCANNED {
+        if scanned >= max_scanned {
             listing.truncated = true;
             break;
         }
@@ -225,7 +244,7 @@ fn list_matches(directory: &Path, prefix: &str) -> Listing {
         if !matches_prefix(&name, prefix) {
             continue;
         }
-        if listing.names.len() >= MAX_CANDIDATES {
+        if listing.names.len() >= max_candidates {
             listing.truncated = true;
             break;
         }
@@ -254,3 +273,6 @@ fn common_prefix<'a>(mut names: impl Iterator<Item = &'a str>) -> String {
     }
     common.into_iter().collect()
 }
+
+#[cfg(test)]
+mod completion_scan_tests;

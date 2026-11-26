@@ -49,6 +49,17 @@ On window focus and before Save, stat/hash the file. Optionally add `notify` wat
 
 Use OS state directories (Linux `$XDG_STATE_HOME/chaus/` or `~/.local/state/chaus/`; Windows `%LOCALAPPDATA%\Chaus\Recovery\`), **not** original file sidecars by default. Debounce a write of dirty-document snapshots with metadata (original path, save baseline, document revision, timestamp, encoding/EOL); use an app-controlled storage limit and deletion policy. On launch, offer Recover / Discard per unsaved snapshot. Recovery never silently overwrites original documents. Prefer write-ahead or versioned recovery records so a crash during recovery write leaves previous snapshot intact. Do not market recovery as guaranteeing no data loss until power-failure tests pass.
 
+Current implementation policy:
+
+- Discovery reads the fixed header and path only. A 64 MiB body is read after the person chooses Recover, so a 100-file backlog is not 100 full decodes at startup.
+- The embedded id must match the 16-hex-digit filename. A copied or renamed snapshot is ignored instead of becoming a record whose canonical filename is deleted while the renamed file survives forever.
+- Snapshots older than 30 days are retired. A snapshot whose original file was saved after it, with identical normalized text, is retired. Exact duplicates for one original path collapse to the newest; snapshots with different text are all kept.
+- The sheet shows the full original path and snapshot age and offers Discard All, so a large accidental backlog is one action to clear.
+- Recovery never replaces a window whose document is dirty or busy. Startup uses a pristine host window; otherwise it opens a separate recovery window.
+- Recovery records carry the original path, EOL preference and BOM state. A recovered document has no live file, and Save As falls back to those retained fields.
+- Snapshot writes and retirements are tracked as application-owned pending operations. When the last window closes, the app drains them before quitting, alongside the synchronous settings flush, so deletion is durable before process exit.
+
+
 ## Dialog and CLI test matrix
 
 - `chaus`, `chaus --help`, `chaus "a b.txt"`, `chaus -- --leading-dash.txt`, multiple paths, missing path, folder path, invalid UTF-8 OsString path on Linux.

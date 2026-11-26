@@ -125,16 +125,28 @@ impl Editor {
             .as_ref()
             .map(|bar| bar.replace.read(cx).text().to_string())
             .unwrap_or_default();
-        let from = self.selection.range().end;
-        let Some(start) = self
-            .document
-            .find_literal(&needle, from, true, case_sensitive)
-        else {
-            self.set_status("No matches");
-            cx.notify();
-            return;
+        let current = self.selection.range();
+        let replaces_current = !current.is_empty()
+            && selection_matches(&self.document.slice(current), &needle, case_sensitive);
+        let start = if replaces_current {
+            current.start
+        } else {
+            let Some(start) =
+                self.document
+                    .find_literal(&needle, current.end, true, case_sensitive)
+            else {
+                self.set_status("No matches");
+                cx.notify();
+                return;
+            };
+            start
         };
-        let range = CharRange::new(start, CharOffset(start.0 + needle.chars().count()));
+        let end = if replaces_current {
+            current.end
+        } else {
+            CharOffset(start.0 + needle.chars().count())
+        };
+        let range = CharRange::new(start, end);
         let before = self.selection;
         let after = Selection::caret(CharOffset(start.0 + replacement.chars().count()));
         let transaction = EditTransaction::new(
@@ -232,6 +244,13 @@ impl Editor {
                 let Some(bar) = self.find_bar.as_ref() else {
                     return;
                 };
+                // Ordinary Find renders no Replace row; focusing its hidden
+                // field makes typing appear to stop working.
+                if !bar.show_replace {
+                    let find = bar.find.read(cx).focus_handle(cx);
+                    window.focus(&find, cx);
+                    return;
+                }
                 let find_focused = bar.find.read(cx).focus_handle(cx).is_focused(window);
                 let target = if find_focused {
                     bar.replace.read(cx).focus_handle(cx)
@@ -354,9 +373,50 @@ impl Editor {
         Some((needle, bar.case_sensitive))
     }
 
+    /// Whether the Replace row is visible, for focus-order tests.
+    #[must_use]
+    pub fn find_shows_replace_for_test(&self) -> bool {
+        self.find_bar.as_ref().is_some_and(|bar| bar.show_replace)
+    }
+
+    /// Current text of both find fields, for focus-order tests.
+    #[must_use]
+    pub fn find_text_for_test(&self, cx: &App) -> Option<(String, String)> {
+        let bar = self.find_bar.as_ref()?;
+        Some((
+            bar.find.read(cx).text().to_string(),
+            bar.replace.read(cx).text().to_string(),
+        ))
+    }
+
+    /// Replace both fields without synthesizing keyboard events.
+    #[doc(hidden)]
+    pub fn set_find_text_for_test(&mut self, find: &str, replace: &str, cx: &mut Context<Self>) {
+        let Some(bar) = self.find_bar.as_ref() else {
+            return;
+        };
+        let find_field = bar.find.clone();
+        let replace_field = bar.replace.clone();
+        find_field.update(cx, |field, cx| field.set_text(find, cx));
+        replace_field.update(cx, |field, cx| field.set_text(replace, cx));
+    }
+
     fn describe_offset(&self, offset: CharOffset) -> String {
         let line = self.document.line_of(offset);
         let column = offset.0.saturating_sub(self.document.line_start(line).0);
         format!("{}:{}", line.0 + 1, column + 1)
     }
+}
+
+/// Per-scalar case folding, matching the literal-search comparison in
+/// `chaus-core` so "replace the current selection" uses the same equality.
+fn selection_matches(selected: &str, needle: &str, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        return selected == needle;
+    }
+    selected.chars().count() == needle.chars().count()
+        && selected
+            .chars()
+            .zip(needle.chars())
+            .all(|(left, right)| left.to_lowercase().eq(right.to_lowercase()))
 }

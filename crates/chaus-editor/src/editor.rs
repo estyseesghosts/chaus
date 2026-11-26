@@ -11,7 +11,7 @@ use chaus_core::eol::{Eol, EolMap};
 use chaus_core::position::{CharOffset, CharRange, LineIndex, Selection};
 use chaus_core::settings::{Settings, WrapMode};
 use chaus_highlight::{LanguageId, Span};
-use chaus_io::recovery::RecoveryRecord;
+use chaus_io::recovery::RecoveryEntry;
 use chaus_io::LoadedFile;
 use chaus_vim::Engine;
 use gpui::prelude::FluentBuilder as _;
@@ -39,7 +39,7 @@ use crate::editor_keys::{
     KEY_CONTEXT, VIM_OWNED_KEY_CONTEXT,
 };
 use crate::editor_recovery::{new_recovery_id, RecoveryPromptFocus};
-use crate::file_operation::{DocumentGeneration, FileOperation};
+use crate::file_operation::{CloseAfter, DocumentGeneration, FileOperation};
 use crate::geometry::Geometry;
 
 /// Routine confirmations (`Saved`, `Copied`) disappear after this long.
@@ -95,6 +95,13 @@ pub struct Editor {
     pub(crate) preedit_start: Option<CharOffset>,
     pub(crate) preedit_active: bool,
     pub(crate) selecting: bool,
+    /// Last pointer position during a drag, used by the stationary-pointer
+    /// autoscroll timer.
+    pub(crate) drag_pointer: Option<gpui::Point<Pixels>>,
+    /// Generation of the current drag; an old autoscroll task stops when a new
+    /// drag starts.
+    pub(crate) drag_generation: u64,
+    pub(crate) drag_autoscroll_active: bool,
     pub(crate) geometry: Option<Geometry>,
     /// Per-line visual-row counts with an `O(log lines)` prefix index.
     pub(crate) rows: crate::row_index::RowIndex,
@@ -132,7 +139,7 @@ pub struct Editor {
     pub(crate) close_focus: ClosePromptFocus,
     pub(crate) conflict_prompt: Option<chaus_io::SaveConflict>,
     pub(crate) conflict_focus: ConflictPromptFocus,
-    pub(crate) recovery_queue: VecDeque<RecoveryRecord>,
+    pub(crate) recovery_queue: VecDeque<RecoveryEntry>,
     pub(crate) recovery_focus: RecoveryPromptFocus,
     pub(crate) recovery_key: u64,
     pub(crate) recovery_epoch: u64,
@@ -141,6 +148,16 @@ pub struct Editor {
     /// original file by accident.
     pub(crate) recovery_original_path: Option<PathBuf>,
     pub(crate) recovery_had_utf8_bom: bool,
+    /// Recovery store this window's snapshot lives in. `None` follows the
+    /// platform directory; a recovered document pins the store it came from.
+    pub(crate) recovery_directory: Option<PathBuf>,
+    /// The exact `.rec` file adopted by a recovered document.
+    pub(crate) recovery_path: Option<PathBuf>,
+    /// Close intent that must survive a save conflict. `Some(Sheet)` keeps the
+    /// GUI close sheet in play; `Some(Ex)` is a `:wq`/`:x`.
+    pub(crate) pending_close_after: Option<CloseAfter>,
+    /// Close intent carried across a forced reload chosen from a conflict.
+    pub(crate) pending_open_close: Option<CloseAfter>,
     pub(crate) disk_change: Option<chaus_io::SaveConflict>,
     pub(crate) disk_epoch: u64,
     /// Set while a watcher conflict check is running, so a slow poll of a large
@@ -239,6 +256,9 @@ impl Editor {
             preedit_start: None,
             preedit_active: false,
             selecting: false,
+            drag_pointer: None,
+            drag_generation: 0,
+            drag_autoscroll_active: false,
             geometry: None,
             rows: crate::row_index::RowIndex::default(),
             wrap_checkpoints: Vec::new(),
@@ -268,6 +288,10 @@ impl Editor {
             recovery_epoch: 0,
             recovery_original_path: None,
             recovery_had_utf8_bom: false,
+            recovery_directory: None,
+            recovery_path: None,
+            pending_close_after: None,
+            pending_open_close: None,
             disk_change: None,
             disk_epoch: 0,
             disk_check_in_flight: false,
@@ -379,6 +403,72 @@ impl Editor {
     #[must_use]
     pub fn is_checking_disk(&self) -> bool {
         self.disk_check_in_flight
+    }
+
+    /// Simulate the epoch change a completed save or reload performs while a
+    /// background disk check is still in flight.
+    #[doc(hidden)]
+    pub fn advance_disk_epoch_for_test(&mut self) {
+        self.disk_epoch = self.disk_epoch.wrapping_add(1);
+    }
+
+    /// Committed text-area geometry, for pointer and scrolling tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn geometry_for_test(&self) -> Option<Geometry> {
+        self.geometry
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn scroll_x_for_test(&self) -> Pixels {
+        self.scroll_x
+    }
+
+    #[doc(hidden)]
+    pub fn set_scroll_x_for_test(&mut self, x: Pixels) {
+        self.scroll_x = x;
+    }
+
+    #[doc(hidden)]
+    pub fn clamp_scroll_for_test(&mut self) {
+        self.clamp_scroll();
+    }
+
+    #[doc(hidden)]
+    pub fn offset_for_point_for_test(
+        &mut self,
+        position: gpui::Point<Pixels>,
+    ) -> Option<CharOffset> {
+        self.offset_for_point(position)
+    }
+
+    #[doc(hidden)]
+    pub fn row_span_for_test(&mut self, row: usize) -> (LineIndex, Range<usize>) {
+        self.row_span(row)
+    }
+
+    #[doc(hidden)]
+    pub fn offset_at_for_test(&mut self, line: LineIndex, column: usize) -> CharOffset {
+        self.offset_at(line, column)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn scroll_row_for_test(&self) -> f32 {
+        self.scroll_row
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn selecting_for_test(&self) -> bool {
+        self.selecting
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn drag_autoscroll_active_for_test(&self) -> bool {
+        self.drag_autoscroll_active
     }
 
     /// This window's command registry. Application-level commands (New, Open,
@@ -904,6 +994,30 @@ impl Editor {
         let max_row = total.saturating_sub(visible);
         self.scroll_row = self.scroll_row.clamp(0.0, max_row as f32);
         self.scroll_x = self.scroll_x.max(px(0.));
+        // Wrapped rows always fit the viewport; horizontal scrolling is not
+        // meaningful and must not be left over from a previous no-wrap mode.
+        if self.rows_columns.is_some() {
+            self.scroll_x = px(0.);
+            return;
+        }
+        // Right-hand bound: the widest of the visible rows. Without it wheel
+        // and trackpad deltas can move every glyph off-screen and leave the
+        // caret pulling the view back at an arbitrary later moment.
+        let Some(geometry) = self.geometry else {
+            self.scroll_x = px(0.);
+            return;
+        };
+        let first = (self.scroll_row.max(0.0) as usize).min(total.saturating_sub(1));
+        let last = (first + visible + 1).min(total);
+        let mut widest = 0;
+        for row in first..last {
+            let (_, span) = self.row_span(row);
+            widest = widest.max(span.end);
+        }
+        let viewport = f32::from(geometry.bounds.size.width) - 2.0 * f32::from(geometry.padding());
+        let content = widest as f32 * f32::from(geometry.char_width);
+        let max_x = (content - viewport).max(0.0);
+        self.scroll_x = self.scroll_x.min(px(max_x));
     }
 }
 

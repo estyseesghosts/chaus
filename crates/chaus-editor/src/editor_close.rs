@@ -40,10 +40,12 @@ impl Editor {
             return false;
         }
         if !self.document.is_dirty() {
+            self.pending_close_after = None;
             self.remove_recovery_snapshot(cx);
             return true;
         }
         self.close_prompt = true;
+        self.pending_close_after = None;
         self.vim_engine.cancel_prefix();
         window.focus(&self.close_focus.save, cx);
         cx.notify();
@@ -52,6 +54,7 @@ impl Editor {
 
     pub(crate) fn cancel_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_prompt = false;
+        self.pending_close_after = None;
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -67,6 +70,8 @@ impl Editor {
 
     pub(crate) fn discard_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_prompt = false;
+        self.pending_close_after = None;
+        self.pending_open_close = None;
         self.remove_recovery_snapshot(cx);
         window.remove_window();
     }

@@ -44,8 +44,9 @@ impl Editor {
 
     pub(crate) fn cancel_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.conflict_prompt = None;
-        if self.close_prompt {
-            window.focus(&self.close_focus.save, cx);
+        let close_after = self.pending_close_after.take();
+        if close_after == Some(CloseAfter::Sheet) || self.close_prompt {
+            self.restore_close_prompt(window, cx);
         } else {
             window.focus(&self.focus, cx);
         }
@@ -54,28 +55,37 @@ impl Editor {
 
     pub(crate) fn reload_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.conflict_prompt = None;
+        let close_after = self.pending_close_after.take();
         let Some(path) = self
             .file
             .as_ref()
             .map(|file| file.meta.user_requested_path.clone())
         else {
-            self.cancel_conflict(window, cx);
+            self.close_not_started(close_after.unwrap_or(CloseAfter::No), window, cx);
+            window.focus(&self.focus, cx);
             return;
         };
+        // Reload discards the local edit, so it can satisfy a pending close
+        // as soon as the forced reload lands.
+        self.pending_open_close = close_after.filter(|intent| intent.closes());
         if !self.open_path(&path, true, cx) {
+            self.pending_open_close = None;
+            self.close_not_started(close_after.unwrap_or(CloseAfter::No), window, cx);
             window.focus(&self.focus, cx);
         }
     }
 
     pub(crate) fn save_as_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.conflict_prompt = None;
-        let _ = self.save_as_inner(CloseAfter::No, window, cx);
+        let close_after = self.pending_close_after.take().unwrap_or(CloseAfter::No);
+        let _ = self.save_as_inner(close_after, window, cx);
     }
 
     pub(crate) fn overwrite_conflict(&mut self, cx: &mut Context<Self>) {
         self.conflict_prompt = None;
+        let close_after = self.pending_close_after.take().unwrap_or(CloseAfter::No);
         self.force_next_save = true;
-        self.save_inner(CloseAfter::No, cx);
+        self.save_inner(close_after, cx);
     }
 
     pub(crate) fn conflict_prompt_key(

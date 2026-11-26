@@ -76,6 +76,11 @@ fn retirement_does_not_block_the_ui_and_removes_the_snapshot() {
         "retirement blocked the editor update: {elapsed:?}"
     );
     assert_eq!(
+        recovery::pending_operations(),
+        1,
+        "the editor must register retirement with the app-owned shutdown drain"
+    );
+    assert_eq!(
         cx.update(|_, cx| editor.read(cx).title()),
         "Untitled",
         "the editor must still answer state queries while retirement is pending"
@@ -91,6 +96,11 @@ fn retirement_does_not_block_the_ui_and_removes_the_snapshot() {
     assert!(
         recovery::list_in(directory.path()).is_empty(),
         "the snapshot must be gone once the background retirement runs"
+    );
+    assert_eq!(
+        recovery::pending_operations(),
+        0,
+        "a completed retirement must release its shutdown ticket"
     );
 
     recovery::set_retire_gate_for_test(None);

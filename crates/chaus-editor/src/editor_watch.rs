@@ -12,6 +12,25 @@ use silvestris::ActiveTheme;
 
 use crate::editor::Editor;
 
+/// Test seam: hold the next background conflict inspection until the test
+/// releases the receiver. Production leaves this `None`.
+static DISK_CHECK_GATE: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>> =
+    std::sync::Mutex::new(None);
+
+/// Install a one-shot gate in front of the next `check_conflict` call.
+pub fn set_disk_check_gate_for_test(receiver: Option<std::sync::mpsc::Receiver<()>>) {
+    if let Ok(mut gate) = DISK_CHECK_GATE.lock() {
+        *gate = receiver;
+    }
+}
+
+fn wait_for_disk_check_gate() {
+    let receiver = DISK_CHECK_GATE.lock().ok().and_then(|mut gate| gate.take());
+    if let Some(receiver) = receiver {
+        let _ = receiver.recv();
+    }
+}
+
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 /// Force a content hash even when size/mtime/identity are unchanged. Timestamp
 /// granularity can hide a same-size edit, so metadata alone is never trusted
@@ -120,6 +139,7 @@ impl Editor {
                 }
                 let task = cx.background_executor().spawn(async move {
                     if force_hash || !chaus_io::metadata_matches(&meta) {
+                        wait_for_disk_check_gate();
                         chaus_io::check_conflict(&meta)
                     } else {
                         Ok(())
@@ -128,8 +148,12 @@ impl Editor {
                 let result = task.await;
                 let applied = editor.update(cx, |editor, cx| {
                     // A result from a previous file must not move this file's
-                    // error state or overwrite its status.
+                    // error state or overwrite its status, but it still owns
+                    // the in-flight flag it set. Clearing only in
+                    // `apply_disk_check` would wedge the watcher forever after
+                    // a save or reload changed the epoch.
                     if editor.disk_epoch != epoch {
+                        editor.disk_check_in_flight = false;
                         return;
                     }
                     match error_state.observe(&result) {
@@ -164,9 +188,10 @@ impl Editor {
             return;
         }
         self.disk_check_in_flight = true;
-        let task = cx
-            .background_executor()
-            .spawn(async move { chaus_io::check_conflict(&meta) });
+        let task = cx.background_executor().spawn(async move {
+            wait_for_disk_check_gate();
+            chaus_io::check_conflict(&meta)
+        });
         cx.spawn(async move |editor, cx| {
             let result = task.await;
             editor
@@ -209,6 +234,9 @@ impl Editor {
 
     fn review_disk_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(conflict) = self.disk_change {
+            // Reviewing the watcher banner is a fresh decision, not the
+            // continuation of a save that was trying to close.
+            self.pending_close_after = None;
             self.show_conflict_prompt(conflict, window, cx);
         }
     }

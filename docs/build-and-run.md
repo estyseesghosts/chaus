@@ -46,6 +46,7 @@ The build verified here used the GNU host `x86_64-pc-windows-gnu` with the 1.98.
 - Rust/rustup, git, and `windres` on `PATH` for GNU builds.
 - A C compiler that targets the exact Rust target. Tree-sitter and its grammars are C sources compiled by the `cc` crate.
 - Visual Studio C++ Build Tools and Windows SDK for an MSVC build.
+- `fxc.exe` for a release build. The pinned `gpui_windows` build script compiles HLSL to DXBC only when debug assertions are off. A Windows SDK installation provides it; without one, point `GPUI_FXC_PATH` at an fxc-compatible compiler. `efxc2` (MPL-2.0) ships a drop-in `fxc.exe` that uses the system `d3dcompiler_47.dll` and accepts the same `/T /E /Fh /Vn /O3` arguments. Debug builds compile the shader at runtime and do not need `fxc`.
 
 Two repo details matter on Windows:
 

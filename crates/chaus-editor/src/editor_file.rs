@@ -150,8 +150,8 @@ impl Editor {
         cx.spawn(async move |editor, cx| {
             let result = task.await;
             editor
-                .update(cx, |editor, cx| {
-                    editor.finish_open(request, result, cx);
+                .update_in(cx, |editor, window, cx| {
+                    editor.finish_open(request, result, window, cx);
                 })
                 .ok();
         })
@@ -163,6 +163,7 @@ impl Editor {
         &mut self,
         request: FileRequest,
         result: Result<LoadedFile, chaus_io::LoadError>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.owns_request(request) || self.document_generation != request.document {
@@ -177,12 +178,32 @@ impl Editor {
         // must not overwrite edits made while the load was in flight.
         if self.document.state_token() != request.state || (!force && self.document.is_dirty()) {
             self.set_status("Open cancelled: the document changed while loading");
+            if let Some(close_after) = self.pending_open_close.take() {
+                self.close_not_started(close_after, window, cx);
+            }
             cx.notify();
             return;
         }
         match result {
-            Ok(loaded) => self.install_loaded(&opened_path, loaded, cx),
-            Err(error) => self.set_status(format!("Open failed: {error}")),
+            Ok(loaded) => {
+                // Capture the close intent before installing: installing a
+                // new document clears per-document transient state.
+                let close_after = self.pending_open_close.take();
+                self.install_loaded(&opened_path, loaded, cx);
+                if let Some(close_after) = close_after {
+                    if close_after.closes() && !self.document.is_dirty() {
+                        window.remove_window();
+                        return;
+                    }
+                    self.close_not_started(close_after, window, cx);
+                }
+            }
+            Err(error) => {
+                self.set_status(format!("Open failed: {error}"));
+                if let Some(close_after) = self.pending_open_close.take() {
+                    self.close_not_started(close_after, window, cx);
+                }
+            }
         }
         cx.notify();
     }
@@ -249,6 +270,8 @@ impl Editor {
         self.preedit_active = false;
         self.force_next_save = false;
         self.disk_change = None;
+        self.pending_close_after = None;
+        self.pending_open_close = None;
         self.disk_epoch = self.disk_epoch.wrapping_add(1);
         self.reset_recovery_key();
         self.document.cancel_user_operation();
@@ -268,6 +291,25 @@ impl Editor {
         let _ = self.save_as_inner(CloseAfter::No, window, cx);
     }
 
+    /// Path and BOM state a Save As starts from. A recovered document has no
+    /// live `file`, but retains these fields so Save As still suggests the
+    /// original path and preserves a UTF-8 BOM.
+    fn save_as_source(&self) -> (Option<PathBuf>, bool) {
+        let file = self.file.as_ref();
+        (
+            file.map(|file| file.meta.user_requested_path.clone())
+                .or_else(|| self.recovery_original_path.clone()),
+            file.map(|file| file.meta.had_utf8_bom)
+                .unwrap_or(self.recovery_had_utf8_bom),
+        )
+    }
+
+    /// Save As suggestion, for a deterministic recovered-document test.
+    #[must_use]
+    pub fn save_as_suggestion_for_test(&self) -> (Option<PathBuf>, bool) {
+        self.save_as_source()
+    }
+
     /// Ask for a path without blocking the GPUI update. The picker belongs to
     /// the same request as the eventual write, so a second Save dispatched
     /// while the dialog is open is rejected instead of opening another one.
@@ -284,14 +326,7 @@ impl Editor {
         // Choosing a new target abandons a pending conflict overwrite; a
         // cancelled picker must not leave the old force armed either.
         self.force_next_save = false;
-        let suggested = self
-            .file
-            .as_ref()
-            .map(|file| file.meta.user_requested_path.clone());
-        let had_utf8_bom = self
-            .file
-            .as_ref()
-            .is_some_and(|file| file.meta.had_utf8_bom);
+        let (suggested, had_utf8_bom) = self.save_as_source();
         self.file_operation = FileOperation::ChoosingSaveTarget {
             request,
             close_after,
@@ -431,7 +466,8 @@ impl Editor {
         let had_utf8_bom = self
             .file
             .as_ref()
-            .is_some_and(|file| file.meta.had_utf8_bom);
+            .map(|file| file.meta.had_utf8_bom)
+            .unwrap_or(self.recovery_had_utf8_bom);
         self.force_next_save = false;
         self.start_save(
             request,
@@ -558,7 +594,11 @@ impl Editor {
         self.file_operation = FileOperation::Idle;
         match result {
             Ok(meta) => {
+                self.finish_recovery_after_save(cx);
                 self.file = Some(FileState { meta });
+                self.recovery_original_path = None;
+                self.recovery_had_utf8_bom = false;
+                self.pending_close_after = None;
                 self.refresh_language(cx);
                 self.force_next_save = false;
                 self.conflict_prompt = None;
@@ -594,6 +634,8 @@ impl Editor {
                 // later save must not see its own write as an external change.
                 // The document stays dirty and the recovery snapshot is kept
                 // because the rename may not survive a power loss.
+                self.pending_close_after = None;
+                self.finish_recovery_after_save(cx);
                 self.file = Some(FileState { meta: *meta });
                 self.force_next_save = false;
                 self.conflict_prompt = None;
@@ -609,15 +651,20 @@ impl Editor {
             Err(SaveError::Conflict(conflict)) => {
                 self.note_wqa_failure(conflict.to_string());
                 self.disk_change = Some(conflict);
+                // Keep the reason this save was started. A close or `:wq`
+                // must still complete after the conflict is resolved instead
+                // of leaving the document open and the close sheet behind.
+                self.pending_close_after = close_after.closes().then_some(close_after);
+                if close_after == CloseAfter::Sheet {
+                    self.close_prompt = false;
+                }
                 self.show_conflict_prompt(conflict, window, cx);
                 self.set_status(format!("{conflict}"));
-                if close_after == CloseAfter::Sheet {
-                    self.close_prompt = true;
-                }
             }
             Err(error) => {
                 self.note_wqa_failure(format!("save failed: {error}"));
                 self.set_status(format!("Save failed: {error}"));
+                self.pending_close_after = None;
                 self.close_not_started(close_after, window, cx);
             }
         }

@@ -15,6 +15,17 @@ pub struct Geometry {
 }
 
 impl Geometry {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn padding_for_test(self) -> Pixels {
+        self.padding()
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn visible_rows_for_test(self) -> usize {
+        self.visible_rows()
+    }
     pub(crate) fn text_origin(self) -> Point<Pixels> {
         point(
             self.bounds.left() + px(PADDING),

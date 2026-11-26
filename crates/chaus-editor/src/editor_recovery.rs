@@ -1,13 +1,13 @@
 //! Crash-recovery snapshots and the launch-time Recover/Discard sheet.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chaus_core::document::DocumentSnapshot;
 use chaus_core::eol::{Eol, EolMap};
 use chaus_core::position::{CharOffset, Selection};
-use chaus_io::recovery::{RecoveryError, RecoveryRecord};
+use chaus_io::recovery::{PendingRecoveryOp, RecoveryEntry, RecoveryError, RecoveryRecord};
 use gpui::{
     div, px, AnyElement, App, AsyncApp, Context, FocusHandle, InteractiveElement as _, IntoElement,
     KeyDownEvent, MouseButton, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
@@ -32,20 +32,29 @@ fn report_recovery_failure(editor: &WeakEntity<Editor>, cx: &mut AsyncApp, error
 
 /// Retire on the background executor. The epoch watermark in `chaus-io` is the
 /// ordering barrier: a stale write that reaches the lock after retirement is
-/// discarded instead of recreating the record. The editor update returns
-/// before any filesystem work happens.
+/// discarded instead of recreating the record. The operation ticket lets the
+/// application drain retirement before the process exits.
 fn spawn_recovery_retire(
     key: u64,
     epoch: u64,
+    path: Option<PathBuf>,
     editor: &WeakEntity<Editor>,
     cx: &mut Context<Editor>,
 ) {
+    let ticket = PendingRecoveryOp::begin();
+    let task = cx.background_executor().spawn(async move {
+        let result = match path {
+            Some(path) => chaus_io::recovery::retire_path(&path, key, epoch),
+            None => chaus_io::recovery::retire(key, epoch),
+        };
+        // The ticket is released only after the filesystem work finished, so
+        // the shutdown drain observes a real completion, not a queued call.
+        drop(ticket);
+        result
+    });
     let weak = editor.clone();
     cx.spawn(async move |_, cx| {
-        let retire = cx
-            .background_executor()
-            .spawn(async move { chaus_io::recovery::retire(key, epoch) });
-        if let Err(error) = retire.await {
+        if let Err(error) = task.await {
             let mut async_cx = cx.clone();
             let _ = weak.update(&mut async_cx, |editor, cx| {
                 editor.set_status(format!("Recovery cleanup failed: {error}"));
@@ -56,10 +65,58 @@ fn spawn_recovery_retire(
     .detach();
 }
 
+fn spawn_recovery_retire_many(
+    entries: Vec<RecoveryEntry>,
+    epoch: u64,
+    editor: &WeakEntity<Editor>,
+    cx: &mut Context<Editor>,
+) {
+    if entries.is_empty() {
+        return;
+    }
+    let ticket = PendingRecoveryOp::begin();
+    let task = cx.background_executor().spawn(async move {
+        let result = chaus_io::recovery::retire_entries(&entries, epoch);
+        drop(ticket);
+        result
+    });
+    let weak = editor.clone();
+    cx.spawn(async move |_, cx| {
+        if let Err(error) = task.await {
+            let mut async_cx = cx.clone();
+            let _ = weak.update(&mut async_cx, |editor, cx| {
+                editor.set_status(format!("Recovery cleanup failed: {error}"));
+                cx.notify();
+            });
+        }
+    })
+    .detach();
+}
+
+/// Track a background snapshot write for the shutdown drain.
+fn tracked_write(
+    executor: gpui::BackgroundExecutor,
+    snapshot: RecoverySnapshot,
+    epoch: u64,
+) -> gpui::Task<Result<PathBuf, RecoveryError>> {
+    let ticket = PendingRecoveryOp::begin();
+    executor.spawn(async move {
+        let directory = snapshot.directory.clone();
+        let record = snapshot.into_record();
+        let result = match directory {
+            Some(directory) => chaus_io::recovery::write_to_with_epoch(&directory, &record, epoch),
+            None => chaus_io::recovery::write_with_epoch(&record, epoch),
+        };
+        drop(ticket);
+        result
+    })
+}
+
 #[derive(Clone)]
 pub(crate) struct RecoveryPromptFocus {
     pub(crate) recover: FocusHandle,
     pub(crate) discard: FocusHandle,
+    pub(crate) discard_all: FocusHandle,
 }
 
 impl RecoveryPromptFocus {
@@ -67,6 +124,7 @@ impl RecoveryPromptFocus {
         Self {
             recover: cx.focus_handle(),
             discard: cx.focus_handle(),
+            discard_all: cx.focus_handle(),
         }
     }
 }
@@ -91,6 +149,8 @@ struct RecoverySnapshot {
     preferred_eol: Eol,
     had_utf8_bom: bool,
     revision: u64,
+    /// Pin a recovered document's snapshot to the store it came from.
+    directory: Option<PathBuf>,
 }
 
 impl RecoverySnapshot {
@@ -108,18 +168,34 @@ impl RecoverySnapshot {
 
 impl Editor {
     /// Queue snapshots found at launch. The sheet shows them one at a time.
+    ///
+    /// Returns `false` when this window already holds unsaved work. Recovery
+    /// must never replace text the person typed while the background scan was
+    /// running; the caller then opens a separate recovery window.
     pub fn queue_recovery(
         &mut self,
-        records: Vec<RecoveryRecord>,
+        records: Vec<RecoveryEntry>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if records.is_empty() {
-            return;
+            return false;
+        }
+        if self.document.is_dirty() || self.file_operation_active() {
+            return false;
         }
         self.recovery_queue = records.into();
         window.focus(&self.recovery_focus.recover, cx);
+        // The sheet has not rendered yet, so its button focus handle is not in
+        // the key dispatch tree at this instant. Re-apply focus after the
+        // effect cycle; otherwise Tab and typing fall through to the editor
+        // behind the modal sheet.
+        let focus = self.recovery_focus.recover.clone();
+        window.defer(cx, move |window, cx| {
+            window.focus(&focus, cx);
+        });
         cx.notify();
+        true
     }
 
     pub(crate) fn schedule_recovery(&mut self, cx: &mut Context<Self>) {
@@ -134,7 +210,8 @@ impl Editor {
                     }
                     if !editor.document.is_dirty() {
                         let key = editor.recovery_key;
-                        spawn_recovery_retire(key, epoch, &cx.weak_entity(), cx);
+                        let path = editor.recovery_path.clone();
+                        spawn_recovery_retire(key, epoch, path, &cx.weak_entity(), cx);
                         return None;
                     }
                     Some(editor.recovery_snapshot())
@@ -142,10 +219,7 @@ impl Editor {
                 .ok()
                 .flatten();
             if let Some(snapshot) = record {
-                let write = cx.background_executor().spawn(async move {
-                    let record = snapshot.into_record();
-                    chaus_io::recovery::write_with_epoch(&record, epoch)
-                });
+                let write = tracked_write(cx.background_executor().clone(), snapshot, epoch);
                 if let Err(error) = write.await {
                     let mut async_cx = cx.clone();
                     report_recovery_failure(&editor, &mut async_cx, &error);
@@ -166,11 +240,8 @@ impl Editor {
         }
         let snapshot = self.recovery_snapshot();
         let weak = cx.weak_entity();
+        let write = tracked_write(cx.background_executor().clone(), snapshot, epoch);
         cx.spawn(async move |_, cx| {
-            let write = cx.background_executor().spawn(async move {
-                let record = snapshot.into_record();
-                chaus_io::recovery::write_with_epoch(&record, epoch)
-            });
             if let Err(error) = write.await {
                 let mut async_cx = cx.clone();
                 report_recovery_failure(&weak, &mut async_cx, &error);
@@ -180,7 +251,13 @@ impl Editor {
     }
 
     pub(crate) fn retire_recovery_snapshot(&self, epoch: u64, cx: &mut Context<Self>) {
-        spawn_recovery_retire(self.recovery_key, epoch, &cx.weak_entity(), cx);
+        spawn_recovery_retire(
+            self.recovery_key,
+            epoch,
+            self.recovery_path.clone(),
+            &cx.weak_entity(),
+            cx,
+        );
     }
 
     /// Remove the snapshot for the current document. Bumping the epoch first
@@ -190,6 +267,7 @@ impl Editor {
         spawn_recovery_retire(
             self.recovery_key,
             self.recovery_epoch,
+            self.recovery_path.clone(),
             &cx.weak_entity(),
             cx,
         );
@@ -206,11 +284,42 @@ impl Editor {
         self.recovery_key
     }
 
+    /// Retained original path and BOM of a recovered document, for tests that
+    /// prove Save As still sees them after the record is installed.
+    #[must_use]
+    pub fn recovery_metadata_for_test(&self) -> (Option<PathBuf>, bool) {
+        (
+            self.recovery_original_path.clone(),
+            self.recovery_had_utf8_bom,
+        )
+    }
+
+    /// A successful associate-save makes a recovered document a normal named
+    /// document. Retire the adopted `.rec` and start a new recovery identity so
+    /// later debounced snapshots go to the normal store instead of replacing
+    /// the record this window no longer owns.
+    pub(crate) fn finish_recovery_after_save(&mut self, cx: &mut Context<Self>) {
+        if self.recovery_path.is_none() && self.recovery_original_path.is_none() {
+            return;
+        }
+        let old_key = self.recovery_key;
+        let old_path = self.recovery_path.take();
+        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
+        let epoch = self.recovery_epoch;
+        spawn_recovery_retire(old_key, epoch, old_path, &cx.weak_entity(), cx);
+        self.recovery_key = new_recovery_id();
+        self.recovery_original_path = None;
+        self.recovery_had_utf8_bom = false;
+        self.recovery_directory = None;
+    }
+
     pub(crate) fn reset_recovery_key(&mut self) {
         self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
         self.recovery_key = new_recovery_id();
         self.recovery_original_path = None;
         self.recovery_had_utf8_bom = false;
+        self.recovery_directory = None;
+        self.recovery_path = None;
     }
 
     /// Cheap capture for the background writer. Cloning the Rope and the EOL
@@ -236,17 +345,72 @@ impl Editor {
             preferred_eol: self.document.preferred_eol(),
             had_utf8_bom,
             revision: self.document.state_token(),
+            directory: self.recovery_directory.clone(),
         }
     }
 
-    fn recover_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(record) = self.recovery_queue.pop_front() else {
+    fn recover_next(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.recovery_queue.pop_front() else {
             return;
         };
+        if self.document.is_dirty() {
+            // The sheet should still be modal, but never overwrite typed work
+            // even if a future input path slips through.
+            self.recovery_queue.push_front(entry);
+            self.set_status("Recovery paused: save or discard your changes first");
+            cx.notify();
+            return;
+        }
+        self.set_status(format!(
+            "Loading recovery snapshot {}...",
+            entry.display_detail()
+        ));
+        cx.notify();
+        let generation = self.document_generation;
+        let state = self.document.state_token();
+        let fallback = entry.clone();
+        let weak = cx.weak_entity();
+        let task = cx.background_executor().spawn(async move { entry.read() });
+        cx.spawn(async move |_, cx| {
+            let record = task.await;
+            weak.update_in(cx, |editor, window, cx| {
+                if editor.document_generation != generation
+                    || editor.document.state_token() != state
+                    || editor.document.is_dirty()
+                {
+                    editor.recovery_queue.push_front(fallback.clone());
+                    editor.set_status("Recovery cancelled: the document changed while loading");
+                    editor.finish_recovery_choice(window, cx);
+                    return;
+                }
+                let Some(record) = record else {
+                    editor.set_status(format!(
+                        "Recovery snapshot for {} could not be read",
+                        fallback.display_detail()
+                    ));
+                    editor.finish_recovery_choice(window, cx);
+                    return;
+                };
+                editor.recovery_path = Some(fallback.path.clone());
+                editor.recovery_directory = fallback.path.parent().map(Path::to_path_buf);
+                editor.install_recovered(record, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn install_recovered(
+        &mut self,
+        record: RecoveryRecord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Keep the on-disk record. The recovered document adopts its id, so a
         // later debounced snapshot replaces this record atomically; saving or
         // discarding retires it. Deleting it here would lose the only durable
         // copy if the process crashed before the next edit or save.
+        let name = record.display_detail();
         self.recovery_key = record.id;
         self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
         self.recovery_original_path = record.original_path.clone();
@@ -267,6 +431,8 @@ impl Editor {
         self.preedit_start = None;
         self.preedit_active = false;
         self.force_next_save = false;
+        self.pending_close_after = None;
+        self.pending_open_close = None;
         self.file = None;
         self.reset_highlight(cx);
         self.document.cancel_user_operation();
@@ -275,18 +441,14 @@ impl Editor {
         let remaining = self.recovery_queue.len();
         // Opening another recovered document would replace this one before it
         // can be saved. Leave the remaining snapshots on disk for the next
-        // launch instead of risking that loss.
+        // launch; Discard All can clean them out if they are not wanted.
         self.recovery_queue.clear();
         window.focus(&self.focus, cx);
         if remaining == 0 {
-            self.set_status(format!(
-                "Recovered unsaved changes for {}; use Save As to keep them",
-                record.display_name()
-            ));
+            self.set_status(format!("Recovered unsaved changes for {name}"));
         } else {
             self.set_status(format!(
-                "Recovered {}; {remaining} other snapshot(s) kept for the next launch",
-                record.display_name()
+                "Recovered {name}; {remaining} other snapshot(s) remain on disk for the next launch"
             ));
         }
         cx.notify();
@@ -297,8 +459,21 @@ impl Editor {
             return;
         };
         self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
-        spawn_recovery_retire(record.id, self.recovery_epoch, &cx.weak_entity(), cx);
+        spawn_recovery_retire_many(vec![record], self.recovery_epoch, &cx.weak_entity(), cx);
         self.finish_recovery_choice(window, cx);
+    }
+
+    fn discard_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recovery_queue.is_empty() {
+            return;
+        }
+        let entries: Vec<RecoveryEntry> = self.recovery_queue.drain(..).collect();
+        let count = entries.len();
+        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
+        spawn_recovery_retire_many(entries, self.recovery_epoch, &cx.weak_entity(), cx);
+        window.focus(&self.focus, cx);
+        self.set_status(format!("Discarded {count} recovery snapshot(s)"));
+        cx.notify();
     }
 
     fn finish_recovery_choice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -311,8 +486,14 @@ impl Editor {
     }
 
     pub(crate) fn dismiss_recovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.recovery_queue.len();
         self.recovery_queue.clear();
         window.focus(&self.focus, cx);
+        if count > 0 {
+            self.set_status(format!(
+                "{count} recovery snapshot(s) kept for the next launch"
+            ));
+        }
         cx.notify();
     }
 
@@ -326,12 +507,22 @@ impl Editor {
             "escape" => self.dismiss_recovery(window, cx),
             "tab" => {
                 cx.stop_propagation();
-                let target = if self.recovery_focus.recover.is_focused(window) {
-                    &self.recovery_focus.discard
+                let reverse = event.keystroke.modifiers.shift;
+                let order = [
+                    &self.recovery_focus.recover,
+                    &self.recovery_focus.discard,
+                    &self.recovery_focus.discard_all,
+                ];
+                let current = order
+                    .iter()
+                    .position(|focus| focus.is_focused(window))
+                    .unwrap_or(0);
+                let next = if reverse {
+                    (current + order.len() - 1) % order.len()
                 } else {
-                    &self.recovery_focus.recover
+                    (current + 1) % order.len()
                 };
-                window.focus(target, cx);
+                window.focus(order[next], cx);
             }
             _ => {}
         }
@@ -341,6 +532,12 @@ impl Editor {
         let theme = cx.theme().clone();
         let Some(record) = self.recovery_queue.front() else {
             return div().into_any_element();
+        };
+        let total = self.recovery_queue.len();
+        let position = if total == 1 {
+            "Snapshot".to_string()
+        } else {
+            format!("Snapshot 1 of {total}")
         };
         div()
             .id("chaus-recovery-sheet")
@@ -363,7 +560,7 @@ impl Editor {
             }))
             .child(
                 div()
-                    .w(px(430.0))
+                    .w(px(500.0))
                     .max_w_full()
                     .p(px(18.0))
                     .rounded(px(6.0))
@@ -384,8 +581,9 @@ impl Editor {
                             .text_size(px(theme.type_.size_small))
                             .text_color(silvestris::convert::hsla(theme.colors.text_secondary))
                             .child(format!(
-                                "chaus found an unsaved snapshot for {}. Recover it or discard it.",
-                                record.display_name()
+                                "{position} for {} ({}). Recover it, discard it, or discard all snapshots.",
+                                record.display_detail(),
+                                record.saved_label()
                             )),
                     )
                     .child(
@@ -393,6 +591,14 @@ impl Editor {
                             .flex()
                             .justify_end()
                             .gap(px(8.0))
+                            .child(
+                                Button::new("recovery-discard-all", "Discard All")
+                                    .focus_handle(self.recovery_focus.discard_all.clone())
+                                    .destructive(true)
+                                    .on_click(cx.listener(|editor, _, window, cx| {
+                                        editor.discard_all(window, cx);
+                                    })),
+                            )
                             .child(
                                 Button::new("recovery-discard", "Discard")
                                     .focus_handle(self.recovery_focus.discard.clone())
