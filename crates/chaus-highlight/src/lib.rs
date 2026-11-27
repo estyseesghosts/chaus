@@ -27,9 +27,9 @@ pub use language::LanguageId;
 #[must_use]
 pub fn input_edit(edit: &AppliedEdit) -> Option<tree_sitter::InputEdit> {
     Some(tree_sitter::InputEdit {
-        start_byte: edit.old_byte_range.start,
-        old_end_byte: edit.old_byte_range.end,
-        new_end_byte: edit.new_byte_range.end,
+        start_byte: edit.old_byte_range.start.get(),
+        old_end_byte: edit.old_byte_range.end.get(),
+        new_end_byte: edit.new_byte_range.end.get(),
         start_position: point(edit.old_start_point),
         old_end_position: point(edit.old_end_point),
         new_end_position: point(edit.new_end_point),
@@ -39,6 +39,6 @@ pub fn input_edit(edit: &AppliedEdit) -> Option<tree_sitter::InputEdit> {
 fn point(point: chaus_core::document::TextPoint) -> tree_sitter::Point {
     tree_sitter::Point {
         row: point.row,
-        column: point.column_bytes,
+        column: point.column_bytes.get(),
     }
 }

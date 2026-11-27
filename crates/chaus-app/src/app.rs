@@ -15,83 +15,33 @@ use silvestris::window_role::{role_options, WindowRole};
 use silvestris::{chrome, ThemePreference};
 
 use crate::preferences::open_preferences;
+use crate::settings_file::{self, SettingsRead};
 use crate::settings_global::SettingsGlobal;
-use crate::settings_writer::{install_writer, SettingsWriterGlobal};
+use crate::settings_store::{install_store, SettingsStoreGlobal};
 use crate::theme_choice::theme_id;
 
 static WINDOW_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// Result of reading and validating the rc file.
-pub(crate) struct SettingsRead {
-    pub(crate) settings: Settings,
-    /// Human-readable `line N: message` warnings for the Preferences window.
-    pub(crate) diagnostics: Vec<String>,
-    pub(crate) path: Option<PathBuf>,
-}
-
-/// Parse the rc file from the conventional location, reporting diagnostics.
-/// A missing file is not an error; it yields defaults and the path where the
-/// file would be created.
-#[must_use]
-pub(crate) fn read_settings() -> SettingsRead {
-    let Some(path) = settings_path() else {
-        return SettingsRead {
-            settings: Settings::default(),
-            diagnostics: Vec::new(),
-            path: None,
-        };
-    };
-    let source = match std::fs::read_to_string(&path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return SettingsRead {
-                settings: Settings::default(),
-                diagnostics: Vec::new(),
-                path: Some(path),
-            };
-        }
-        Err(error) => {
-            return SettingsRead {
-                settings: Settings::default(),
-                diagnostics: vec![format!("Could not read {}: {error}", path.display())],
-                path: Some(path),
-            };
-        }
-    };
-    let parsed = chaus_core::settings::parse_rc(&source);
-    let diagnostics = parsed
-        .diagnostics
-        .iter()
-        .map(|diagnostic| format!("line {}: {}", diagnostic.line, diagnostic.message))
-        .collect();
-    SettingsRead {
-        settings: parsed.settings,
-        diagnostics,
-        path: Some(path),
-    }
-}
-
-/// Parse the rc file from the conventional location, ignoring a missing file.
-#[must_use]
-pub fn load_settings() -> Settings {
-    let read = read_settings();
+/// Synchronous startup read. GPUI does not exist yet, so no UI thread waits.
+fn load_startup() -> SettingsRead {
+    let read = settings_file::read_settings();
     if let Some(path) = &read.path {
         for diagnostic in &read.diagnostics {
             eprintln!("chaus: {}: {diagnostic}", path.display());
         }
     }
-    read.settings
+    read
 }
 
+/// Parse the rc file from the conventional location, ignoring a missing file.
+#[must_use]
+pub fn load_settings() -> Settings {
+    load_startup().settings
+}
+
+/// The rc location, as computed by the app's settings file policy.
 pub(crate) fn settings_path() -> Option<PathBuf> {
-    if cfg!(windows) {
-        return std::env::var_os("USERPROFILE")
-            .map(PathBuf::from)
-            .map(|home| home.join("_chausrc"));
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".chausrc"))
+    settings_file::settings_path()
 }
 
 /// Push a settings snapshot to every open editor window.
@@ -145,7 +95,8 @@ pub fn validate_startup_paths(paths: Vec<PathBuf>) -> (Vec<PathBuf>, usize) {
 /// background executor into a window that already exists, so first paint does
 /// not wait for document decoding or the recovery scan.
 pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
-    let settings = load_settings();
+    let startup = load_startup();
+    let settings = startup.settings.clone();
     let (valid_paths, failures) = validate_startup_paths(paths);
     if valid_paths.is_empty() && !new_window && failures > 0 {
         return 1;
@@ -178,13 +129,14 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
             Err(error) => eprintln!("chaus: {error}; using the theme's default UI font"),
         }
         install_settings(cx, settings.clone());
-        install_writer(cx, settings_path());
+        // The startup read already happened above; hand its path and
+        // diagnostics to the one owner of runtime disk interaction.
+        install_store(cx, startup.path.clone(), startup.diagnostics.clone());
         crate::ui_preferences::install_file_dialogs(cx);
         chaus_editor::bind_keys(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
-                flush_and_drain_on_exit(cx);
-                cx.quit();
+                shut_down(cx);
             }
         })
         .detach();
@@ -262,16 +214,30 @@ pub fn run(paths: Vec<PathBuf>, new_window: bool) -> i32 {
     exit_code
 }
 
-/// Final flush before the process exits.
+/// Serialized shutdown. Settings are persisted by the store's state machine;
+/// the app only waits for that task and then lets the platform quit. No
+/// synchronous rc write competes with an older writer here.
+fn shut_down(cx: &mut App) {
+    let store = cx.global::<SettingsStoreGlobal>().0.clone();
+    let task = store.update(cx, |store, cx| store.shutdown(cx));
+    cx.spawn(async move |cx| {
+        task.await;
+        cx.update(|cx| {
+            flush_and_drain_on_exit(cx);
+            cx.quit();
+        });
+    })
+    .detach();
+}
+
+/// Drain recovery work before the process exits.
 ///
-/// Settings use a synchronous write; recovery retirement and snapshot writes
-/// are background work with an application-owned ticket, so shutdown waits for
-/// them. Without this, closing the last window can exit before a `.rec` file
-/// is deleted and every discard comes back on the next launch.
-pub fn flush_and_drain_on_exit(cx: &mut App) {
-    if let Some(writer) = cx.try_global::<SettingsWriterGlobal>() {
-        writer.0.read(cx).flush_on_exit();
-    }
+/// Recovery retirement and snapshot writes are background work with an
+/// application-owned ticket, so shutdown waits for them. Without this, closing
+/// the last window can exit before a `.rec` file is deleted and every discard
+/// comes back on the next launch. Settings have their own serialized path in
+/// `SettingsStore`; this function no longer writes the rc file.
+pub fn flush_and_drain_on_exit(_cx: &mut App) {
     let pending = chaus_io::recovery::pending_operations();
     if pending == 0 {
         return;

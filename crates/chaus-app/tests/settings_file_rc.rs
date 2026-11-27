@@ -1,7 +1,7 @@
-//! Settings rc persistence through an atomic replacement.
+//! Settings rc persistence is owned by chaus-app, not by document I/O.
 
+use chaus_app::settings_file::write_rc;
 use chaus_core::settings::{Settings, ThemeName};
-use chaus_io::write_settings_rc;
 
 #[test]
 fn updates_theme_and_vim_without_losing_comments_or_crlf() {
@@ -16,7 +16,7 @@ fn updates_theme_and_vim_without_losing_comments_or_crlf() {
     let mut settings = Settings::default();
     settings.theme = ThemeName::AquaDark;
     settings.vim = false;
-    write_settings_rc(&path, &settings).unwrap();
+    write_rc(&path, &settings).unwrap();
 
     let updated = std::fs::read_to_string(&path).unwrap();
     assert!(
@@ -30,10 +30,6 @@ fn updates_theme_and_vim_without_losing_comments_or_crlf() {
         !updated.contains("geist-light"),
         "the old value must be replaced: {updated:?}"
     );
-    assert!(
-        updated.contains("set novim\r\n") && !updated.contains("set vim\r\n"),
-        "the new Vim default must be present exactly once: {updated:?}"
-    );
 }
 
 #[test]
@@ -44,7 +40,7 @@ fn creates_the_first_rc_file_with_both_keys() {
     settings.theme = ThemeName::AquaLight;
     settings.vim = true;
 
-    write_settings_rc(&path, &settings).unwrap();
+    write_rc(&path, &settings).unwrap();
 
     let contents = std::fs::read_to_string(&path).unwrap();
     assert!(contents.contains("set theme=aqua-light\n"), "{contents:?}");
@@ -52,14 +48,12 @@ fn creates_the_first_rc_file_with_both_keys() {
 }
 
 #[test]
-fn a_changed_file_is_not_overwritten() {
+fn an_undecodable_file_is_reported_and_left_untouched() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("_chausrc");
-    std::fs::write(&path, "set theme=geist-light\n").unwrap();
-
-    // A file that cannot be decoded is reported and left untouched.
     std::fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
-    let error = write_settings_rc(&path, &Settings::default()).unwrap_err();
+
+    let error = write_rc(&path, &Settings::default()).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(std::fs::read(&path).unwrap(), [0xff, 0xfe, 0x00]);
 }

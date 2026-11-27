@@ -73,7 +73,9 @@ fn clicking_right_of_a_wrapped_row_clamps_to_that_row() {
             .expect("painted geometry");
         let (line, span) = editor.update(cx, |editor, _| editor.row_span_for_test(0));
         assert!(span.end > span.start, "the first row must cover characters");
-        let expected = editor.update(cx, |editor, _| editor.offset_at_for_test(line, span.end));
+        let expected = editor.update(cx, |editor, _| {
+            editor.offset_at_for_test(line, span.end.get())
+        });
         let click = point(
             geometry.bounds.right() - px(2.0),
             geometry.bounds.top() + geometry.padding_for_test() + geometry.line_height / 2.0,

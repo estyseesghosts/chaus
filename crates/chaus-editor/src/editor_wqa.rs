@@ -33,30 +33,24 @@ impl Editor {
     fn wqa_snapshot(&self) -> WqaSnapshot {
         WqaSnapshot {
             dirty: self.document.is_dirty(),
-            untitled: self.file.is_none(),
+            untitled: !self.file.has_state(),
             busy: self.file_operation_active(),
-            target: self
-                .file
-                .as_ref()
-                .map(|file| file.meta.canonical_target.clone()),
-            failure: self.wqa_failure.clone(),
-            active: self.wqa_active,
+            target: self.file.meta().map(|meta| meta.canonical_target.clone()),
+            failure: self.file.wqa_failure().map(str::to_owned),
+            active: self.file.wqa_active(),
         }
     }
 
     pub(crate) fn note_wqa_failure(&mut self, message: impl Into<String>) {
-        if self.wqa_active && self.wqa_failure.is_none() {
-            self.wqa_failure = Some(message.into());
-        }
+        self.file.note_wqa_failure(message);
     }
 
     fn clear_wqa(&mut self) {
-        self.wqa_active = false;
-        self.wqa_failure = None;
+        self.file.clear_wqa();
     }
 
     pub(crate) fn ex_write_quit_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.wqa_active {
+        if self.file.wqa_active() {
             self.set_status(":wqa is already running");
             return;
         }
@@ -102,12 +96,10 @@ impl Editor {
             }
         }
 
-        self.wqa_active = true;
-        self.wqa_failure = None;
+        self.file.start_wqa();
         for handle in &others {
             let _ = handle.update(cx, |editor, _, _| {
-                editor.wqa_active = true;
-                editor.wqa_failure = None;
+                editor.file.start_wqa();
             });
         }
         self.start_wqa_save(cx);
@@ -122,7 +114,7 @@ impl Editor {
         if !self.document.is_dirty() {
             return;
         }
-        if self.file.is_none() {
+        if !self.file.has_state() {
             self.note_wqa_failure("an untitled document has unsaved changes");
             return;
         }

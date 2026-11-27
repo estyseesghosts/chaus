@@ -6,8 +6,6 @@
 //! for new windows; the current window's live mode stays on Ctrl+Shift+V /
 //! View → Vim Mode.
 
-use std::path::PathBuf;
-
 use chaus_core::settings::{Settings, ThemeName, WrapMode};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -22,8 +20,9 @@ use silvestris::preferences::{Form, FormRow};
 use silvestris::window_role::{role_options, WindowRole};
 use silvestris::{chrome, ActiveTheme, ThemePreference};
 
-use crate::app::{apply_to_open_editors, read_settings, settings_path};
+use crate::app::apply_to_open_editors;
 use crate::settings_global::SettingsGlobal;
+use crate::settings_store::{store, SettingsStore, SettingsStoreEvent};
 use crate::theme_choice::theme_id;
 
 /// One preferences window per app. A stale handle is replaced when the old
@@ -54,13 +53,13 @@ pub(crate) fn open_preferences(cx: &mut App) {
     }
 }
 
-struct Preferences {
+pub struct Preferences {
     settings: Settings,
     font_field: Entity<TextField>,
     font_warning: Option<String>,
-    rc_path: Option<PathBuf>,
-    diagnostics: Vec<String>,
-    save_error: Option<String>,
+    /// The persistence owner. Path, diagnostics and save status are read from
+    /// it during render; this window never keeps an unsynchronized copy.
+    store: Entity<SettingsStore>,
 }
 
 impl Preferences {
@@ -86,17 +85,22 @@ impl Preferences {
             },
         )
         .detach();
-        let read = read_settings();
-        // The global is the canonical in-memory model; `read` supplies the
-        // path and warnings without discarding unsaved session values.
-        let settings = cx.global::<SettingsGlobal>().0.clone();
+        let store = store(cx);
+        cx.subscribe(
+            &store,
+            |preferences, _, event: &SettingsStoreEvent, cx| match event {
+                SettingsStoreEvent::Changed => cx.notify(),
+                SettingsStoreEvent::Reloaded(settings) => {
+                    preferences.adopt_reloaded(settings.clone(), cx);
+                }
+            },
+        )
+        .detach();
         Self {
             settings,
             font_field,
             font_warning: None,
-            rc_path: read.path,
-            diagnostics: read.diagnostics,
-            save_error: None,
+            store,
         }
     }
 
@@ -156,38 +160,53 @@ impl Preferences {
         );
         self.update_placeholder(cx);
         apply_to_open_editors(&self.settings, cx);
-        // Apply in memory immediately; persistence runs independently on the
-        // serialized background writer. Errors are bound to their generation
-        // and shown until a newer write succeeds.
-        if let Some(writer) = cx.try_global::<crate::settings_writer::SettingsWriterGlobal>() {
-            let handle = writer.0.clone();
-            handle.update(cx, |writer, cx| writer.enqueue(self.settings.clone(), cx));
-            self.save_error = handle.read(cx).visible_error();
-        }
+        // Apply in memory immediately; the store owns disk work and status.
+        // Do not snapshot an error here: the subscription notifies this window
+        // when a background write actually finishes.
+        self.store
+            .update(cx, |store, cx| store.enqueue(self.settings.clone(), cx));
         cx.notify();
     }
 
-    /// Re-read the rc file after an external edit, adopting its values and
-    /// surfacing invalid lines instead of silently overwriting them.
+    /// Ask the store to re-read the rc file. The read is asynchronous and
+    /// generation checked; this window adopts the result through the store's
+    /// `Reloaded` event, never by reading the file itself.
     fn reload(&mut self, cx: &mut Context<Self>) {
-        let read = read_settings();
-        self.settings = read.settings;
-        self.rc_path = read.path;
-        self.diagnostics = read.diagnostics;
+        self.store.update(cx, |store, cx| store.reload(cx));
+        cx.notify();
+    }
+
+    /// Adopt a reload the store has already applied to live settings.
+    fn adopt_reloaded(&mut self, settings: Settings, cx: &mut Context<Self>) {
+        self.settings = settings;
         self.font_warning = None;
         let family = self.settings.font_family.clone().unwrap_or_default();
         self.font_field
             .update(cx, |field, cx| field.set_text(family, cx));
-        cx.set_global(SettingsGlobal(self.settings.clone()));
-        silvestris::set_theme_preference(
-            ThemePreference::explicit(theme_id(self.settings.theme)),
-            cx,
-        );
         self.update_placeholder(cx);
-        apply_to_open_editors(&self.settings, cx);
-        self.save_error = None;
         cx.notify();
     }
+
+    /// Current persistence status, read straight from the owner.
+    fn save_error(&self, cx: &App) -> Option<String> {
+        self.store.read(cx).visible_error()
+    }
+}
+
+/// Narrow seams for the deterministic Preferences integration test.
+#[doc(hidden)]
+pub fn new_for_test(window: &mut Window, cx: &mut Context<Preferences>) -> Preferences {
+    Preferences::new(window, cx)
+}
+
+#[doc(hidden)]
+pub fn apply_for_test(preferences: &mut Preferences, cx: &mut Context<Preferences>) {
+    preferences.apply(cx);
+}
+
+#[doc(hidden)]
+pub fn save_error_for_test(preferences: &Preferences, cx: &App) -> Option<String> {
+    preferences.save_error(cx)
 }
 
 impl Render for Preferences {
@@ -319,9 +338,13 @@ impl Render for Preferences {
                 format!("{mappings} loaded from the rc file")
             });
 
-        let path = settings_path()
+        let store = self.store.read(cx);
+        let path = store
+            .path()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "No home directory".to_string());
+        let diagnostics = store.diagnostics().to_vec();
+        let save_error = store.visible_error();
         let reload_entity = entity.clone();
         let files_control = div()
             .flex()
@@ -376,7 +399,7 @@ impl Render for Preferences {
                             .child(warning),
                     )
                 })
-                .when_some(self.save_error.clone(), |element, error| {
+                .when_some(save_error.clone(), |element, error| {
                     element.child(
                         div()
                             .id("preferences-save-error")
@@ -387,7 +410,7 @@ impl Render for Preferences {
                             .child(error),
                     )
                 })
-                .when(!self.diagnostics.is_empty(), |element| {
+                .when(!diagnostics.is_empty(), |element| {
                     element.child(
                         div()
                             .id("preferences-diagnostics")
@@ -399,7 +422,7 @@ impl Render for Preferences {
                             .flex_col()
                             .gap(px(2.0))
                             .child("The rc file has values Chaus could not use:")
-                            .children(self.diagnostics.iter().cloned()),
+                            .children(diagnostics.iter().cloned()),
                     )
                 })
                 .child(

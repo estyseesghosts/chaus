@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use chaus_io::format::{run_with_timeout, FormatError, Formatter};
+use chaus_format::{run_with_timeout, FormatError, Formatter};
 
 #[cfg(windows)]
 fn noisy_formatter() -> Formatter {

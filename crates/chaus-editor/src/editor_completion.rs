@@ -61,7 +61,7 @@ impl Editor {
     }
 
     pub(crate) fn complete_command_path(&mut self, cx: &mut Context<Self>) {
-        let Some(request) = self.vim_engine.completion_request() else {
+        let Some(request) = self.vim.completion_request() else {
             self.flash_status(
                 "Tab completes a file path at the end of :e, :o, :w, :saveas or :r",
                 cx,
@@ -114,7 +114,7 @@ impl Editor {
         // Verification precedes every observable effect: an error, a
         // candidate list, a command-line edit and a repaint all belong to the
         // request that is still current.
-        if !self.vim_engine.is_completion_current(token) {
+        if !self.vim.is_completion_current(token) {
             return;
         }
         if let Some(error) = listing.error {
@@ -157,10 +157,7 @@ impl Editor {
                 (format!("{directory}{common}"), false)
             }
         };
-        if let Some(message) = self
-            .vim_engine
-            .apply_completion(token, &completed, finished)
-        {
+        if let Some(message) = self.vim.apply_completion(token, &completed, finished) {
             self.flash_status(message, cx);
         }
         cx.notify();

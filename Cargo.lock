@@ -807,6 +807,7 @@ name = "chaus-editor"
 version = "0.1.0"
 dependencies = [
  "chaus-core",
+ "chaus-format",
  "chaus-highlight",
  "chaus-io",
  "chaus-layout",
@@ -817,6 +818,10 @@ dependencies = [
  "tempfile",
  "unicode-width",
 ]
+
+[[package]]
+name = "chaus-format"
+version = "0.1.0"
 
 [[package]]
 name = "chaus-highlight"

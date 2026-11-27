@@ -2,11 +2,10 @@
 //! editor's visual rows.
 //!
 //! `chaus-vim` never sees pixels, rows or window geometry. It only asks for
-//! centering, top/bottom placement or a half-page scroll; this module turns
-//! those into `scroll_row` and caret changes.
+//! centering, top/bottom placement or a half-page scroll; this adapter turns
+//! those into scroll and caret operations on `ViewportState`.
 
-use chaus_core::position::Selection;
-use chaus_vim::{Mode, ViewportCommand, ViewportIntent};
+use chaus_vim::{ViewportCommand, ViewportIntent};
 use gpui::Context;
 
 use crate::editor::Editor;
@@ -16,19 +15,21 @@ impl Editor {
         match intent.command {
             ViewportCommand::Center => {
                 let (_, row) = self.row_of_offset(self.selection.head);
-                let visible = self.viewport_rows();
-                self.scroll_row = row as f32 - (visible.saturating_sub(1) as f32 / 2.0);
+                let visible = self.viewport.viewport_rows();
+                self.viewport
+                    .set_scroll_row(row as f32 - (visible.saturating_sub(1) as f32 / 2.0));
                 self.clamp_scroll();
             }
             ViewportCommand::Top => {
                 let (_, row) = self.row_of_offset(self.selection.head);
-                self.scroll_row = row as f32;
+                self.viewport.set_scroll_row(row as f32);
                 self.clamp_scroll();
             }
             ViewportCommand::Bottom => {
                 let (_, row) = self.row_of_offset(self.selection.head);
-                let visible = self.viewport_rows();
-                self.scroll_row = (row + 1).saturating_sub(visible) as f32;
+                let visible = self.viewport.viewport_rows();
+                self.viewport
+                    .set_scroll_row((row + 1).saturating_sub(visible) as f32);
                 self.clamp_scroll();
             }
             ViewportCommand::HalfPageDown | ViewportCommand::HalfPageUp => {
@@ -42,7 +43,7 @@ impl Editor {
     }
 
     fn half_page(&mut self, command: ViewportCommand, count: usize) {
-        let visible = self.viewport_rows();
+        let visible = self.viewport.viewport_rows();
         let step = (visible / 2).max(1).saturating_mul(count.max(1));
         let down = command == ViewportCommand::HalfPageDown;
         let (_, row) = self.row_of_offset(self.selection.head);
@@ -53,11 +54,12 @@ impl Editor {
             row.saturating_sub(step)
         };
         self.move_caret_to_row(row, target_row);
-        self.scroll_row = if down {
-            (self.scroll_row + step as f32).min(total.saturating_sub(visible) as f32)
+        let scroll_row = self.viewport.scroll_row();
+        self.viewport.set_scroll_row(if down {
+            (scroll_row + step as f32).min(total.saturating_sub(visible) as f32)
         } else {
-            (self.scroll_row - step as f32).max(0.0)
-        };
+            (scroll_row - step as f32).max(0.0)
+        });
         self.clamp_scroll();
         self.scroll_to_caret();
     }
@@ -67,32 +69,28 @@ impl Editor {
             return;
         }
         let (_, current_span) = self.row_span(current_row);
-        let x = self.preferred_column.unwrap_or_else(|| {
-            self.caret_column(self.selection.head)
-                .saturating_sub(current_span.start)
+        let x = self.viewport.preferred_column().unwrap_or_else(|| {
+            chaus_layout::RowColumn::new(
+                self.caret_column(self.selection.head)
+                    .saturating_sub(current_span.start.get()),
+            )
         });
-        self.preferred_column = Some(x);
+        self.viewport.set_preferred_column(Some(x));
         let (line, span) = self.row_span(target_row);
-        let offset = self.offset_at(line, span.start.saturating_add(x).min(span.end));
-        let extend = matches!(self.vim_engine.mode(), Mode::VisualChar | Mode::VisualLine);
+        let column = span.start.get().saturating_add(x.get()).min(span.end.get());
+        let offset = self.offset_at(line, chaus_layout::VisualColumn::new(column));
+        let extend = self.vim.visual_mode();
         self.selection = if extend {
-            Selection::new(self.selection.anchor, offset)
+            chaus_core::position::Selection::new(self.selection.anchor, offset)
         } else {
-            Selection::caret(offset)
+            chaus_core::position::Selection::caret(offset)
         };
-    }
-
-    fn viewport_rows(&self) -> usize {
-        self.geometry
-            .map(|geometry| geometry.visible_rows())
-            .unwrap_or(1)
-            .max(1)
     }
 
     /// First visual row currently painted at the top of the viewport.
     #[must_use]
     pub fn viewport_scroll_row(&self) -> f32 {
-        self.scroll_row
+        self.viewport.scroll_row()
     }
 
     /// Visual row of the Normal/Visual caret, for diagnostics and tests.
@@ -104,6 +102,6 @@ impl Editor {
     /// Number of text rows that fit in the current geometry, if painted.
     #[must_use]
     pub fn visible_row_count(&self) -> Option<usize> {
-        self.geometry.map(|geometry| geometry.visible_rows())
+        self.viewport.visible_row_count()
     }
 }

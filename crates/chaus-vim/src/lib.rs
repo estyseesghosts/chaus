@@ -6,6 +6,7 @@
 //! dirty tracking and EOL handling with ordinary typing.
 
 mod command_line;
+mod command_line_state;
 mod engine;
 mod engine_command;
 mod engine_normal;
@@ -13,10 +14,13 @@ mod engine_visual;
 pub mod ex_command;
 mod key;
 mod mapping;
+mod mapping_state;
 mod mode;
 mod motion;
 mod operator;
 mod register;
+mod repeat_state;
+mod search_state;
 mod viewport;
 
 pub use command_line::{CommandPrefix, CompletionToken, MAX_COMMAND_CHARS, MAX_HISTORY};

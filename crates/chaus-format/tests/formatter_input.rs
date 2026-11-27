@@ -1,6 +1,6 @@
 //! A zero-exit formatter is only trusted when all input reached it.
 
-use chaus_io::format::{run, FormatError, Formatter};
+use chaus_format::{run, FormatError, Formatter};
 
 fn formatter(program: &str, arguments: &[&str]) -> Formatter {
     Formatter::new(

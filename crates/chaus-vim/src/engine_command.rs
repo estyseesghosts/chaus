@@ -190,10 +190,7 @@ impl Engine {
             }
             ex_command::path_argument(line.text())?
         };
-        let sequence = self.completion_sequence.wrapping_add(1);
-        let token = self.command_line_ref()?.token(sequence);
-        self.completion_sequence = sequence;
-        self.latest_completion = Some(token);
+        let token = self.issue_completion()?;
         Some(CompletionRequest {
             token,
             typed: argument.typed,
@@ -206,10 +203,7 @@ impl Engine {
     /// candidate-list statuses.
     #[must_use]
     pub fn is_completion_current(&self, token: &CompletionToken) -> bool {
-        self.latest_completion == Some(*token)
-            && self
-                .command_line_ref()
-                .is_some_and(|line| line.token(self.completion_sequence) == *token)
+        self.current_completion(token)
     }
 
     /// Replace the path argument with `completed` only if `token` is still the

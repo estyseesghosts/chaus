@@ -1,6 +1,6 @@
-//! Floating find-bar width constraints.
+//! Floating find-bar width is editor UI geometry, not layout policy.
 
-use chaus_layout::find_bar_width;
+use chaus_editor::find_bar_width;
 
 #[test]
 fn the_bar_fits_inside_the_minimum_window() {

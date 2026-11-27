@@ -62,15 +62,14 @@ impl EntityInputHandler for Editor {
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        self.marked
+        self.text_input
+            .marked()
             .map(|range| self.document.char_range_to_utf16(range))
     }
 
     fn unmark_text(&mut self, window: &mut Window, _: &mut Context<Self>) {
-        self.vim_engine.set_command_preedit(None);
-        self.marked = None;
-        self.preedit_active = false;
-        self.preedit_start = None;
+        self.vim.set_command_preedit(None);
+        self.text_input.clear_composition();
         window.notify_text_input_changed(&self.focus);
     }
 
@@ -90,10 +89,9 @@ impl EntityInputHandler for Editor {
             // after the key-down that opened or was consumed by the sheet.
             return;
         }
-        if self.suppress_text_input {
+        if self.text_input.take_suppression() {
             // The OS delivered WM_CHAR for a key the modal engine already
             // consumed. Drop exactly this character message.
-            self.suppress_text_input = false;
             return;
         }
         if !self.accepts_text_input(window, cx) {
@@ -106,10 +104,13 @@ impl EntityInputHandler for Editor {
         let text = normalize_newlines(new_text);
         let range = match range_utf16 {
             Some(range) => self.document.utf16_range_to_char(range),
-            None => self.marked.unwrap_or_else(|| self.selection.range()),
+            None => self
+                .text_input
+                .marked()
+                .unwrap_or_else(|| self.selection.range()),
         };
         let after = Selection::caret(CharOffset(range.start.0 + text.chars().count()));
-        let cause = if self.preedit_active {
+        let cause = if self.text_input.preedit_active() {
             EditCause::ImeCommit
         } else {
             EditCause::Typing
@@ -118,9 +119,7 @@ impl EntityInputHandler for Editor {
             EditTransaction::new(cause, TextEdit::new(range, text), self.selection, after);
         if let Ok(result) = self.document.apply(transaction) {
             self.selection = after;
-            self.marked = None;
-            self.preedit_active = false;
-            self.preedit_start = None;
+            self.text_input.clear_composition();
             self.after_change(&result, cx);
             window.notify_text_input_changed(&self.focus);
             cx.notify();
@@ -135,25 +134,24 @@ impl EntityInputHandler for Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.suppress_text_input {
-            self.suppress_text_input = false;
+        if self.text_input.take_suppression() {
             return;
         }
         if !self.accepts_text_input(window, cx) {
             return;
         }
         if self.command_line_active() {
-            self.vim_engine
-                .set_command_preedit(Some(new_text.to_owned()));
+            self.vim.set_command_preedit(Some(new_text.to_owned()));
             cx.notify();
             return;
         }
-        if self.preedit_active && self.document.undo().is_some() {
+        if self.text_input.preedit_active() && self.document.undo().is_some() {
             self.refresh_rows(self.document.last_changed_lines());
         }
         let text = normalize_newlines(new_text);
         let start = self
-            .preedit_start
+            .text_input
+            .preedit_start()
             .or_else(|| range_utf16.map(|range| self.document.utf16_range_to_char(range).start))
             .unwrap_or_else(|| self.selection.range().start);
         self.selection = Selection::caret(start);
@@ -181,9 +179,8 @@ impl EntityInputHandler for Editor {
         );
         if let Ok(result) = self.document.apply(transaction) {
             self.selection = selected;
-            self.preedit_start = Some(start);
-            self.preedit_active = true;
-            self.marked = Some(CharRange::new(start, after.head));
+            self.text_input
+                .set_preedit(start, CharRange::new(start, after.head));
             self.after_composition_change(&result, cx);
             window.notify_text_input_changed(&self.focus);
             cx.notify();
@@ -197,7 +194,7 @@ impl EntityInputHandler for Editor {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let geometry = self.geometry?;
+        let geometry = self.viewport.geometry()?;
         let range = self.document.utf16_range_to_char(range_utf16);
         let start = self.bounds_for_offset(range.start, geometry);
         let end = self.bounds_for_offset(range.end, geometry);
@@ -217,7 +214,7 @@ impl EntityInputHandler for Editor {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Vec<Bounds<Pixels>> {
-        let Some(geometry) = self.geometry else {
+        let Some(geometry) = self.viewport.geometry() else {
             return Vec::new();
         };
         let range = self.document.utf16_range_to_char(range_utf16);
@@ -228,7 +225,7 @@ impl EntityInputHandler for Editor {
         let selected_last_line = self
             .document
             .line_of(CharOffset(range.end.0.saturating_sub(1)));
-        let first_visible_row = self.scroll_row.floor().max(0.0) as usize;
+        let first_visible_row = self.viewport.scroll_row().floor().max(0.0) as usize;
         let last_visible_row = first_visible_row + geometry.visible_rows();
         let visible_first_line = self.line_at_row(first_visible_row);
         let visible_last_line = self.line_at_row(last_visible_row);
@@ -244,7 +241,7 @@ impl EntityInputHandler for Editor {
             let line_start = self.document.line_start(line);
             let source = Self::line_source(&self.document, line);
             let checkpoints = self.checkpoints_for(line);
-            let line_prefix = self.rows.prefix(line.0);
+            let line_prefix = self.viewport.row_prefix(line.0);
             let skip = first_visible_row.saturating_sub(line_prefix);
             let limit = last_visible_row
                 .saturating_sub(line_prefix)
@@ -252,9 +249,9 @@ impl EntityInputHandler for Editor {
                 + 1;
             let (segments, stats) = chaus_layout::segments_window_source(
                 &source,
-                self.rows_columns,
+                self.viewport.committed_columns(),
                 self.settings.tab_stop,
-                self.rows_policy,
+                self.viewport.policy(),
                 chaus_layout::WrapRowIndex::new(skip),
                 limit,
                 &checkpoints,
@@ -272,15 +269,18 @@ impl EntityInputHandler for Editor {
                 }
                 let row = line_prefix + skip + index;
                 let y = origin.y
-                    + gpui::px((row as f32 - self.scroll_row) * f32::from(geometry.line_height));
+                    + gpui::px(
+                        (row as f32 - self.viewport.scroll_row()) * f32::from(geometry.line_height),
+                    );
                 if y + geometry.line_height < element_bounds.top() || y > element_bounds.bottom() {
                     continue;
                 }
+                let columns = self.column_checkpoints_for(line);
                 let absolute_start = chaus_layout::column_at_source(
                     &source,
                     chaus_layout::LineCharOffset::new(start.0.saturating_sub(line_start.0)),
                     self.settings.tab_stop,
-                    &checkpoints,
+                    &columns,
                 )
                 .max(segment.start_column);
                 let absolute_end = if range.end >= segment_end {
@@ -290,7 +290,7 @@ impl EntityInputHandler for Editor {
                         &source,
                         chaus_layout::LineCharOffset::new(end.0.saturating_sub(line_start.0)),
                         self.settings.tab_stop,
-                        &checkpoints,
+                        &columns,
                     )
                 }
                 .max(segment.start_column)
@@ -300,7 +300,7 @@ impl EntityInputHandler for Editor {
                 else {
                     continue;
                 };
-                let x = origin.x - self.scroll_x
+                let x = origin.x - self.viewport.scroll_x()
                     + gpui::px(start_column.get() as f32 * f32::from(geometry.char_width));
                 let width = gpui::px(
                     (end_column.get() - start_column.get()) as f32 * f32::from(geometry.char_width),
@@ -314,9 +314,8 @@ impl EntityInputHandler for Editor {
                 ));
             }
         }
-        self.layout_work.rows_walked += walked as u64;
-        self.layout_work.rows_skipped_via_checkpoint += skipped as u64;
-        self.layout_work.source_chars_read += chars_read as u64;
+        self.viewport
+            .record_layout_work(chars_read, 0, walked, skipped, 0);
         rectangles
     }
 
@@ -338,7 +337,7 @@ impl EntityInputHandler for Editor {
         // Normal mode sends printable keys through the command grammar while
         // Insert mode and standard editing defer to an active IME. The
         // command line takes text too, but routes it to its own buffer.
-        !self.vim || self.vim_engine.mode().accepts_text() || self.command_line_active()
+        !self.vim.enabled() || self.vim.accepts_text() || self.command_line_active()
     }
 
     fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut Context<Self>) {
@@ -361,14 +360,14 @@ impl EntityInputHandler for Editor {
 impl Editor {
     /// Whether a Vim `:`, `/` or `?` line owns typed text.
     pub(crate) fn command_line_active(&self) -> bool {
-        self.vim && self.vim_engine.mode() == chaus_vim::Mode::CommandLine
+        self.vim.command_line_active()
     }
 
     /// Typed, pasted or IME-committed text for the command line. It never
     /// reaches the document or its history.
     pub(crate) fn insert_command_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.vim_engine.set_command_preedit(None);
-        if let chaus_vim::Outcome::Message(message) = self.vim_engine.insert_command_text(text) {
+        self.vim.set_command_preedit(None);
+        if let chaus_vim::Outcome::Message(message) = self.vim.insert_command_text(text) {
             self.flash_status(message, cx);
         }
         cx.notify();
@@ -379,29 +378,40 @@ impl Editor {
         let line_start = self.document.line_start(line);
         let source = Self::line_source(&self.document, line);
         let checkpoints = self.checkpoints_for(line);
+        let columns = self.column_checkpoints_for(line);
         let column = chaus_layout::column_at_source(
             &source,
             chaus_layout::LineCharOffset::new(offset.0.saturating_sub(line_start.0)),
             self.settings.tab_stop,
-            &checkpoints,
+            &columns,
         );
         let local_row = self.local_row_of(offset, line);
-        let segment_start = chaus_layout::segment_at_source(
-            &source,
-            self.rows_columns,
-            self.settings.tab_stop,
-            self.rows_policy,
-            chaus_layout::WrapRowIndex::new(local_row),
-            &checkpoints,
-        )
-        .map_or(0, |segment| segment.start_column.get());
+        let scroll_x = self.viewport.scroll_x();
+        let segment_start = if self.viewport.committed_columns().is_none() {
+            // The unwrapped window starts at the horizontal scroll column;
+            // asking layout for a row segment would materialize the line.
+            (f32::from(scroll_x) / f32::from(geometry.char_width).max(1.0))
+                .floor()
+                .max(0.0) as usize
+        } else {
+            chaus_layout::segment_at_source(
+                &source,
+                self.viewport.committed_columns(),
+                self.settings.tab_stop,
+                self.viewport.policy(),
+                chaus_layout::WrapRowIndex::new(local_row),
+                &checkpoints,
+            )
+            .map_or(0, |segment| segment.start_column.get())
+        };
         let local_column = column.get().saturating_sub(segment_start);
         let origin = geometry.text_origin();
         Point {
-            x: origin.x - self.scroll_x
-                + gpui::px(local_column as f32 * f32::from(geometry.char_width)),
+            x: origin.x - scroll_x + gpui::px(local_column as f32 * f32::from(geometry.char_width)),
             y: origin.y
-                + gpui::px((row as f32 - self.scroll_row) * f32::from(geometry.line_height)),
+                + gpui::px(
+                    (row as f32 - self.viewport.scroll_row()) * f32::from(geometry.line_height),
+                ),
         }
     }
 }

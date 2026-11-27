@@ -95,7 +95,7 @@ impl Element for EditorElement {
             // `refresh` redraws the cached tree; the editor itself must be
             // notified so `render` consumes `pending_menu` this frame.
             editor.update(cx, |editor, cx| {
-                editor.pending_menu = Some((MenuKind::Root, position));
+                editor.menu.queue_request(MenuKind::Root, position);
                 cx.notify();
             });
             window.refresh();
@@ -134,7 +134,7 @@ impl Element for EditorElement {
             }
         });
         self.editor.update(cx, |editor, _| {
-            editor.geometry = Some(Geometry {
+            editor.viewport.set_geometry(Geometry {
                 bounds,
                 line_height: prepaint.frame.line_height,
                 char_width: prepaint.frame.char_width,

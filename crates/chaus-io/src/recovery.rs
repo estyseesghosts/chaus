@@ -7,6 +7,13 @@
 //! Startup discovery is header-first: [`scan_in`] reads only the fixed header
 //! and the path, so a large recovery backlog is a handful of small reads.
 //! [`RecoveryEntry::read`] loads one body only when the person chooses it.
+//!
+//! This stays a leaf of `chaus-io` rather than becoming `chaus-recovery`.
+//! `remove_saved_matches` calls the document loader to compare a snapshot with
+//! a file saved after it, and writes commit through the same atomic-replace
+//! primitive as document saves. Splitting either out would duplicate the
+//! load/validation or platform replacement contract, which cleanup.md Task 7
+//! forbids. The UI that offers snapshots to the person remains in `chaus-editor`.
 
 use std::fs::{self, File};
 use std::io::{Read as _, Write as _};
@@ -366,7 +373,8 @@ pub fn write_to_with_epoch(
     temporary.write_all(&bytes)?;
     temporary.as_file().sync_all()?;
     let temporary_path = temporary.into_temp_path();
-    crate::replace_path(&temporary_path, &target).map_err(|error| error.into_io())?;
+    crate::atomic_replace::replace_path(&temporary_path, &target)
+        .map_err(|error| error.into_io())?;
     record_watermark(directory, record.id, epoch, record.revision)?;
     Ok(target)
 }
@@ -539,7 +547,7 @@ fn remove_saved_matches(entries: &mut Vec<RecoveryEntry>) {
             index += 1;
             continue;
         };
-        if let Ok(loaded) = crate::load(&path) {
+        if let Ok(loaded) = crate::loaded_file::load(&path) {
             if loaded.text == normalized(&record.text) {
                 let retired = entries.remove(index);
                 let _ = remove_entry(&retired);

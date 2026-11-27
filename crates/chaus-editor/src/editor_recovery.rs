@@ -1,6 +1,6 @@
 //! Crash-recovery snapshots and the launch-time Recover/Discard sheet.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -184,15 +184,14 @@ impl Editor {
         if self.document.is_dirty() || self.file_operation_active() {
             return false;
         }
-        self.recovery_queue = records.into();
-        self.recovery_selection = 0;
-        self.recovery_window = Some(window.window_handle().window_id());
+        self.recovery
+            .queue_records(records, window.window_handle().window_id());
         self.ensure_recovery_interceptor(cx);
-        window.focus(&self.recovery_focus.recover, cx);
+        window.focus(&self.recovery.recover_focus(), cx);
         // Focus the button again after the sheet has rendered so mouse focus
         // and the focus ring agree. Keys are handled by the interceptor, which
         // does not depend on the rendered focus node.
-        let focus = self.recovery_focus.recover.clone();
+        let focus = self.recovery.recover_focus();
         window.defer(cx, move |window, cx| {
             window.focus(&focus, cx);
         });
@@ -204,22 +203,20 @@ impl Editor {
     /// window. While true, editor key bindings and text input are disabled.
     #[must_use]
     pub(crate) fn modal_sheet_open(&self) -> bool {
-        !self.recovery_queue.is_empty() || self.close_prompt || self.conflict_prompt.is_some()
+        self.recovery.is_open() || self.close_prompt || self.conflict_prompt.is_some()
     }
 
     pub(crate) fn schedule_recovery(&mut self, cx: &mut Context<Self>) {
-        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
-        let epoch = self.recovery_epoch;
+        let epoch = self.recovery.bump_epoch();
         cx.spawn(async move |editor, cx| {
             cx.background_executor().timer(SNAPSHOT_DELAY).await;
             let record = editor
                 .update(cx, |editor, cx| {
-                    if editor.recovery_epoch != epoch {
+                    if !editor.recovery.owns_epoch(epoch) {
                         return None;
                     }
                     if !editor.document.is_dirty() {
-                        let key = editor.recovery_key;
-                        let path = editor.recovery_path.clone();
+                        let (key, path) = editor.recovery.retire_values();
                         spawn_recovery_retire(key, epoch, path, &cx.weak_entity(), cx);
                         return None;
                     }
@@ -241,8 +238,7 @@ impl Editor {
     /// Snapshot the document immediately instead of waiting for the debounce.
     /// Used when a background save completes while newer edits remain.
     pub(crate) fn write_recovery_now(&mut self, cx: &mut Context<Self>) {
-        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
-        let epoch = self.recovery_epoch;
+        let epoch = self.recovery.bump_epoch();
         if !self.document.is_dirty() {
             self.retire_recovery_snapshot(epoch, cx);
             return;
@@ -260,26 +256,16 @@ impl Editor {
     }
 
     pub(crate) fn retire_recovery_snapshot(&self, epoch: u64, cx: &mut Context<Self>) {
-        spawn_recovery_retire(
-            self.recovery_key,
-            epoch,
-            self.recovery_path.clone(),
-            &cx.weak_entity(),
-            cx,
-        );
+        let (key, path) = self.recovery.retire_values();
+        spawn_recovery_retire(key, epoch, path, &cx.weak_entity(), cx);
     }
 
     /// Remove the snapshot for the current document. Bumping the epoch first
     /// invalidates any write already in flight for the old revision.
     pub(crate) fn remove_recovery_snapshot(&mut self, cx: &mut Context<Self>) {
-        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
-        spawn_recovery_retire(
-            self.recovery_key,
-            self.recovery_epoch,
-            self.recovery_path.clone(),
-            &cx.weak_entity(),
-            cx,
-        );
+        let epoch = self.recovery.bump_epoch();
+        let (key, path) = self.recovery.retire_values();
+        spawn_recovery_retire(key, epoch, path, &cx.weak_entity(), cx);
     }
 
     /// Test entry point for the retirement path used by close/clear handlers.
@@ -290,17 +276,14 @@ impl Editor {
     /// Snapshot key of this window, for deterministic filesystem fixtures.
     #[must_use]
     pub fn recovery_key_for_test(&self) -> u64 {
-        self.recovery_key
+        self.recovery.key()
     }
 
     /// Retained original path and BOM of a recovered document, for tests that
     /// prove Save As still sees them after the record is installed.
     #[must_use]
     pub fn recovery_metadata_for_test(&self) -> (Option<PathBuf>, bool) {
-        (
-            self.recovery_original_path.clone(),
-            self.recovery_had_utf8_bom,
-        )
+        self.recovery.metadata()
     }
 
     /// A successful associate-save makes a recovered document a normal named
@@ -308,64 +291,43 @@ impl Editor {
     /// later debounced snapshots go to the normal store instead of replacing
     /// the record this window no longer owns.
     pub(crate) fn finish_recovery_after_save(&mut self, cx: &mut Context<Self>) {
-        if self.recovery_path.is_none() && self.recovery_original_path.is_none() {
+        let Some((old_key, old_path, epoch)) = self.recovery.finish_after_save() else {
             return;
-        }
-        let old_key = self.recovery_key;
-        let old_path = self.recovery_path.take();
-        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
-        let epoch = self.recovery_epoch;
+        };
         spawn_recovery_retire(old_key, epoch, old_path, &cx.weak_entity(), cx);
-        self.recovery_key = new_recovery_id();
-        self.recovery_original_path = None;
-        self.recovery_had_utf8_bom = false;
-        self.recovery_directory = None;
     }
 
     pub(crate) fn reset_recovery_key(&mut self) {
-        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
-        self.recovery_key = new_recovery_id();
-        self.recovery_original_path = None;
-        self.recovery_had_utf8_bom = false;
-        self.recovery_directory = None;
-        self.recovery_path = None;
+        self.recovery.reset_for_document();
     }
 
     /// Cheap capture for the background writer. Cloning the Rope and the EOL
     /// map does not copy the text, so the debounce callback never expands a
     /// multi-MiB document on the UI thread.
     fn recovery_snapshot(&self) -> RecoverySnapshot {
-        let (original_path, had_utf8_bom) = self.file.as_ref().map_or(
-            (
-                self.recovery_original_path.clone(),
-                self.recovery_had_utf8_bom,
-            ),
-            |file| {
-                (
-                    Some(file.meta.user_requested_path.clone()),
-                    file.meta.had_utf8_bom,
-                )
-            },
+        let (id, original_path, had_utf8_bom, directory) = self.recovery.snapshot_source(
+            self.file.path(),
+            self.file.meta().map(|meta| meta.had_utf8_bom),
         );
         RecoverySnapshot {
-            id: self.recovery_key,
+            id,
             original_path,
             document: self.document.snapshot(),
             preferred_eol: self.document.preferred_eol(),
             had_utf8_bom,
             revision: self.document.state_token(),
-            directory: self.recovery_directory.clone(),
+            directory,
         }
     }
 
     fn recover_next(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = self.recovery_queue.pop_front() else {
+        let Some(entry) = self.recovery.pop_front() else {
             return;
         };
         if self.document.is_dirty() {
             // The sheet should still be modal, but never overwrite typed work
             // even if a future input path slips through.
-            self.recovery_queue.push_front(entry);
+            self.recovery.push_front(entry);
             self.set_status("Recovery paused: save or discard your changes first");
             cx.notify();
             return;
@@ -375,7 +337,7 @@ impl Editor {
             entry.display_detail()
         ));
         cx.notify();
-        let generation = self.document_generation;
+        let generation = self.file.generation();
         let state = self.document.state_token();
         let fallback = entry.clone();
         let weak = cx.weak_entity();
@@ -383,11 +345,11 @@ impl Editor {
         cx.spawn(async move |_, cx| {
             let record = task.await;
             weak.update_in(cx, |editor, window, cx| {
-                if editor.document_generation != generation
+                if !editor.file.owns_document(generation)
                     || editor.document.state_token() != state
                     || editor.document.is_dirty()
                 {
-                    editor.recovery_queue.push_front(fallback.clone());
+                    editor.recovery.push_front(fallback.clone());
                     editor.set_status("Recovery cancelled: the document changed while loading");
                     editor.finish_recovery_choice(window, cx);
                     return;
@@ -400,8 +362,7 @@ impl Editor {
                     editor.finish_recovery_choice(window, cx);
                     return;
                 };
-                editor.recovery_path = Some(fallback.path.clone());
-                editor.recovery_directory = fallback.path.parent().map(Path::to_path_buf);
+                editor.recovery.adopt_record(&record, &fallback);
                 editor.install_recovered(record, window, cx);
             })
             .ok();
@@ -420,38 +381,30 @@ impl Editor {
         // discarding retires it. Deleting it here would lose the only durable
         // copy if the process crashed before the next edit or save.
         let name = record.display_detail();
-        self.recovery_key = record.id;
-        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
-        self.recovery_original_path = record.original_path.clone();
-        self.recovery_had_utf8_bom = record.had_utf8_bom;
         let (text, eol) = EolMap::from_source(&record.text);
         self.document.reset(text, eol, record.preferred_eol);
         // A recovered document is a new document generation: a pending open or
         // save from before the reset must never settle against it.
         self.cancel_file_operation();
         self.cancel_format_job();
-        self.document_generation.bump();
+        self.file.bump_generation();
         self.document.mark_unsaved();
         self.selection = Selection::caret(CharOffset::ZERO);
-        self.preferred_column = None;
-        self.scroll_row = 0.0;
-        self.scroll_x = px(0.0);
-        self.marked = None;
-        self.preedit_start = None;
-        self.preedit_active = false;
-        self.force_next_save = false;
-        self.pending_close_after = None;
-        self.pending_open_close = None;
-        self.file = None;
+        self.viewport.reset_scroll();
+        self.text_input.clear_composition();
+        self.file.clear_force();
+        self.file.set_close_intent(None);
+        self.file.set_open_close_intent(None);
+        self.file.set_state(None);
         self.reset_highlight(cx);
         self.document.cancel_user_operation();
-        self.vim_engine.reset();
+        self.vim.reset();
         self.rebuild_rows();
-        let remaining = self.recovery_queue.len();
+        let remaining = self.recovery.queue_len();
         // Opening another recovered document would replace this one before it
         // can be saved. Leave the remaining snapshots on disk for the next
         // launch; Discard All can clean them out if they are not wanted.
-        self.recovery_queue.clear();
+        self.recovery.clear();
         window.focus(&self.focus, cx);
         if remaining == 0 {
             self.set_status(format!("Recovered unsaved changes for {name}"));
@@ -464,39 +417,39 @@ impl Editor {
     }
 
     fn discard_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(record) = self.recovery_queue.pop_front() else {
+        let Some(record) = self.recovery.pop_front() else {
             return;
         };
-        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
-        spawn_recovery_retire_many(vec![record], self.recovery_epoch, &cx.weak_entity(), cx);
+        let epoch = self.recovery.bump_epoch();
+        spawn_recovery_retire_many(vec![record], epoch, &cx.weak_entity(), cx);
         self.finish_recovery_choice(window, cx);
     }
 
     fn discard_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.recovery_queue.is_empty() {
+        if self.recovery.is_empty() {
             return;
         }
-        let entries: Vec<RecoveryEntry> = self.recovery_queue.drain(..).collect();
+        let entries = self.recovery.drain();
         let count = entries.len();
-        self.recovery_epoch = self.recovery_epoch.wrapping_add(1);
-        spawn_recovery_retire_many(entries, self.recovery_epoch, &cx.weak_entity(), cx);
+        let epoch = self.recovery.bump_epoch();
+        spawn_recovery_retire_many(entries, epoch, &cx.weak_entity(), cx);
         window.focus(&self.focus, cx);
         self.set_status(format!("Discarded {count} recovery snapshot(s)"));
         cx.notify();
     }
 
     fn finish_recovery_choice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.recovery_queue.is_empty() {
+        if self.recovery.is_empty() {
             window.focus(&self.focus, cx);
         } else {
-            window.focus(&self.recovery_focus.recover, cx);
+            window.focus(&self.recovery.recover_focus(), cx);
         }
         cx.notify();
     }
 
     pub(crate) fn dismiss_recovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let count = self.recovery_queue.len();
-        self.recovery_queue.clear();
+        let count = self.recovery.queue_len();
+        self.recovery.clear();
         window.focus(&self.focus, cx);
         if count > 0 {
             self.set_status(format!(
@@ -513,15 +466,17 @@ impl Editor {
     /// scan lands. An interceptor runs before both, so it is the only place
     /// that can reliably keep Tab/Enter out of the editor.
     pub(crate) fn ensure_recovery_interceptor(&mut self, cx: &mut Context<Self>) {
-        if self.recovery_interceptor.is_some() {
+        if self.recovery.has_interceptor() {
             return;
         }
         let weak = cx.weak_entity();
-        self.recovery_interceptor = Some(cx.intercept_keystrokes(move |event, window, cx| {
+        let interceptor = cx.intercept_keystrokes(move |event, window, cx| {
             let keystroke = event.keystroke.clone();
             let _ = weak.update(cx, |editor, cx| {
-                if editor.recovery_queue.is_empty()
-                    || editor.recovery_window != Some(window.window_handle().window_id())
+                if !editor.recovery.is_open()
+                    || !editor
+                        .recovery
+                        .window_matches(window.window_handle().window_id())
                 {
                     return;
                 }
@@ -531,7 +486,8 @@ impl Editor {
                 cx.stop_propagation();
                 editor.recovery_intercept_key(&keystroke, window, cx);
             });
-        }));
+        });
+        self.recovery.set_interceptor(interceptor);
     }
 
     pub(crate) fn recovery_intercept_key(
@@ -543,14 +499,10 @@ impl Editor {
         match keystroke.key.as_str() {
             "tab" => {
                 let reverse = keystroke.modifiers.shift;
-                self.recovery_selection = if reverse {
-                    (self.recovery_selection + 2) % 3
-                } else {
-                    (self.recovery_selection + 1) % 3
-                };
+                self.recovery.cycle_selection(reverse);
                 cx.notify();
             }
-            "enter" | "space" => match self.recovery_selection {
+            "enter" | "space" => match self.recovery.selection() {
                 1 => self.discard_next(window, cx),
                 2 => self.discard_all(window, cx),
                 _ => self.recover_next(window, cx),
@@ -562,10 +514,10 @@ impl Editor {
 
     pub(crate) fn render_recovery_prompt(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let Some(record) = self.recovery_queue.front() else {
+        let Some(record) = self.recovery.front() else {
             return div().into_any_element();
         };
-        let total = self.recovery_queue.len();
+        let total = self.recovery.queue_len();
         let position = if total == 1 {
             "Snapshot".to_string()
         } else {
@@ -621,8 +573,8 @@ impl Editor {
                             .gap(px(8.0))
                             .child(
                                 Button::new("recovery-discard-all", "Discard All")
-                                    .focus_handle(self.recovery_focus.discard_all.clone())
-                                    .selected(self.recovery_selection == 2)
+                                    .focus_handle(self.recovery.focus().discard_all.clone())
+                                    .selected(self.recovery.selection() == 2)
                                     .destructive(true)
                                     .on_click(cx.listener(|editor, _, window, cx| {
                                         editor.discard_all(window, cx);
@@ -630,8 +582,8 @@ impl Editor {
                             )
                             .child(
                                 Button::new("recovery-discard", "Discard")
-                                    .focus_handle(self.recovery_focus.discard.clone())
-                                    .selected(self.recovery_selection == 1)
+                                    .focus_handle(self.recovery.focus().discard.clone())
+                                    .selected(self.recovery.selection() == 1)
                                     .destructive(true)
                                     .on_click(cx.listener(|editor, _, window, cx| {
                                         editor.discard_next(window, cx);
@@ -639,8 +591,8 @@ impl Editor {
                             )
                             .child(
                                 Button::new("recovery-recover", "Recover")
-                                    .focus_handle(self.recovery_focus.recover.clone())
-                                    .selected(self.recovery_selection == 0)
+                                    .focus_handle(self.recovery.focus().recover.clone())
+                                    .selected(self.recovery.selection() == 0)
                                     .default_button(true)
                                     .on_click(cx.listener(|editor, _, window, cx| {
                                         editor.recover_next(window, cx);

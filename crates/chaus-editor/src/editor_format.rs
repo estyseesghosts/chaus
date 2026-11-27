@@ -1,12 +1,13 @@
 //! Explicit Format Document action.
 //!
-//! Detection and process execution live in `chaus_io::format`. At most one job
+//! Detection and process execution live in `chaus-format`. At most one job
 //! owns a document: text expansion and the bounded diff run on the background
 //! executor, while the editor applies a revision-checked, single undo step.
 
 use chaus_core::diff::TextChange;
 use chaus_core::document::{EditCause, EditTransaction, TextEdit};
 use chaus_core::position::{CharOffset, CharRange, DocumentRevision, Selection};
+use chaus_format::{run, FormatError};
 use gpui::{Context, Window};
 
 use crate::editor::Editor;
@@ -14,7 +15,7 @@ use crate::editor_edit::normalize_newlines;
 use crate::editor_keys::FormatDocument;
 
 /// Computed off the UI thread from the snapshot the job started with.
-type FormatPlan = Result<Option<TextChange>, chaus_io::format::FormatError>;
+type FormatPlan = Result<Option<TextChange>, FormatError>;
 
 impl Editor {
     pub(crate) fn format_document_action(
@@ -28,21 +29,18 @@ impl Editor {
 
     /// Run the formatter detected for the current file, if any.
     pub fn format_document(&mut self, cx: &mut Context<Self>) {
-        if self.format_in_flight {
+        if self.format.in_flight() {
             self.set_status("Format already in progress");
             cx.notify();
             return;
         }
-        let Some(file) = self.file.as_ref() else {
+        let Some(file) = self.file.state() else {
             self.set_status("Save the file before formatting");
             cx.notify();
             return;
         };
         let path = file.meta.user_requested_path.clone();
-        let formatter = self
-            .formatter_override
-            .clone()
-            .or_else(|| chaus_io::format::Formatter::for_path(&path));
+        let formatter = self.format.formatter_for(&path);
         let Some(formatter) = formatter else {
             self.set_status("No formatter is configured for this file type");
             cx.notify();
@@ -51,15 +49,13 @@ impl Editor {
         let program = formatter.program.clone();
         let snapshot = self.document.snapshot();
         let revision = self.document.revision();
-        self.format_generation = self.format_generation.wrapping_add(1);
-        let generation = self.format_generation;
-        self.format_in_flight = true;
+        let generation = self.format.begin();
         self.set_status(format!("Formatting with {program}..."));
         cx.notify();
 
         let task = cx.background_executor().spawn(async move {
             let text = snapshot.text_with_eol();
-            let formatted = chaus_io::format::run(&formatter, &text)?;
+            let formatted = run(&formatter, &text)?;
             let formatted = normalize_newlines(&formatted);
             Ok(chaus_core::diff::common_change(&text, &formatted))
         });
@@ -77,8 +73,7 @@ impl Editor {
     /// A replacement of the document, an explicit cancellation or a new job
     /// invalidates the previous generation.
     pub(crate) fn cancel_format_job(&mut self) {
-        self.format_generation = self.format_generation.wrapping_add(1);
-        self.format_in_flight = false;
+        self.format.cancel();
     }
 
     fn finish_format(
@@ -89,10 +84,9 @@ impl Editor {
         result: FormatPlan,
         cx: &mut Context<Self>,
     ) {
-        if generation != self.format_generation || !self.format_in_flight {
+        if !self.format.finish(generation) {
             return;
         }
-        self.format_in_flight = false;
         if self.document.revision() != revision {
             self.set_status("Document changed while formatting; result discarded");
             cx.notify();

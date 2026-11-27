@@ -6,6 +6,7 @@
 //! interchangeable.
 
 use std::fmt;
+use std::ops::Range;
 
 macro_rules! index_type {
     ($name:ident, $doc:literal) => {
@@ -59,7 +60,11 @@ index_type!(
 );
 index_type!(
     ByteOffset,
-    "A UTF-8 byte offset (Tree-sitter, shaped text runs)."
+    "A UTF-8 byte offset from the start of the document (Tree-sitter, shaped text runs)."
+);
+index_type!(
+    LineByteOffset,
+    "A UTF-8 byte column from the start of a hard line (Tree-sitter points)."
 );
 index_type!(
     Utf16Offset,
@@ -132,6 +137,46 @@ impl CharRange {
             start: self.start.min(other.start),
             end: self.end.max(other.end),
         }
+    }
+}
+
+/// A half-open range of document-global UTF-8 byte offsets.
+///
+/// Unlike [`LineByteOffset`], these offsets are measured from the start of the
+/// document, so they can be passed to Tree-sitter or Ropey's byte APIs after
+/// converting each end with [`ByteOffset::get`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ByteRange {
+    pub start: ByteOffset,
+    pub end: ByteOffset,
+}
+
+impl ByteRange {
+    #[must_use]
+    pub fn new(start: ByteOffset, end: ByteOffset) -> Self {
+        Self { start, end }
+    }
+
+    #[must_use]
+    pub fn len(self) -> usize {
+        self.end.0 - self.start.0
+    }
+
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.start == self.end
+    }
+}
+
+impl From<Range<usize>> for ByteRange {
+    fn from(value: Range<usize>) -> Self {
+        Self::new(ByteOffset(value.start), ByteOffset(value.end))
+    }
+}
+
+impl From<ByteRange> for Range<usize> {
+    fn from(value: ByteRange) -> Self {
+        value.start.0..value.end.0
     }
 }
 

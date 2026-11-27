@@ -13,7 +13,7 @@ use chaus_vim::{ExCommand, ExPath};
 use gpui::{Context, Window, WindowHandle};
 
 use crate::editor::Editor;
-use crate::file_operation::{CloseAfter, FileOperation, WriteAssociation};
+use crate::file_operation::{CloseAfter, WriteAssociation};
 
 const NO_WRITE: &str = "No write since last change (add ! to override)";
 const BUSY: &str = "A file operation is in progress";
@@ -93,7 +93,7 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match (path, self.file.is_some()) {
+        match (path, self.file.has_state()) {
             // `:w!` on the current file is the ordinary save. External-change
             // protection still applies; the conflict sheet is the override.
             (None, true) => {
@@ -119,19 +119,19 @@ impl Editor {
     /// alias that is not recognised here is treated as another file, so
     /// without `!` it is refused as existing rather than silently replaced.
     fn is_current_file(&self, path: &Path) -> bool {
-        let Some(file) = self.file.as_ref() else {
+        let Some(meta) = self.file.meta() else {
             return false;
         };
         let Ok(absolute) = std::path::absolute(path) else {
             return false;
         };
-        let requested = std::path::absolute(&file.meta.user_requested_path).ok();
-        absolute == file.meta.canonical_target || Some(&absolute) == requested.as_ref()
+        let requested = std::path::absolute(&meta.user_requested_path).ok();
+        absolute == meta.canonical_target || Some(&absolute) == requested.as_ref()
     }
 
     fn ex_quit(&mut self, force: bool, window: &mut Window, cx: &mut Context<Self>) {
         if force {
-            if matches!(self.file_operation, FileOperation::Saving { .. }) {
+            if self.file.is_saving() {
                 self.set_status("A save is still running; :q! waits until it finishes");
                 return;
             }
@@ -152,7 +152,7 @@ impl Editor {
     }
 
     fn ex_write_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.file.is_some() {
+        if self.file.has_state() {
             self.save_inner(CloseAfter::Ex, cx);
         } else {
             self.save_as_inner(CloseAfter::Ex, window, cx);
@@ -162,8 +162,8 @@ impl Editor {
     fn ex_edit(&mut self, force: bool, path: Option<PathBuf>, cx: &mut Context<Self>) {
         let path = match path {
             Some(path) => path,
-            None => match self.file.as_ref() {
-                Some(file) => file.meta.user_requested_path.clone(),
+            None => match self.file.meta() {
+                Some(meta) => meta.user_requested_path.clone(),
                 None => {
                     self.set_status("No file name to reload");
                     return;
@@ -187,9 +187,9 @@ impl Editor {
     }
 
     fn file_summary(&self) -> String {
-        let name = self.file.as_ref().map_or_else(
+        let name = self.file.path().map_or_else(
             || "[No Name]".to_owned(),
-            |file| format!("\"{}\"", file.meta.user_requested_path.display()),
+            |path| format!("\"{}\"", path.display()),
         );
         let modified = if self.document.is_dirty() {
             " [Modified]"
@@ -211,7 +211,7 @@ impl Editor {
         };
         let caret = chaus_vim::first_non_space(&self.document, LineIndex(line));
         self.selection = Selection::caret(caret);
-        self.preferred_column = None;
+        self.viewport.set_preferred_column(None);
         self.scroll_to_caret();
     }
 
@@ -264,7 +264,7 @@ impl Editor {
             if !editor.document.is_dirty() {
                 return;
             }
-            if editor.file.is_none() {
+            if !editor.file.has_state() {
                 untitled += 1;
             } else if editor.file_operation_active() {
                 busy += 1;
@@ -293,15 +293,12 @@ impl Editor {
         let others = other_editors(window, cx);
         let mut dirty = usize::from(self.document.is_dirty());
         let mut busy = usize::from(self.file_operation_active());
-        let mut saving = usize::from(matches!(self.file_operation, FileOperation::Saving { .. }));
+        let mut saving = usize::from(self.file.is_saving());
         for handle in &others {
             let _ = handle.update(cx, |editor, _, _| {
                 dirty += usize::from(editor.document.is_dirty());
                 busy += usize::from(editor.file_operation_active());
-                saving += usize::from(matches!(
-                    editor.file_operation,
-                    FileOperation::Saving { .. }
-                ));
+                saving += usize::from(editor.file.is_saving());
             });
         }
         if saving > 0 {
@@ -332,7 +329,7 @@ impl Editor {
     /// step. The read runs off the UI thread; if the document changes before
     /// it returns, nothing is inserted.
     fn ex_read(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let generation = self.document_generation;
+        let generation = self.file.generation();
         let revision = self.document.revision();
         let line = self.document.line_of(self.selection.head);
         self.set_status(format!("Reading {}...", path.display()));
@@ -344,7 +341,7 @@ impl Editor {
             let result = task.await;
             editor
                 .update(cx, |editor, cx| {
-                    if editor.document_generation != generation
+                    if !editor.file.owns_document(generation)
                         || editor.document.revision() != revision
                     {
                         editor.set_status(":r cancelled: the document changed while reading");

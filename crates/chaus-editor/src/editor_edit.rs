@@ -33,16 +33,15 @@ impl Editor {
     /// epoch-tagged, so a clean document retires the snapshot instead of
     /// writing a stale one.
     pub(crate) fn after_document_mutation(&mut self, affected: LineRange, cx: &mut Context<Self>) {
-        self.force_next_save = false;
+        // A new edit invalidates the decision to force the next overwrite.
+        self.file.clear_force();
         self.refresh_rows(affected);
         self.scroll_to_caret();
         self.schedule_recovery(cx);
     }
 
     pub(crate) fn clear_composition(&mut self) {
-        self.marked = None;
-        self.preedit_start = None;
-        self.preedit_active = false;
+        self.text_input.clear_composition();
     }
 
     /// Complete a mutation that reports no `EditResult`: history replays whole
@@ -51,7 +50,7 @@ impl Editor {
     pub(crate) fn after_opaque_mutation(&mut self, cx: &mut Context<Self>) {
         self.after_document_mutation(self.document.last_changed_lines(), cx);
         self.clear_composition();
-        self.preferred_column = None;
+        self.viewport.set_preferred_column(None);
         self.schedule_highlight(None, cx);
         cx.notify();
     }
@@ -220,7 +219,7 @@ impl Editor {
 
     pub(crate) fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.selection = Selection::new(CharOffset::ZERO, CharOffset(self.document.len_chars()));
-        self.preferred_column = None;
+        self.viewport.set_preferred_column(None);
         cx.notify();
     }
 
@@ -274,17 +273,18 @@ impl Editor {
         if self.find_bar.is_some()
             || self.close_prompt
             || self.conflict_prompt.is_some()
-            || !self.recovery_queue.is_empty()
+            || self.recovery.is_open()
         {
             return;
         }
-        self.vim = !self.vim;
+        let enabled = !self.vim.enabled();
+        self.vim.set_enabled(enabled);
         self.document.cancel_user_operation();
-        self.vim_engine.reset();
-        if !self.vim {
+        self.vim.reset();
+        if !enabled {
             self.selection = Selection::caret(self.selection.head);
         }
-        let message = if self.vim {
+        let message = if enabled {
             "Vim mode on"
         } else {
             "Vim mode off"
@@ -294,7 +294,7 @@ impl Editor {
     }
 
     pub(crate) fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.recovery_queue.is_empty() {
+        if self.recovery.is_open() {
             self.dismiss_recovery(window, cx);
             return;
         }
@@ -302,7 +302,7 @@ impl Editor {
             self.close_find(window, cx);
             return;
         }
-        let had_composition = self.marked.is_some() || self.preedit_active;
+        let had_composition = self.text_input.composition_active();
         let handled = self.handle_vim_escape(window, cx);
         self.clear_composition_state();
         if had_composition {
@@ -316,9 +316,7 @@ impl Editor {
     }
 
     fn clear_composition_state(&mut self) {
-        self.marked = None;
-        self.preedit_active = false;
-        self.preedit_start = None;
+        self.text_input.clear_composition();
     }
 }
 

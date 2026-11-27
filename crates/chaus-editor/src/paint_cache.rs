@@ -24,6 +24,9 @@ pub(crate) struct PaintKey {
     pub(crate) font_size_bits: u32,
     pub(crate) font_family: String,
     pub(crate) theme: ThemeId,
+    /// Source scalar where a painted window starts. Wrapped rows use their
+    /// segment start; unwrapped painting uses the visible horizontal window.
+    pub(crate) offset: usize,
 }
 
 /// A row is identified by its hard line and its segment within that line.

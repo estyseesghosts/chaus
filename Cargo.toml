@@ -5,6 +5,7 @@ members = [
     "crates/chaus-layout",
     "crates/chaus-highlight",
     "crates/chaus-io",
+    "crates/chaus-format",
     "crates/chaus-cli",
     "crates/chaus-vim",
     "crates/chaus-editor",
@@ -22,6 +23,7 @@ chaus-core = { path = "crates/chaus-core" }
 chaus-layout = { path = "crates/chaus-layout" }
 chaus-highlight = { path = "crates/chaus-highlight" }
 chaus-io = { path = "crates/chaus-io" }
+chaus-format = { path = "crates/chaus-format" }
 chaus-cli = { path = "crates/chaus-cli" }
 chaus-vim = { path = "crates/chaus-vim" }
 chaus-editor = { path = "crates/chaus-editor" }

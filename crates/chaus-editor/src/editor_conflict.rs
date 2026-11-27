@@ -1,5 +1,7 @@
 //! Explicit choice sheet for a save conflict.
 
+use std::path::Path;
+
 use gpui::{
     div, px, App, Context, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
     MouseButton, ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window,
@@ -37,14 +39,14 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.conflict_prompt = Some(conflict);
-        self.vim_engine.cancel_prefix();
+        self.vim.cancel_prefix();
         window.focus(&self.conflict_focus.cancel, cx);
         cx.notify();
     }
 
     pub(crate) fn cancel_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.conflict_prompt = None;
-        let close_after = self.pending_close_after.take();
+        let close_after = self.file.take_close_intent();
         if close_after == Some(CloseAfter::Sheet) || self.close_prompt {
             self.restore_close_prompt(window, cx);
         } else {
@@ -55,21 +57,18 @@ impl Editor {
 
     pub(crate) fn reload_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.conflict_prompt = None;
-        let close_after = self.pending_close_after.take();
-        let Some(path) = self
-            .file
-            .as_ref()
-            .map(|file| file.meta.user_requested_path.clone())
-        else {
+        let close_after = self.file.take_close_intent();
+        let Some(path) = self.file.path().map(Path::to_path_buf) else {
             self.close_not_started(close_after.unwrap_or(CloseAfter::No), window, cx);
             window.focus(&self.focus, cx);
             return;
         };
         // Reload discards the local edit, so it can satisfy a pending close
         // as soon as the forced reload lands.
-        self.pending_open_close = close_after.filter(|intent| intent.closes());
+        self.file
+            .set_open_close_intent(close_after.filter(|intent| intent.closes()));
         if !self.open_path(&path, true, cx) {
-            self.pending_open_close = None;
+            self.file.set_open_close_intent(None);
             self.close_not_started(close_after.unwrap_or(CloseAfter::No), window, cx);
             window.focus(&self.focus, cx);
         }
@@ -77,14 +76,14 @@ impl Editor {
 
     pub(crate) fn save_as_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.conflict_prompt = None;
-        let close_after = self.pending_close_after.take().unwrap_or(CloseAfter::No);
+        let close_after = self.file.take_close_intent().unwrap_or(CloseAfter::No);
         let _ = self.save_as_inner(close_after, window, cx);
     }
 
     pub(crate) fn overwrite_conflict(&mut self, cx: &mut Context<Self>) {
         self.conflict_prompt = None;
-        let close_after = self.pending_close_after.take().unwrap_or(CloseAfter::No);
-        self.force_next_save = true;
+        let close_after = self.file.take_close_intent().unwrap_or(CloseAfter::No);
+        self.file.set_force();
         self.save_inner(close_after, cx);
     }
 

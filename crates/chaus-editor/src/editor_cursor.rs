@@ -1,7 +1,7 @@
 //! Caret movement, word boundaries and scroll-follow.
 
 use chaus_core::position::{CharOffset, CharRange, LineIndex, Selection};
-use gpui::{px, Context, Window};
+use gpui::{Context, Window};
 use ropey::iter::Chars;
 use ropey::Rope;
 
@@ -23,7 +23,7 @@ impl Editor {
         } else {
             Selection::caret(offset)
         };
-        self.preferred_column = None;
+        self.viewport.set_preferred_column(None);
         self.scroll_to_caret();
         cx.notify();
     }
@@ -66,15 +66,17 @@ impl Editor {
         // column in the hard line. Otherwise a wrapped row would land on the
         // wrong segment once `offset_at` spans the whole logical line.
         let (_, current_span) = self.row_span(base_row);
-        let x = self.preferred_column.unwrap_or_else(|| {
-            self.caret_column(self.selection.head)
-                .saturating_sub(current_span.start)
+        let x = self.viewport.preferred_column().unwrap_or_else(|| {
+            chaus_layout::RowColumn::new(
+                self.caret_column(self.selection.head)
+                    .saturating_sub(current_span.start.get()),
+            )
         });
-        self.preferred_column = Some(x);
+        self.viewport.set_preferred_column(Some(x));
 
         let (target_line, span) = self.row_span(target_row);
-        let column = span.start.saturating_add(x).min(span.end);
-        let offset = self.offset_at(target_line, column);
+        let column = span.start.get().saturating_add(x.get()).min(span.end.get());
+        let offset = self.offset_at(target_line, chaus_layout::VisualColumn::new(column));
         self.selection = if extend {
             Selection::new(self.selection.anchor, offset)
         } else {
@@ -85,7 +87,7 @@ impl Editor {
     }
 
     pub(crate) fn line_at_row(&self, row: usize) -> LineIndex {
-        self.rows.line_at_row(row)
+        self.viewport.line_at_row(row)
     }
 
     fn move_line_boundary(&mut self, end: bool, extend: bool, cx: &mut Context<Self>) {
@@ -134,33 +136,9 @@ impl Editor {
     }
 
     pub(crate) fn scroll_to_caret(&mut self) {
-        let Some(geometry) = self.geometry else {
-            return;
-        };
-        let (_, row) = self.row_of_offset(self.selection.head);
-        let visible = geometry.visible_rows();
-        let first = self.scroll_row.floor().max(0.0) as usize;
-        if row < first {
-            self.scroll_row = row as f32;
-        } else if row >= first + visible {
-            self.scroll_row = (row + 1).saturating_sub(visible) as f32;
-        }
-        self.clamp_scroll();
-
-        if self.rows_columns.is_none() {
-            let column = self.caret_column(self.selection.head);
-            let caret_x = px(column as f32 * f32::from(geometry.char_width));
-            let width = geometry.bounds.size.width - geometry.padding() * 2.0;
-            if caret_x - self.scroll_x > width {
-                self.scroll_x = caret_x - width;
-            }
-            if caret_x < self.scroll_x {
-                self.scroll_x = caret_x;
-            }
-            self.scroll_x = self.scroll_x.max(px(0.));
-        } else {
-            self.scroll_x = px(0.);
-        }
+        let head = self.selection.head;
+        self.viewport
+            .scroll_to_caret(&self.document, self.settings.tab_stop, head);
     }
 
     pub(crate) fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {

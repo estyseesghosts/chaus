@@ -5,6 +5,16 @@ use gpui::{point, px, Bounds, Pixels, Point};
 /// Inset between the element bounds and the text area, in logical pixels.
 pub(crate) const PADDING: f32 = 8.0;
 
+/// Preferred floating find-bar width for a window of `available_width`.
+///
+/// The bar keeps a 10px inset on both sides and never grows past 470 logical
+/// pixels, so the 420px minimum window always leaves usable fields. This is
+/// Chaus editor UI geometry; generic text layout does not own it.
+#[must_use]
+pub fn find_bar_width(available_width: f32) -> f32 {
+    (available_width - 20.0).clamp(0.0, 470.0)
+}
+
 /// Where the text area is on screen, in logical pixels.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug)]

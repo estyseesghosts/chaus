@@ -95,9 +95,7 @@ impl Editor {
     /// Clear a watcher warning only if it is still the visible status. A save
     /// or another action may have replaced it, and that message must survive.
     fn clear_watch_warning(&mut self, message: &str, cx: &mut Context<Self>) {
-        if self.status.as_deref() == Some(message) {
-            self.status = None;
-            self.status_epoch = self.status_epoch.wrapping_add(1);
+        if self.status.clear_message(message) {
             cx.notify();
         }
     }
@@ -109,13 +107,10 @@ impl Editor {
             loop {
                 cx.background_executor().timer(WATCH_INTERVAL).await;
                 let snapshot = editor.update(cx, |editor, _| {
-                    if editor.file_operation_active() || editor.disk_check_in_flight {
+                    if editor.file.operation_active() || editor.file.check_in_flight() {
                         return None;
                     }
-                    editor
-                        .file
-                        .as_ref()
-                        .map(|file| (file.meta.clone(), editor.disk_epoch))
+                    editor.file.watch_snapshot()
                 });
                 // The entity is gone: stop the timer instead of looping forever
                 // against a closed window.
@@ -131,7 +126,7 @@ impl Editor {
                 let force_hash = ticks.is_multiple_of(FORCED_HASH_TICKS);
                 if editor
                     .update(cx, |editor, _| {
-                        editor.disk_check_in_flight = true;
+                        editor.file.begin_check();
                     })
                     .is_err()
                 {
@@ -152,8 +147,11 @@ impl Editor {
                     // the in-flight flag it set. Clearing only in
                     // `apply_disk_check` would wedge the watcher forever after
                     // a save or reload changed the epoch.
-                    if editor.disk_epoch != epoch {
-                        editor.disk_check_in_flight = false;
+                    if !editor.file.owns_epoch(epoch) {
+                        // The flag belongs to this check even when the epoch
+                        // moved; clearing it in `apply_disk_check` would wedge
+                        // the watcher after a save or reload.
+                        editor.file.end_check();
                         return;
                     }
                     match error_state.observe(&result) {
@@ -177,17 +175,12 @@ impl Editor {
     /// watcher and by deterministic tests. Always hashes, so it is also the
     /// path that catches same-size edits hidden by coarse timestamps.
     pub fn check_disk_now(&mut self, cx: &mut Context<Self>) {
-        let Some((meta, epoch)) = self
-            .file
-            .as_ref()
-            .map(|file| (file.meta.clone(), self.disk_epoch))
-        else {
+        let Some((meta, epoch)) = self.file.watch_snapshot() else {
             return;
         };
-        if self.disk_check_in_flight {
+        if !self.file.begin_check() {
             return;
         }
-        self.disk_check_in_flight = true;
         let task = cx.background_executor().spawn(async move {
             wait_for_disk_check_gate();
             chaus_io::check_conflict(&meta)
@@ -209,19 +202,18 @@ impl Editor {
         result: Result<(), ConflictCheckError>,
         cx: &mut Context<Self>,
     ) {
-        self.disk_check_in_flight = false;
-        if epoch != self.disk_epoch {
+        self.file.end_check();
+        if !self.file.owns_epoch(epoch) {
             return;
         }
         match result {
             Ok(()) => {
-                if self.disk_change.take().is_some() {
+                if self.file.take_change().is_some() {
                     cx.notify();
                 }
             }
             Err(ConflictCheckError::Conflict(conflict)) => {
-                if self.disk_change != Some(conflict) {
-                    self.disk_change = Some(conflict);
+                if self.file.record_change(conflict) {
                     self.set_status(format!("{conflict}"));
                     cx.notify();
                 }
@@ -233,16 +225,16 @@ impl Editor {
     }
 
     fn review_disk_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(conflict) = self.disk_change {
+        if let Some(conflict) = self.file.change() {
             // Reviewing the watcher banner is a fresh decision, not the
             // continuation of a save that was trying to close.
-            self.pending_close_after = None;
+            self.file.set_close_intent(None);
             self.show_conflict_prompt(conflict, window, cx);
         }
     }
 
     pub(crate) fn render_disk_banner(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(conflict) = self.disk_change else {
+        let Some(conflict) = self.file.change() else {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();

@@ -7,6 +7,7 @@
 //! opens from a right-click in the titlebar band.
 
 use chaus_core::settings::WrapMode;
+use chaus_format::Formatter;
 use chaus_highlight::LanguageId;
 use gpui::{point, px, App, AppContext as _, Context, Entity, WeakEntity, Window};
 use silvestris::command::CommandRegistry;
@@ -136,7 +137,7 @@ impl Editor {
     /// Register the commands this editor owns. App-owned commands (New, Open,
     /// Preferences) are registered by `chaus-app` on the same registry.
     pub(crate) fn register_editor_commands(&self, weak: WeakEntity<Self>, cx: &mut Context<Self>) {
-        let commands = self.commands.clone();
+        let commands = self.menu.commands().clone();
 
         let editor = weak.clone();
         register_command(
@@ -339,13 +340,13 @@ impl Editor {
 
     /// Create the popup menu on first render, when a window is available.
     pub(crate) fn ensure_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.menu.is_some() {
+        if self.menu.has_popup() {
             return;
         }
         let model = MenuKind::Root.model();
-        let registry = self.commands.clone();
+        let registry = self.menu.commands().clone();
         let menu = cx.new(|cx| PopupMenu::new(model, registry, window, cx));
-        self.menu = Some(menu);
+        self.menu.set_popup(menu);
     }
 
     pub(crate) fn open_menu(
@@ -356,7 +357,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.ensure_menu(window, cx);
-        let Some(menu) = self.menu.clone() else {
+        let Some(menu) = self.menu.popup() else {
             return;
         };
         menu.update(cx, |menu, cx| {
@@ -367,18 +368,19 @@ impl Editor {
 
     /// Publish per-window state so menu items are checked/disabled correctly.
     pub(crate) fn sync_command_state(&mut self, cx: &mut Context<Self>) {
-        let commands = self.commands.clone();
-        let vim = self.vim;
+        let commands = self.menu.commands().clone();
+        let vim = self.vim.enabled();
         let wrap = self.settings.wrap;
-        let language_override = self.language_override;
-        let current_language = self.language;
+        let language_override = self.highlight.language_is_override();
+        let current_language = self.highlight.language();
         let can_undo = self.document.can_undo();
         let can_redo = self.document.can_redo();
         let has_selection = !self.selection.is_empty();
-        let can_save = self.file.is_none() || self.document.is_dirty();
-        let can_format = self.file.as_ref().is_some_and(|file| {
-            chaus_io::format::Formatter::for_path(&file.meta.user_requested_path).is_some()
-        });
+        let can_save = !self.file.has_state() || self.document.is_dirty();
+        let can_format = self
+            .file
+            .path()
+            .is_some_and(|path| Formatter::for_path(path).is_some());
         commands.update(cx, |registry, cx| {
             let _ = registry.publish(
                 CommandDescriptor::toggle("view.vim_mode", "Vim Mode", vim)

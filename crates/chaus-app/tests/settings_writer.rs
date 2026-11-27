@@ -2,7 +2,7 @@
 
 use std::io;
 
-use chaus_app::settings_writer::WriteQueue;
+use chaus_app::settings_store::WriteQueue;
 use chaus_core::settings::Settings;
 
 fn settings(tab_stop: usize) -> Settings {

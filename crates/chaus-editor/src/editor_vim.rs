@@ -28,12 +28,12 @@ impl Editor {
     ) -> bool {
         // A new key-down starts a new platform message; whatever the previous
         // key suppressed can no longer arrive.
-        self.suppress_text_input = false;
-        if !self.vim
+        self.text_input.clear_suppression();
+        if !self.vim.enabled()
             || self.find_bar.is_some()
             || self.close_prompt
             || self.conflict_prompt.is_some()
-            || !self.recovery_queue.is_empty()
+            || self.recovery.is_open()
         {
             return false;
         }
@@ -53,21 +53,21 @@ impl Editor {
         let control_scroll = plain_control
             && matches!(keystroke.key.as_str(), "d" | "u")
             && matches!(
-                self.vim_engine.mode(),
+                self.vim.mode(),
                 Mode::Normal | Mode::VisualChar | Mode::VisualLine
             );
         let clipboard_shortcut = (modifiers.control || modifiers.platform)
             && !modifiers.shift
             && !modifiers.alt
             && matches!(keystroke.key.as_str(), "c" | "x" | "v");
-        if clipboard_shortcut && self.vim_engine.mode() == Mode::CommandLine {
+        if clipboard_shortcut && self.vim.mode() == Mode::CommandLine {
             // Paste goes into the open command line; it must stay open.
             return false;
         }
         if clipboard_shortcut {
             // Copy/cut/paste must still see the Visual selection, so cancel a
             // pending Vim prefix without collapsing it.
-            self.vim_engine.cancel_prefix();
+            self.vim.cancel_prefix();
             cx.notify();
             return false;
         }
@@ -83,7 +83,7 @@ impl Editor {
         let Some(mut key) = translate(keystroke, control_redo, control_scroll) else {
             return false;
         };
-        let mode = self.vim_engine.mode();
+        let mode = self.vim.mode();
         if matches!(mode, Mode::Normal | Mode::VisualChar | Mode::VisualLine) {
             key = match key {
                 VimKey::Enter => VimKey::Char('j'),
@@ -93,32 +93,35 @@ impl Editor {
         }
         let before = self.document.revision();
         let outcome = self
-            .vim_engine
+            .vim
             .handle_key(key, &mut self.document, &mut self.selection);
         let consumed = !matches!(outcome, Outcome::Unhandled);
         self.apply_vim_outcome(outcome, before, window, cx);
         self.arm_mapping_timeout(cx);
-        self.suppress_text_input = consumed;
+        if consumed {
+            self.text_input.suppress_next();
+        } else {
+            self.text_input.clear_suppression();
+        }
         consumed
     }
 
     fn arm_mapping_timeout(&mut self, cx: &mut Context<Self>) {
-        if !self.vim_engine.mapping_prefix_pending() {
+        if !self.vim.mapping_prefix_pending() {
             return;
         }
-        self.mapping_epoch = self.mapping_epoch.wrapping_add(1);
-        let epoch = self.mapping_epoch;
+        let epoch = self.vim.begin_mapping_timeout();
         cx.spawn(async move |editor, cx| {
             cx.background_executor().timer(MAPPING_TIMEOUT).await;
             editor
                 .update_in(cx, |editor, window, cx| {
-                    if editor.mapping_epoch != epoch || !editor.vim_engine.mapping_prefix_pending()
+                    if !editor.vim.is_current_timeout(epoch) || !editor.vim.mapping_prefix_pending()
                     {
                         return;
                     }
                     let before = editor.document.revision();
                     let outcome = editor
-                        .vim_engine
+                        .vim
                         .resolve_mapping_timeout(&mut editor.document, &mut editor.selection);
                     editor.apply_vim_outcome(outcome, before, window, cx);
                     cx.notify();
@@ -134,13 +137,13 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.vim {
+        if !self.vim.enabled() {
             return false;
         }
         let before = self.document.revision();
-        let outcome =
-            self.vim_engine
-                .handle_key(VimKey::Escape, &mut self.document, &mut self.selection);
+        let outcome = self
+            .vim
+            .handle_key(VimKey::Escape, &mut self.document, &mut self.selection);
         self.apply_vim_outcome(outcome, before, window, cx);
         true
     }
@@ -187,9 +190,9 @@ impl Editor {
 
     /// Drop a partially typed Vim command when focus leaves the editor.
     pub fn cancel_vim_prefix(&mut self, cx: &mut Context<Self>) {
-        if self.vim {
-            let was_visual = matches!(self.vim_engine.mode(), Mode::VisualChar | Mode::VisualLine);
-            self.vim_engine.cancel_prefix();
+        if self.vim.enabled() {
+            let was_visual = self.vim.visual_mode();
+            self.vim.cancel_prefix();
             if was_visual {
                 self.selection = Selection::caret(self.selection.head);
             }
@@ -200,11 +203,7 @@ impl Editor {
     /// Corner indicator text for the current modal state.
     #[must_use]
     pub fn vim_mode_label(&self) -> Option<&'static str> {
-        if self.vim {
-            Some(self.vim_engine.mode().label())
-        } else {
-            None
-        }
+        self.vim.mode_label()
     }
 }
 

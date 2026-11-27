@@ -28,7 +28,7 @@ impl Editor {
             2 => {
                 let range = self.word_bounds(offset);
                 self.selection = Selection::new(range.start, range.end);
-                self.selecting = false;
+                self.pointer.stop_selecting();
             }
             count if count >= 3 => {
                 let line = self.document.line_of(offset);
@@ -36,13 +36,10 @@ impl Editor {
                     self.document.line_start(line),
                     self.document.line_content_end(line),
                 );
-                self.selecting = false;
+                self.pointer.stop_selecting();
             }
             _ => {
-                self.selecting = true;
-                self.drag_generation = self.drag_generation.wrapping_add(1);
-                self.drag_pointer = Some(event.position);
-                self.drag_autoscroll_active = false;
+                self.pointer.begin_drag(event.position);
                 if event.modifiers.shift {
                     self.selection = Selection::new(self.selection.anchor, offset);
                 } else {
@@ -50,7 +47,7 @@ impl Editor {
                 }
             }
         }
-        self.preferred_column = None;
+        self.viewport.set_preferred_column(None);
         cx.notify();
     }
 
@@ -60,20 +57,21 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.selecting || !event.dragging() {
+        if !self.pointer.selecting() || !event.dragging() {
             return;
         }
-        self.drag_pointer = Some(event.position);
-        let Some(geometry) = self.geometry else {
+        self.pointer.set_pointer(event.position);
+        let Some(geometry) = self.viewport.geometry() else {
             return;
         };
         let outside = event.position.y < geometry.bounds.top() + geometry.padding()
             || event.position.y > geometry.bounds.bottom() - geometry.padding();
         if event.position.y < geometry.bounds.top() + geometry.padding() {
-            self.scroll_row = (self.scroll_row - 1.0).max(0.0);
+            self.viewport
+                .set_scroll_row((self.viewport.scroll_row() - 1.0).max(0.0));
             self.clamp_scroll();
         } else if event.position.y > geometry.bounds.bottom() - geometry.padding() {
-            self.scroll_row += 1.0;
+            self.viewport.advance_scroll_row(1.0);
             self.clamp_scroll();
         }
         if outside {
@@ -97,28 +95,23 @@ impl Editor {
     }
 
     fn start_drag_autoscroll(&mut self, cx: &mut Context<Self>) {
-        if self.drag_autoscroll_active {
+        let Some(generation) = self.pointer.begin_autoscroll() else {
             return;
-        }
-        self.drag_autoscroll_active = true;
-        let generation = self.drag_generation;
+        };
         cx.spawn(async move |editor, cx| loop {
             cx.background_executor().timer(AUTOSCROLL_INTERVAL).await;
             let keep = editor.update(cx, |editor, cx| {
-                if editor.drag_generation != generation {
-                    // A newer drag owns the autoscroll flag now.
+                if !editor.pointer.is_current_drag(generation) {
+                    // A newer drag or a released pointer owns the flag now.
+                    editor.pointer.end_autoscroll(generation);
                     return false;
                 }
-                if !editor.selecting {
-                    editor.drag_autoscroll_active = false;
-                    return false;
-                }
-                let Some(position) = editor.drag_pointer else {
-                    editor.drag_autoscroll_active = false;
+                let Some(position) = editor.pointer.pointer() else {
+                    editor.pointer.end_autoscroll(generation);
                     return false;
                 };
-                let Some(geometry) = editor.geometry else {
-                    editor.drag_autoscroll_active = false;
+                let Some(geometry) = editor.viewport.geometry() else {
+                    editor.pointer.end_autoscroll(generation);
                     return false;
                 };
                 let step = if position.y < geometry.bounds.top() + geometry.padding() {
@@ -126,10 +119,12 @@ impl Editor {
                 } else if position.y > geometry.bounds.bottom() - geometry.padding() {
                     1.0
                 } else {
-                    editor.drag_autoscroll_active = false;
+                    editor.pointer.end_autoscroll(generation);
                     return false;
                 };
-                editor.scroll_row = (editor.scroll_row + step).max(0.0);
+                editor
+                    .viewport
+                    .set_scroll_row((editor.viewport.scroll_row() + step).max(0.0));
                 editor.clamp_scroll();
                 let bounds = geometry.bounds;
                 let last_x = (bounds.right() - px(1.0)).max(bounds.left());
@@ -152,9 +147,7 @@ impl Editor {
     }
 
     pub(crate) fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.selecting = false;
-        self.drag_pointer = None;
-        self.drag_autoscroll_active = false;
+        self.pointer.end_drag();
         cx.notify();
     }
 
@@ -165,45 +158,48 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         let line_height = self
-            .geometry
+            .viewport
+            .geometry()
             .map(|geometry| f32::from(geometry.line_height))
             .unwrap_or(18.0);
         match event.delta {
             ScrollDelta::Lines(delta) => {
-                self.scroll_row -= delta.y;
-                self.scroll_x -= px(delta.x * 12.0);
+                self.viewport.advance_scroll_row(-delta.y);
+                self.viewport.advance_scroll_x(px(delta.x * 12.0));
             }
             ScrollDelta::Pixels(delta) => {
-                self.scroll_row -= f32::from(delta.y) / line_height.max(1.0);
-                self.scroll_x -= delta.x;
+                self.viewport
+                    .advance_scroll_row(-f32::from(delta.y) / line_height.max(1.0));
+                self.viewport.advance_scroll_x(delta.x);
             }
         }
-        if self.rows_columns.is_some() {
-            self.scroll_x = px(0.0);
+        if self.viewport.committed_columns().is_some() {
+            self.viewport.set_scroll_x(px(0.0));
         }
         self.clamp_scroll();
         cx.notify();
     }
 
     pub(crate) fn offset_for_point(&mut self, position: Point<Pixels>) -> Option<CharOffset> {
-        let geometry = self.geometry?;
+        let geometry = self.viewport.geometry()?;
         if !geometry.bounds.contains(&position) {
             return None;
         }
         let line_height = geometry.line_height;
         let row = (position.y - geometry.bounds.top() - geometry.padding()) / line_height
-            + self.scroll_row;
+            + self.viewport.scroll_row();
         let target_row = (row.max(0.0) as usize).min(self.total_rows().saturating_sub(1));
         let (line, span) = self.row_span(target_row);
-        let x = position.x - geometry.bounds.left() - geometry.padding() + self.scroll_x;
+        let x = position.x - geometry.bounds.left() - geometry.padding() + self.viewport.scroll_x();
         let local_columns =
             (f32::from(x) / f32::from(geometry.char_width).max(1.0)).max(0.0) as usize;
         // A wrapped row ends before the window edge. Without this clamp a
         // click in the blank area to the right resolves into a later visual
         // row of the same logical line.
-        let column = span
-            .start
-            .saturating_add(local_columns.min(span.end.saturating_sub(span.start)));
+        let column =
+            chaus_layout::VisualColumn::new(span.start.get().saturating_add(
+                local_columns.min(span.end.get().saturating_sub(span.start.get())),
+            ));
         Some(self.offset_at(line, column))
     }
 }

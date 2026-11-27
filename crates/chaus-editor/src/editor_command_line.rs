@@ -20,10 +20,10 @@ impl Editor {
         window: &Window,
         theme: &Theme,
     ) -> Option<Stateful<Div>> {
-        if !self.vim {
+        if !self.vim.enabled() {
             return None;
         }
-        let view = self.vim_engine.command_line()?;
+        let view = self.vim.command_line()?;
         let width = f32::from(window.viewport_size().width);
         // Approximate characters that fit in 75% of the window at 12px.
         let budget = ((width * 0.75) / 7.0).max(24.0) as usize;

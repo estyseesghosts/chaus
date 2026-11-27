@@ -66,7 +66,7 @@ impl Editor {
         if edits.is_empty() {
             let target = chaus_vim::first_non_space(&self.document, first);
             self.selection = Selection::caret(target);
-            self.preferred_column = None;
+            self.viewport.set_preferred_column(None);
             self.scroll_to_caret();
             cx.notify();
             return;
@@ -75,7 +75,7 @@ impl Editor {
         self.apply_whitespace_edits(edits, after, EditCause::Indent, cx);
         let target = chaus_vim::first_non_space(&self.document, first);
         self.selection = Selection::caret(target);
-        self.preferred_column = None;
+        self.viewport.set_preferred_column(None);
         self.scroll_to_caret();
     }
 

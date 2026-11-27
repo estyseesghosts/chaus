@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use chaus_io::format::{run, run_with_timeout, FormatError, Formatter};
+use chaus_format::{run, run_with_timeout, FormatError, Formatter};
 
 fn formatter(program: &str, arguments: &[&str]) -> Formatter {
     Formatter::new(

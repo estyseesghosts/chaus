@@ -25,7 +25,7 @@ impl Editor {
     /// Open the find bar, optionally with the replace row visible, and focus
     /// the search field.
     pub fn open_find(&mut self, show_replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.vim_engine.cancel_prefix();
+        self.vim.cancel_prefix();
         if self.find_bar.is_none() {
             let find = cx.new(|cx| {
                 let mut field = TextField::new(window, cx);
@@ -94,7 +94,7 @@ impl Editor {
         };
         let end = CharOffset(start.0 + needle.chars().count());
         self.selection = Selection::new(start, end);
-        self.preferred_column = None;
+        self.viewport.set_preferred_column(None);
         self.scroll_to_caret();
         let offset = self.describe_offset(start);
         self.flash_status(format!("Match at {offset}"), cx);
@@ -268,7 +268,7 @@ impl Editor {
         let Some(bar) = self.find_bar.as_ref() else {
             return div().into_any_element();
         };
-        let width = chaus_layout::find_bar_width(f32::from(window.bounds().size.width));
+        let width = crate::geometry::find_bar_width(f32::from(window.bounds().size.width));
         div()
             .id("chaus-find-bar")
             .debug_selector(|| "chaus-find-bar".to_string())

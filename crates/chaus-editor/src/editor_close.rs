@@ -40,13 +40,13 @@ impl Editor {
             return false;
         }
         if !self.document.is_dirty() {
-            self.pending_close_after = None;
+            self.file.set_close_intent(None);
             self.remove_recovery_snapshot(cx);
             return true;
         }
         self.close_prompt = true;
-        self.pending_close_after = None;
-        self.vim_engine.cancel_prefix();
+        self.file.set_close_intent(None);
+        self.vim.cancel_prefix();
         window.focus(&self.close_focus.save, cx);
         cx.notify();
         false
@@ -54,7 +54,7 @@ impl Editor {
 
     pub(crate) fn cancel_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_prompt = false;
-        self.pending_close_after = None;
+        self.file.set_close_intent(None);
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -63,22 +63,22 @@ impl Editor {
     /// window stays open and keyboard focus returns to a reachable button.
     pub(crate) fn restore_close_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_prompt = true;
-        self.vim_engine.cancel_prefix();
+        self.vim.cancel_prefix();
         window.focus(&self.close_focus.save, cx);
         cx.notify();
     }
 
     pub(crate) fn discard_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_prompt = false;
-        self.pending_close_after = None;
-        self.pending_open_close = None;
+        self.file.set_close_intent(None);
+        self.file.set_open_close_intent(None);
         self.remove_recovery_snapshot(cx);
         window.remove_window();
     }
 
     pub(crate) fn save_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_prompt = false;
-        let started = if self.file.is_some() {
+        let started = if self.file.has_state() {
             self.save_inner(CloseAfter::Sheet, cx)
         } else {
             self.save_as_inner(CloseAfter::Sheet, window, cx)

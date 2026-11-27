@@ -4,7 +4,7 @@ use std::sync::{mpsc, Mutex};
 
 use chaus_core::settings::Settings;
 use chaus_editor::Editor;
-use chaus_io::format::Formatter;
+use chaus_format::{set_format_gate_for_test, Formatter};
 use gpui::{
     AppContext as _, Context, Entity, Focusable as _, IntoElement, Keystroke, Render,
     TestAppContext, VisualTestContext, Window,
@@ -33,7 +33,7 @@ struct GateGuard;
 
 impl Drop for GateGuard {
     fn drop(&mut self) {
-        chaus_io::format::set_format_gate_for_test(None);
+        set_format_gate_for_test(None);
     }
 }
 
@@ -84,7 +84,7 @@ fn repeated_format_commands_do_not_stack_jobs() {
     let _test = TEST_LOCK.lock().expect("formatter lifecycle lock poisoned");
     let _guard = GateGuard;
     let (release, gate) = mpsc::channel();
-    chaus_io::format::set_format_gate_for_test(Some(gate));
+    set_format_gate_for_test(Some(gate));
     let (editor, mut cx, _directory) = open("one\ntwo\n");
     cx.update(|_, cx| {
         editor.update(cx, |editor, cx| {
@@ -115,7 +115,7 @@ fn an_edit_while_the_job_is_pending_discards_its_result() {
     let _test = TEST_LOCK.lock().expect("formatter lifecycle lock poisoned");
     let _guard = GateGuard;
     let (release, gate) = mpsc::channel();
-    chaus_io::format::set_format_gate_for_test(Some(gate));
+    set_format_gate_for_test(Some(gate));
     let (editor, mut cx, _directory) = open("one\ntwo\n");
     cx.update(|_, cx| {
         editor.update(cx, |editor, cx| {

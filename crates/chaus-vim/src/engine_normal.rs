@@ -4,7 +4,7 @@ use chaus_core::document::{Document, EditCause, EditTransaction, TextEdit};
 use chaus_core::position::{CharOffset, CharRange, LineIndex, Selection};
 
 use crate::command_line::CommandPrefix;
-use crate::engine::{Engine, LastChange, Outcome, Pending};
+use crate::engine::{merge_outcome, Engine, Outcome, Pending};
 use crate::ex_command::ExCommand;
 use crate::key::Key;
 use crate::mode::Mode;
@@ -30,7 +30,6 @@ impl Engine {
                 self.clear_pending();
                 if let Some(after) = document.redo() {
                     *selection = after;
-                    self.set_changed();
                     Outcome::Changed
                 } else {
                     Outcome::Handled
@@ -153,7 +152,6 @@ impl Engine {
                 self.clear_pending();
                 if let Some(after) = document.undo() {
                     *selection = after;
-                    self.set_changed();
                     Outcome::Changed
                 } else {
                     Outcome::Handled
@@ -186,9 +184,8 @@ impl Engine {
                 if let Some(motion) = Motion::from_key(character) {
                     self.move_motion(motion, document, selection)
                 } else {
-                    self.message(format!("unknown command '{character}'"));
                     self.reset_count();
-                    Outcome::Handled
+                    Outcome::Message(format!("unknown command '{character}'"))
                 }
             }
         }
@@ -216,8 +213,7 @@ impl Engine {
                 }
                 self.finish_pending_error(format!(
                     "expected a 'g' motion, not '{character}' after 'g'"
-                ));
-                Outcome::Handled
+                ))
             }
             Pending::G => self.pending_g(character, document, selection),
             Pending::Find {
@@ -239,10 +235,9 @@ impl Engine {
             Pending::Indent { outdent } => {
                 let expected = if outdent { '<' } else { '>' };
                 if character != expected {
-                    self.finish_pending_error(format!(
+                    return self.finish_pending_error(format!(
                         "expected '{expected}' after indentation prefix"
                     ));
-                    return Outcome::Handled;
                 }
                 self.indent_current_lines(outdent, document, selection)
             }
@@ -255,10 +250,7 @@ impl Engine {
                     self.clear_pending();
                     Outcome::Ex(ExCommand::Quit { force: true })
                 }
-                other => {
-                    self.finish_pending_error(format!("unknown Z command 'Z{other}'"));
-                    Outcome::Handled
-                }
+                other => self.finish_pending_error(format!("unknown Z command 'Z{other}'")),
             },
             Pending::Scroll => {
                 let command = match character {
@@ -272,10 +264,7 @@ impl Engine {
                         self.reset_count();
                         Outcome::Viewport(ViewportIntent::new(command, 1))
                     }
-                    None => {
-                        self.finish_pending_error(format!("unknown z command 'z{character}'"));
-                        Outcome::Handled
-                    }
+                    None => self.finish_pending_error(format!("unknown z command 'z{character}'")),
                 }
             }
         }
@@ -298,8 +287,7 @@ impl Engine {
         }
         self.finish_pending_error(format!(
             "expected 'g', 'e' or 'J' after 'g', not '{character}'"
-        ));
-        Outcome::Handled
+        ))
     }
 
     fn operator_pending_key(
@@ -334,8 +322,7 @@ impl Engine {
         }
         if matches!(character, ';' | ',') {
             let Some(state) = self.last_find() else {
-                self.finish_pending_error("no previous find to repeat");
-                return Outcome::Handled;
+                return self.finish_pending_error("no previous find to repeat");
             };
             let state = if character == ',' {
                 state.reversed()
@@ -358,13 +345,12 @@ impl Engine {
             let keys = vec![Key::Char(operator.key()), Key::Char(character)];
             return self.apply_operator_motion(operator, motion, document, selection, keys);
         }
-        self.finish_pending_error("operator needs a motion");
-        Outcome::Handled
+        self.finish_pending_error("operator needs a motion")
     }
 
-    fn finish_pending_error(&mut self, message: impl Into<String>) {
+    fn finish_pending_error(&mut self, message: impl Into<String>) -> Outcome {
         self.reset_count();
-        self.message(message);
+        Outcome::Message(message.into())
     }
 
     fn move_motion(
@@ -379,8 +365,7 @@ impl Engine {
         let Some(resolved) =
             motion::resolve(document, selection.head, motion, count, explicit_count)
         else {
-            self.message(motion_failure(motion));
-            return Outcome::Handled;
+            return Outcome::Message(motion_failure(motion));
         };
         *selection = Selection::caret(motion::clamp_normal(document, resolved.target));
         Outcome::Handled
@@ -398,8 +383,7 @@ impl Engine {
         let Some(resolved) =
             motion::resolve(document, selection.head, motion, count, explicit_count)
         else {
-            self.message(motion_failure(motion));
-            return Outcome::Handled;
+            return Outcome::Message(motion_failure(motion));
         };
         let anchor = self.visual_anchor().unwrap_or(selection.anchor);
         *selection = Selection::new(anchor, motion::clamp_normal(document, resolved.target));
@@ -419,8 +403,7 @@ impl Engine {
         let Some(resolved) =
             motion::resolve(document, selection.head, motion, count, explicit_count)
         else {
-            self.finish_pending_error(motion_failure(motion));
-            return Outcome::Handled;
+            return self.finish_pending_error(motion_failure(motion));
         };
         self.apply_operator(
             operator,
@@ -451,8 +434,7 @@ impl Engine {
         let Some(resolved) =
             motion::resolve(document, selection.head, motion, count, explicit_count)
         else {
-            self.finish_pending_error("operator needs a motion");
-            return Outcome::Handled;
+            return self.finish_pending_error("operator needs a motion");
         };
         let mut range = resolved.range;
         let head = selection.head;
@@ -509,8 +491,7 @@ impl Engine {
         selection: &mut Selection,
     ) -> Outcome {
         let Some(state) = self.last_find() else {
-            self.message("no previous find");
-            return Outcome::Handled;
+            return Outcome::Message("no previous find".to_owned());
         };
         let state = if reversed { state.reversed() } else { state };
         self.apply_find(state, None, document, selection)
@@ -557,10 +538,7 @@ impl Engine {
                 }
                 None => Outcome::Handled,
             },
-            None => {
-                self.finish_pending_error("no matching text object");
-                Outcome::Handled
-            }
+            None => self.finish_pending_error("no matching text object"),
         }
     }
 
@@ -658,7 +636,6 @@ impl Engine {
                 if operator == Operator::Yank {
                     Outcome::Handled
                 } else {
-                    self.set_changed();
                     Outcome::Changed
                 }
             }
@@ -666,8 +643,7 @@ impl Engine {
                 if operator == Operator::Change {
                     document.end_user_operation();
                 }
-                self.message("edit was rejected");
-                Outcome::Handled
+                Outcome::Message("edit was rejected".to_owned())
             }
         }
     }
@@ -732,13 +708,11 @@ impl Engine {
                 self.set_mode(Mode::Insert);
                 let command = if below { 'o' } else { 'O' };
                 self.begin_insert(caret, vec![Key::Char(command)], true, 1);
-                self.set_changed();
                 Outcome::Changed
             }
             Err(_) => {
                 document.end_user_operation();
-                self.message("could not open a line");
-                Outcome::Handled
+                Outcome::Message("could not open a line".to_owned())
             }
         }
     }
@@ -820,9 +794,8 @@ impl Engine {
         selection: &mut Selection,
     ) -> Outcome {
         if character == '\n' {
-            self.message("'r' cannot insert a line break");
             self.reset_count();
-            return Outcome::Handled;
+            return Outcome::Message("'r' cannot insert a line break".to_owned());
         }
         let count = self.count();
         let line = document.line_of(selection.head);
@@ -838,9 +811,8 @@ impl Engine {
             replaced += 1;
         }
         if replaced < count {
-            self.message("not enough characters on the line for 'r'");
             self.reset_count();
-            return Outcome::Handled;
+            return Outcome::Message("not enough characters on the line for 'r'".to_owned());
         }
         let range = CharRange::new(selection.head, end);
         if range.is_empty() {
@@ -858,7 +830,6 @@ impl Engine {
             Ok(_) => {
                 *selection = after;
                 self.record_change(keys, None);
-                self.set_changed();
                 Outcome::Changed
             }
             Err(_) => Outcome::Handled,
@@ -880,8 +851,7 @@ impl Engine {
         let last = (first.0 + lines - 1).min(document.len_lines().saturating_sub(1));
         if last == first.0 {
             self.reset_count();
-            self.message("no next line to join");
-            return Outcome::Handled;
+            return Outcome::Message("no next line to join".to_owned());
         }
         let start = document.line_content_end(first);
         let end = document.line_content_end(LineIndex(last));
@@ -932,13 +902,9 @@ impl Engine {
             Ok(_) => {
                 *selection = Selection::caret(motion::clamp_normal(document, caret));
                 self.record_change(keys, None);
-                self.set_changed();
                 Outcome::Changed
             }
-            Err(_) => {
-                self.message("could not join the lines");
-                Outcome::Handled
-            }
+            Err(_) => Outcome::Message("could not join the lines".to_owned()),
         }
     }
 
@@ -951,8 +917,7 @@ impl Engine {
         let count = self.count();
         self.reset_count();
         let Some((word, start)) = motion::word_near(document, selection.head) else {
-            self.message("no word under or next to the cursor");
-            return Outcome::Handled;
+            return Outcome::Message("no word under or next to the cursor".to_owned());
         };
         let forward = !reverse;
         self.set_last_search(Some((word.clone(), forward)));
@@ -972,10 +937,10 @@ impl Engine {
         match found {
             Some(offset) => {
                 *selection = Selection::caret(offset);
+                Outcome::Handled
             }
-            None => self.message(format!("pattern not found: {word}")),
+            None => Outcome::Message(format!("pattern not found: {word}")),
         }
-        Outcome::Handled
     }
 
     fn indent_current_lines(
@@ -1007,16 +972,16 @@ impl Engine {
         selection: &mut Selection,
     ) -> Outcome {
         let Some((needle, forward)) = self.last_search().cloned() else {
-            self.message("no previous search");
-            return Outcome::Handled;
+            return Outcome::Message("no previous search".to_owned());
         };
         let forward = if reverse { !forward } else { forward };
-        if let Some(offset) = motion::find_literal(document, selection.head, &needle, forward) {
-            *selection = Selection::caret(offset);
-        } else {
-            self.message(format!("pattern not found: {needle}"));
+        match motion::find_literal(document, selection.head, &needle, forward) {
+            Some(offset) => {
+                *selection = Selection::caret(offset);
+                Outcome::Handled
+            }
+            None => Outcome::Message(format!("pattern not found: {needle}")),
         }
-        Outcome::Handled
     }
 
     fn repeat_last_change(
@@ -1025,14 +990,13 @@ impl Engine {
         selection: &mut Selection,
     ) -> Outcome {
         let Some(change) = self.last_change().cloned() else {
-            self.message("nothing to repeat");
-            return Outcome::Handled;
+            return Outcome::Message("nothing to repeat".to_owned());
         };
         // Vim replaces the original count when `.` has a count of its own;
         // strip any recorded digits and prepend the requested count.
         let override_count = (self.count > 0).then(|| self.count());
         self.reset_count();
-        let LastChange { keys, inserted } = change;
+        let (keys, inserted) = change.into_parts();
         let keys = if let Some(count) = override_count {
             with_count_override(keys, count)
         } else {
@@ -1042,12 +1006,10 @@ impl Engine {
         let mut result = Outcome::Handled;
         for key in keys {
             let outcome = self.dispatch_direct(key, document, selection);
-            if matches!(outcome, Outcome::Message(_)) {
-                result = outcome;
+            let rejected = matches!(outcome, Outcome::Message(_));
+            result = merge_outcome(result, outcome);
+            if rejected {
                 break;
-            }
-            if !matches!(outcome, Outcome::Handled) {
-                result = outcome;
             }
         }
         if self.mode() == Mode::Insert {
@@ -1062,7 +1024,7 @@ impl Engine {
                 );
                 if document.apply(transaction).is_ok() {
                     *selection = Selection::caret(caret);
-                    self.set_changed();
+                    result = merge_outcome(result, Outcome::Changed);
                 }
             }
             self.finish_insert(document, selection);
@@ -1124,9 +1086,8 @@ impl Engine {
         after: bool,
     ) -> Outcome {
         if self.register().is_empty() {
-            self.message("register is empty");
             self.reset_count();
-            return Outcome::Handled;
+            return Outcome::Message("register is empty".to_owned());
         }
         let keys = self.counted_keys(vec![Key::Char(if after { 'p' } else { 'P' })]);
         let text = self.register().text().repeat(self.count());
@@ -1175,7 +1136,6 @@ impl Engine {
             Ok(_) => {
                 *selection = Selection::caret(motion::clamp_normal(document, caret));
                 self.record_change(keys, None);
-                self.set_changed();
                 Outcome::Changed
             }
             Err(_) => Outcome::Handled,

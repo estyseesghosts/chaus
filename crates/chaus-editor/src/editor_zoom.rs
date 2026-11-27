@@ -41,7 +41,7 @@ impl Editor {
 
     /// Return this window to the configured editor font size.
     pub fn reset_zoom(&mut self, cx: &mut Context<Self>) {
-        self.zoom = None;
+        self.viewport.set_zoom(None);
         self.after_zoom(cx);
         self.flash_status(
             format!("Editor font {:.0}px (default)", self.editor_font_size()),
@@ -50,7 +50,7 @@ impl Editor {
     }
 
     fn apply_zoom(&mut self, size: f32, cx: &mut Context<Self>) {
-        self.zoom = Some(size.clamp(MIN_ZOOM, MAX_ZOOM));
+        self.viewport.set_zoom(Some(size.clamp(MIN_ZOOM, MAX_ZOOM)));
         self.after_zoom(cx);
         self.flash_status(format!("Editor font {:.0}px", self.editor_font_size()), cx);
     }
@@ -62,7 +62,7 @@ impl Editor {
         self.rebuild_rows();
         self.clamp_scroll();
         self.scroll_to_caret();
-        self.caret_visible = true;
+        self.show_caret();
         cx.notify();
     }
 }

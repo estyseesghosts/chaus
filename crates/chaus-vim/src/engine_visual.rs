@@ -115,8 +115,7 @@ impl Engine {
                 if let Some(motion) = Motion::from_key(character) {
                     self.move_visual_motion(motion, document, selection)
                 } else {
-                    self.message(format!("visual command '{character}' is not implemented"));
-                    Outcome::Handled
+                    Outcome::Message(format!("visual command '{character}' is not implemented"))
                 }
             }
         }
@@ -129,8 +128,7 @@ impl Engine {
         selection: &mut Selection,
     ) -> Outcome {
         let Some(state) = self.last_find() else {
-            self.message("no previous find");
-            return Outcome::Handled;
+            return Outcome::Message("no previous find".to_owned());
         };
         let state = if reversed { state.reversed() } else { state };
         self.set_last_find(Some(state));

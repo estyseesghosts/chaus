@@ -1,10 +1,11 @@
 //! Explicit, opt-in external formatters.
 //!
-//! Chaus never installs formatters, never runs them through a shell and never
-//! formats on save. A formatter receives the document on stdin and returns the
-//! replacement text on stdout with bounded time and output. The caller applies
-//! the result through the document transaction API, so a format is one undo
-//! step and is discarded if the document changed while it ran.
+//! This crate is an external-process execution capability. It is std-only and
+//! knows nothing about `Document`, GPUI or editor state: callers supply text and
+//! apply the returned text through their own transaction API. Chaus never
+//! installs formatters, never runs them through a shell and never formats on
+//! save. A formatter receives the text on stdin and returns the replacement on
+//! stdout with bounded time and output.
 
 use std::io::{Read, Write};
 use std::path::Path;

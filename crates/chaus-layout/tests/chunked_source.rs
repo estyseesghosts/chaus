@@ -1,8 +1,8 @@
 //! Oracle parity between contiguous text and Ropey-backed windowed input.
 
 use chaus_layout::{
-    build_checkpoints, char_at_column, char_at_column_source, column_at, column_at_source,
-    display_boundaries, display_boundaries_source, row_count_source, row_of_char,
+    build_checkpoints, build_column_checkpoints, char_at_column, char_at_column_source, column_at,
+    column_at_source, display_boundaries, display_boundaries_source, row_count_source, row_of_char,
     row_of_char_source, segments_window, segments_window_source, LineCharOffset, LineSource,
     VisualColumn, WrapPolicy, WrapRowIndex,
 };
@@ -115,12 +115,8 @@ fn chunk_boundaries_do_not_split_graphemes_or_line_breaks() {
     let end = segments.last().expect("the line has rows").char_end.get();
     assert_eq!(end, text.chars().count(), "every source char is covered");
 
-    let boundaries = display_boundaries_source(
-        &source,
-        segments.first().expect("first segment"),
-        4,
-        VisualColumn::new(0),
-    );
+    let boundaries =
+        display_boundaries_source(&source, segments.first().expect("first segment"), 4);
     let direct = display_boundaries(text, &segments[0], 4);
     assert_eq!(boundaries.len(), direct.len());
     for (left, right) in boundaries.iter().zip(direct.iter()) {
@@ -135,6 +131,7 @@ fn caret_lookup_and_column_mapping_match_the_contiguous_oracle() {
         let rope = chunked(text);
         let source = LineSource::from_rope(rope.slice(..));
         let checkpoints = build_checkpoints(&source, Some(4), 4, WrapPolicy::Character, 3);
+        let columns = build_column_checkpoints(&source, 4, 512);
         let count = text.chars().count();
         for offset in 0..=count {
             let expected_row = row_of_char(text, Some(4), 4, WrapPolicy::Character, offset);
@@ -152,7 +149,7 @@ fn caret_lookup_and_column_mapping_match_the_contiguous_oracle() {
                 "row of char {offset} in {text:?}"
             );
             let expected_column = column_at(text, offset, 4);
-            let actual = column_at_source(&source, LineCharOffset::new(offset), 4, &checkpoints);
+            let actual = column_at_source(&source, LineCharOffset::new(offset), 4, &columns);
             assert_eq!(
                 actual.get(),
                 expected_column.get(),
@@ -161,7 +158,7 @@ fn caret_lookup_and_column_mapping_match_the_contiguous_oracle() {
         }
         for column in 0..=8 {
             let expected = char_at_column(text, column, 4);
-            let actual = char_at_column_source(&source, VisualColumn::new(column), 4, &checkpoints);
+            let actual = char_at_column_source(&source, VisualColumn::new(column), 4, &columns);
             assert_eq!(
                 actual.get(),
                 expected.get(),

@@ -6,16 +6,14 @@ use std::time::Duration;
 
 use chaus_core::position::{CharOffset, Selection};
 use chaus_io::{FileMeta, LoadedFile, SaveError};
-use gpui::{px, Context, Window};
+use gpui::{Context, Window};
 use silvestris::file_panel::{ExtensionPolicy, PanelOutcome, SaveDisposition, SavePanel};
 use silvestris::modal::ModalResult;
 
 use crate::editor::Editor;
 use crate::editor_keys::{Save, SaveAs};
 use crate::file_dialogs::FileDialogs;
-use crate::file_operation::{
-    CloseAfter, FileOperation, FileRequest, FileRequestId, SaveTarget, WriteAssociation,
-};
+use crate::file_operation::{CloseAfter, FileRequest, SaveTarget, WriteAssociation};
 
 /// Map the panel's result onto the save state machine. The panel never writes;
 /// only an accepted target with a host path proceeds.
@@ -90,34 +88,28 @@ impl Editor {
     /// Rejecting a second request is what keeps a re-entrant picker or a late
     /// completion from retargeting a live document.
     fn begin_request(&mut self, cx: &mut Context<Self>) -> Option<FileRequest> {
-        if !self.file_operation.is_idle() {
+        let request = self.file.begin_request(self.document.state_token());
+        if request.is_none() {
             self.set_status("A file operation is already in progress");
             cx.notify();
-            return None;
         }
-        let request = FileRequest {
-            id: FileRequestId::next(&mut self.file_request_next),
-            document: self.document_generation,
-            state: self.document.state_token(),
-        };
-        Some(request)
+        request
     }
 
     fn owns_request(&self, request: FileRequest) -> bool {
-        self.file_operation.request() == Some(request)
+        self.file.owns_request(request)
     }
 
     /// Abandon an in-flight operation when the document underneath it is
     /// replaced outside the file session. Its completion must no longer settle.
     pub(crate) fn cancel_file_operation(&mut self) {
-        self.file_request_next = self.file_request_next.wrapping_add(1);
-        self.file_operation = FileOperation::Idle;
+        self.file.cancel_operation();
     }
 
     /// Whether an open, a picker or a write owns this editor's file session.
     #[must_use]
     pub(crate) fn file_operation_active(&self) -> bool {
-        !self.file_operation.is_idle()
+        self.file.operation_active()
     }
 
     /// Replace this window's document with a loaded file. Dirty documents are
@@ -133,14 +125,10 @@ impl Editor {
         }
         let requested = path.to_path_buf();
         let load_path = requested.clone();
-        self.file_operation = FileOperation::Opening {
-            request,
-            path: requested.clone(),
-            force,
-        };
+        self.file.begin_open(request, requested.clone(), force);
         self.set_status(format!("Opening {}...", requested.display()));
         cx.notify();
-        let load_hook = self.load_hook;
+        let load_hook = self.file.load_hook();
         let task = cx.background_executor().spawn(async move {
             match load_hook {
                 Some(hook) => hook(&load_path),
@@ -166,19 +154,18 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.owns_request(request) || self.document_generation != request.document {
+        if !self.owns_request(request) || !self.file.owns_document(request.document) {
             return;
         }
-        let (force, opened_path) = match &self.file_operation {
-            FileOperation::Opening { force, path, .. } => (*force, path.clone()),
-            _ => return,
+        let Some((force, opened_path)) = self.file.opening_details() else {
+            return;
         };
-        self.file_operation = FileOperation::Idle;
+        self.file.settle();
         // A forced reload skips the dirty precondition at start time, but it
         // must not overwrite edits made while the load was in flight.
         if self.document.state_token() != request.state || (!force && self.document.is_dirty()) {
             self.set_status("Open cancelled: the document changed while loading");
-            if let Some(close_after) = self.pending_open_close.take() {
+            if let Some(close_after) = self.file.take_open_close_intent() {
                 self.close_not_started(close_after, window, cx);
             }
             cx.notify();
@@ -188,7 +175,7 @@ impl Editor {
             Ok(loaded) => {
                 // Capture the close intent before installing: installing a
                 // new document clears per-document transient state.
-                let close_after = self.pending_open_close.take();
+                let close_after = self.file.take_open_close_intent();
                 self.install_loaded(&opened_path, loaded, cx);
                 if let Some(close_after) = close_after {
                     if close_after.closes() && !self.document.is_dirty() {
@@ -200,7 +187,7 @@ impl Editor {
             }
             Err(error) => {
                 self.set_status(format!("Open failed: {error}"));
-                if let Some(close_after) = self.pending_open_close.take() {
+                if let Some(close_after) = self.file.take_open_close_intent() {
                     self.close_not_started(close_after, window, cx);
                 }
             }
@@ -258,29 +245,20 @@ impl Editor {
         self.remove_recovery_snapshot(cx);
         self.document.reset(text, eol, preferred_eol);
         self.cancel_format_job();
-        self.document_generation.bump();
-        self.file = file;
+        self.file.bump_generation();
+        self.file.reset_for_document(file);
         self.reset_highlight(cx);
         self.selection = Selection::caret(CharOffset::ZERO);
-        self.preferred_column = None;
-        self.scroll_row = 0.0;
-        self.scroll_x = px(0.);
-        self.marked = None;
-        self.preedit_start = None;
-        self.preedit_active = false;
-        self.force_next_save = false;
-        self.disk_change = None;
-        self.pending_close_after = None;
-        self.pending_open_close = None;
-        self.disk_epoch = self.disk_epoch.wrapping_add(1);
+        self.viewport.reset_scroll();
+        self.text_input.clear_composition();
         self.reset_recovery_key();
         self.document.cancel_user_operation();
-        self.vim_engine.reset();
+        self.vim.reset();
         self.rebuild_rows();
     }
 
     pub(crate) fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
-        if self.file.is_none() {
+        if !self.file.has_state() {
             self.save_as(&SaveAs, window, cx);
             return;
         }
@@ -295,13 +273,8 @@ impl Editor {
     /// live `file`, but retains these fields so Save As still suggests the
     /// original path and preserves a UTF-8 BOM.
     fn save_as_source(&self) -> (Option<PathBuf>, bool) {
-        let file = self.file.as_ref();
-        (
-            file.map(|file| file.meta.user_requested_path.clone())
-                .or_else(|| self.recovery_original_path.clone()),
-            file.map(|file| file.meta.had_utf8_bom)
-                .unwrap_or(self.recovery_had_utf8_bom),
-        )
+        let (path, bom) = self.recovery.metadata();
+        self.file.save_as_source(path, bom)
     }
 
     /// Save As suggestion, for a deterministic recovered-document test.
@@ -325,13 +298,10 @@ impl Editor {
         };
         // Choosing a new target abandons a pending conflict overwrite; a
         // cancelled picker must not leave the old force armed either.
-        self.force_next_save = false;
+        self.file.clear_force();
         let (suggested, had_utf8_bom) = self.save_as_source();
-        self.file_operation = FileOperation::ChoosingSaveTarget {
-            request,
-            close_after,
-            had_utf8_bom,
-        };
+        self.file
+            .begin_save_selection(request, close_after, had_utf8_bom);
         self.set_status("Save As...");
         cx.notify();
 
@@ -391,25 +361,20 @@ impl Editor {
         if !self.owns_request(request) {
             return;
         }
-        let (close_after, had_utf8_bom) = match &self.file_operation {
-            FileOperation::ChoosingSaveTarget {
-                close_after,
-                had_utf8_bom,
-                ..
-            } => (*close_after, *had_utf8_bom),
-            _ => return,
+        let Some((close_after, had_utf8_bom)) = self.file.save_selection_details() else {
+            return;
         };
         let (path, disposition) = match outcome {
             Ok(selection) => selection,
             Err(Some(error)) => {
-                self.file_operation = FileOperation::Idle;
+                self.file.settle();
                 self.set_status(format!("Save As failed: {error}"));
                 self.close_not_started(close_after, window, cx);
                 cx.notify();
                 return;
             }
             Err(None) => {
-                self.file_operation = FileOperation::Idle;
+                self.file.settle();
                 self.set_status("Save cancelled");
                 self.close_not_started(close_after, window, cx);
                 cx.notify();
@@ -463,12 +428,9 @@ impl Editor {
             return false;
         };
         let target = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
-        let had_utf8_bom = self
-            .file
-            .as_ref()
-            .map(|file| file.meta.had_utf8_bom)
-            .unwrap_or(self.recovery_had_utf8_bom);
-        self.force_next_save = false;
+        let (_, recovery_bom) = self.recovery.metadata();
+        let had_utf8_bom = self.file.bom(recovery_bom);
+        self.file.clear_force();
         self.start_save(
             request,
             SaveTarget {
@@ -496,19 +458,23 @@ impl Editor {
         let Some(request) = self.begin_request(cx) else {
             return false;
         };
-        let Some(file) = self.file.as_ref() else {
+        let Some(file) = self.file.state() else {
             self.set_status("Untitled document: use Save As");
             cx.notify();
             return false;
         };
-        let force = std::mem::take(&mut self.force_next_save);
-        let baseline = (!force).then(|| file.meta.clone());
+        let target = file.meta.canonical_target.clone();
+        let requested = file.meta.user_requested_path.clone();
+        let had_utf8_bom = file.meta.had_utf8_bom;
+        let baseline_meta = file.meta.clone();
+        let force = self.file.take_force();
+        let baseline = (!force).then_some(baseline_meta);
         self.start_save(
             request,
             SaveTarget {
-                target: file.meta.canonical_target.clone(),
-                requested: file.meta.user_requested_path.clone(),
-                had_utf8_bom: file.meta.had_utf8_bom,
+                target,
+                requested,
+                had_utf8_bom,
                 baseline,
                 close_after,
                 association: WriteAssociation::Associate,
@@ -530,7 +496,7 @@ impl Editor {
     ) -> bool {
         let snapshot = self.document.snapshot();
         let preferred_eol = self.document.preferred_eol();
-        self.file_operation = FileOperation::Saving { request };
+        self.file.begin_save(request);
         self.set_status("Saving...");
         cx.notify();
 
@@ -588,24 +554,22 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.owns_request(request) || self.document_generation != request.document {
+        if !self.owns_request(request) || !self.file.owns_document(request.document) {
             return;
         }
-        self.file_operation = FileOperation::Idle;
+        self.file.settle();
         match result {
             Ok(meta) => {
                 self.finish_recovery_after_save(cx);
-                self.file = Some(FileState { meta });
-                self.recovery_original_path = None;
-                self.recovery_had_utf8_bom = false;
-                self.pending_close_after = None;
+                self.file.set_state(Some(FileState { meta }));
+                self.file.set_close_intent(None);
                 self.refresh_language(cx);
-                self.force_next_save = false;
+                self.file.clear_force();
                 self.conflict_prompt = None;
-                self.disk_change = None;
-                self.disk_epoch = self.disk_epoch.wrapping_add(1);
+                self.file.set_change(None);
+                self.file.bump_epoch();
                 self.document.mark_saved_at(request.state);
-                if self.wqa_active && self.document.is_dirty() {
+                if self.file.wqa_active() && self.document.is_dirty() {
                     self.note_wqa_failure("the document changed while its save was running");
                 }
                 // A save only covers the captured revision. If the person
@@ -634,13 +598,13 @@ impl Editor {
                 // later save must not see its own write as an external change.
                 // The document stays dirty and the recovery snapshot is kept
                 // because the rename may not survive a power loss.
-                self.pending_close_after = None;
+                self.file.set_close_intent(None);
                 self.finish_recovery_after_save(cx);
-                self.file = Some(FileState { meta: *meta });
-                self.force_next_save = false;
+                self.file.set_state(Some(FileState { meta: *meta }));
+                self.file.clear_force();
                 self.conflict_prompt = None;
-                self.disk_change = None;
-                self.disk_epoch = self.disk_epoch.wrapping_add(1);
+                self.file.set_change(None);
+                self.file.bump_epoch();
                 self.write_recovery_now(cx);
                 self.note_wqa_failure(format!("the folder could not be synced ({source})"));
                 self.set_status(format!(
@@ -650,11 +614,12 @@ impl Editor {
             }
             Err(SaveError::Conflict(conflict)) => {
                 self.note_wqa_failure(conflict.to_string());
-                self.disk_change = Some(conflict);
+                self.file.set_change(Some(conflict));
                 // Keep the reason this save was started. A close or `:wq`
                 // must still complete after the conflict is resolved instead
                 // of leaving the document open and the close sheet behind.
-                self.pending_close_after = close_after.closes().then_some(close_after);
+                self.file
+                    .set_close_intent(close_after.closes().then_some(close_after));
                 if close_after == CloseAfter::Sheet {
                     self.close_prompt = false;
                 }
@@ -664,7 +629,7 @@ impl Editor {
             Err(error) => {
                 self.note_wqa_failure(format!("save failed: {error}"));
                 self.set_status(format!("Save failed: {error}"));
-                self.pending_close_after = None;
+                self.file.set_close_intent(None);
                 self.close_not_started(close_after, window, cx);
             }
         }
@@ -680,10 +645,10 @@ impl Editor {
         result: Result<FileMeta, SaveError>,
         cx: &mut Context<Self>,
     ) {
-        if !self.owns_request(request) || self.document_generation != request.document {
+        if !self.owns_request(request) || !self.file.owns_document(request.document) {
             return;
         }
-        self.file_operation = FileOperation::Idle;
+        self.file.settle();
         match result {
             Ok(meta) => {
                 self.flash_status(format!("Wrote {}", meta.user_requested_path.display()), cx);

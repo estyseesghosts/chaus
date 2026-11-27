@@ -4,6 +4,10 @@
 
 Build a **new GPUI multiline editor view**. Do not use GPUI Kit, Zed's editor subsystem, or Silvestris's single-line `TextField` as the multiline model. Silvestris handles frame/menus/prefs; the app owns the editor. GPUI's [pinned `EntityInputHandler` trait](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui/src/input.rs), [input example](https://github.com/zed-industries/zed/blob/6b720973027999bae402df23d469026f4cced988/crates/gpui/examples/input.rs) and Silvestris's [text field](https://github.com/estyseesghosts/silvestris/blob/source-list-shell/crates/silvestris/src/controls/text_field.rs) are primary **reference implementations** for platform text services.
 
+The sketch below is the original design intent. The implemented ownership map
+after the cleanup pass is in [ownership-map.md](ownership-map.md); the
+`EditorState` name in particular is no longer a type in the tree.
+
 Recommended state:
 
 ```text

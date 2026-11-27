@@ -1,0 +1,8 @@
+[package]
+name = "chaus-format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+description = "Explicit, bounded external formatter execution for chaus."
